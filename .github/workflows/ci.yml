@@ -1,0 +1,23 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests (incl. end-to-end pipeline with a scripted model)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bubblewrap (sandbox tests)
+        run: |
+          sudo apt-get update -q && sudo apt-get install -yq bubblewrap
+          # Ubuntu 24.04 runners restrict unprivileged user namespaces, which bwrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run pytest -q -rs tests
