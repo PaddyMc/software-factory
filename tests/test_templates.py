@@ -18,11 +18,31 @@ def initialised(repo, monkeypatch, capsys):
     return repo
 
 
-def test_init_writes_config_and_role_prompts(initialised):
+def test_init_writes_config_role_prompts_and_skills(initialised):
     cfg = C.load(initialised)
     assert cfg.name == "repo" and cfg.e2e is None and cfg.session_log is None
     for name in ("planner", "builder", "reviewer", "verifier"):
         assert (initialised / f".factory/agents/{name}.md").is_file()
+    for skill in ("plan-workstream", "review-task"):
+        assert (initialised / f".claude/skills/{skill}/SKILL.md").is_file()
+
+
+def test_init_can_skip_skills(repo, monkeypatch):
+    (repo / ".factory/config.yaml").unlink()
+    monkeypatch.chdir(repo)
+    assert main(["init", "--no-skills"]) == 0
+    assert (repo / ".factory/config.yaml").is_file() and not (repo / ".claude").exists()
+
+
+@pytest.mark.parametrize("skill", ["plan-workstream", "review-task"])
+def test_skills_are_valid_and_generic(initialised, skill):
+    import yaml
+    text = (initialised / f".claude/skills/{skill}/SKILL.md").read_text()
+    front = yaml.safe_load(re.match(r"\A---\n(.*?)\n---\n", text, re.S).group(1))
+    assert front["name"] == skill and len(front["description"]) <= 1024 and "Explicit-invocation only" in front["description"]
+    assert "factory gates" in text or "factory validate-plan" in text
+    for specific in ("Cleartree", "did-spec", "crates/", "cargo", "NEXT.md", "tools/factory"):
+        assert specific not in text, specific
 
 
 def test_init_keeps_existing_files_unless_forced(initialised, capsys):

@@ -437,8 +437,12 @@ def cmd_abandon(a) -> int:
     return 0
 
 
+SKILLS = ("plan-workstream", "review-task")
+
+
 def cmd_init(a) -> int:
-    """Scaffold .factory/config.yaml and the four role prompts in the current repository."""
+    """Scaffold .factory/config.yaml, the four role prompts and (unless --no-skills) the workflow skills
+    (/plan-workstream, /review-task) under .claude/skills, where Claude Code and OpenCode find them."""
     from importlib import resources
 
     root = repo_root()
@@ -446,6 +450,8 @@ def cmd_init(a) -> int:
     files = {C.CONFIG_PATH: templates / "config.yaml"}
     files |= {f".factory/agents/{name}": templates / "agents" / name
               for name in ("planner.md", "builder.md", "reviewer.md", "verifier.md")}
+    if not a.no_skills:
+        files |= {f".claude/skills/{name}/SKILL.md": templates / "skills" / name / "SKILL.md" for name in SKILLS}
     for rel, src in files.items():
         dest = root / rel
         if dest.exists() and not a.force:
@@ -457,7 +463,7 @@ def cmd_init(a) -> int:
             text = text.replace("name: my-project", f"name: {root.name}", 1)
         dest.write_text(text)
         print(f"wrote  {rel}")
-    print("next: edit .factory/config.yaml, add task contracts under docs/plans/, then `factory validate-plan` "
+    print("next: edit .factory/config.yaml, write task contracts (/plan-workstream), then `factory validate-plan` "
           "and `factory sync`")
     return 0
 
@@ -500,8 +506,9 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="factory", description="plan -> build -> review -> verify -> PR, per task")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("init", help="scaffold .factory/config.yaml and the four role prompts here")
+    s = sub.add_parser("init", help="scaffold .factory/config.yaml, the role prompts and the workflow skills here")
     s.add_argument("--force", action="store_true", help="overwrite existing files")
+    s.add_argument("--no-skills", action="store_true", help="skip .claude/skills/{plan-workstream,review-task}")
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("config", help="print the effective project settings")

@@ -6,7 +6,7 @@ The factory is project-agnostic. Everything specific to a repository lives in th
 - `.factory/config.yaml`: where plans are, which tests every task must add, what runs as unit and e2e gates, and what the sandbox mounts;
 - `.factory/agents/*.md`: the role prompts and their models.
 
-`factory init` scaffolds both.
+`factory init` scaffolds both, and installs two workflow skills for Claude Code / OpenCode: `/plan-workstream`, which writes plans with task contracts, and `/review-task`, which reviews a task's PR.
 
 ---
 
@@ -17,11 +17,11 @@ The factory is project-agnostic. Everything specific to a repository lives in th
 uv tool install /path/to/software-factory        # or: alias factory='uv run --project /path/to/software-factory factory'
 
 cd your-repo
-factory init                      # writes .factory/config.yaml and .factory/agents/{planner,builder,reviewer,verifier}.md
+factory init                      # .factory/config.yaml, .factory/agents/*.md, .claude/skills/{plan-workstream,review-task}
 $EDITOR .factory/config.yaml      # plans location, e2e/session-log requirements, unit tests, sandbox
 factory config                    # the effective settings
 
-# write task contracts (see below) under docs/plans/, then:
+# write task contracts (see below; /plan-workstream in Claude Code does it with you), then:
 factory validate-plan
 export OPENROUTER_API_KEY=sk-or-...
 factory sync                      # load every task contract into the local db
@@ -303,7 +303,7 @@ A plan carries a fenced `yaml` list. Each item has **exactly** these 9 keys; sta
 - command selection;
 - placeholders.
 
-It also warns about contracts that can't hold a new e2e test when the project requires one, and `factory run` refuses those. Plans without a task block are not executable.
+It also warns about contracts that can't hold a new e2e test when the project requires one, and `factory run` refuses those. Plans without a task block are not executable. `/plan-workstream` writes plans in this shape (see [Skills](#skills)).
 
 ---
 
@@ -323,7 +323,22 @@ They run in the sandbox against the exact candidate commit, in this order. Gates
 | `unit_tests` *(configured)* | Every `unit_tests` command passes |
 | `e2e_tests` *(configured)* | The new e2e tests pass by name (`run_new`), or the whole suite (`run_all`) with `--full-e2e` or when `run_all_when` matches |
 
-A command that selects zero tests is **inconclusive, not a pass**. `factory gates <task> --ref <ref>` runs the same gates without agents, for reviewing hand-written work.
+A command that selects zero tests is **inconclusive, not a pass**. `factory gates <task> --ref <ref>` runs the same gates without agents, for reviewing hand-written work; `/review-task` builds on it.
+
+---
+
+## Skills
+
+`factory init` installs two agent skills into `.claude/skills/`. Claude Code loads them there, and OpenCode reads the same directory. Both are explicit-invocation only, and both read the project's `.factory/config.yaml`, so they carry no project specifics.
+
+| Skill | Use | What it does |
+|---|---|---|
+| [`/plan-workstream`](factory/templates/skills/plan-workstream/SKILL.md) | Before work starts | Grounds in the config, roadmap, plans and code; locks 2–4 strategic decisions with you; writes a plan whose contracts satisfy the configured gates; updates the roadmap; runs `factory validate-plan` |
+| [`/review-task TASK [REF]`](factory/templates/skills/review-task/SKILL.md) | Before you merge | Runs `factory gates` (cheap, then full) on the task's branch, applies the reviewer checklist from `.factory/agents/reviewer.md`, and reports APPROVE or REQUEST CHANGES. It never edits or merges |
+
+The factory's own agents (planner, builder, reviewer, verifier) are role prompts, not skills. `factory init` writes them to `.factory/agents/` from [`factory/templates/agents/`](factory/templates/agents/).
+
+Use `factory init --no-skills` to skip the skills. Existing files are kept unless you pass `--force`.
 
 ---
 
@@ -345,7 +360,7 @@ Agent `run` calls and gate commands execute under bubblewrap (`sandbox.py`):
 
 | Command | Purpose |
 |---|---|
-| `factory init [--force]` | Scaffold `.factory/config.yaml` and the four role prompts |
+| `factory init [--force] [--no-skills]` | Scaffold `.factory/config.yaml`, the four role prompts and the two skills |
 | `factory config` | Print the effective project settings |
 | `factory validate-plan [PLAN…]` | Check contracts |
 | `factory sync` | Load every contract from the plans into the db (statuses kept) |
@@ -422,7 +437,7 @@ uv run pytest -q tests
 
 - **`tests/test_pipeline.py`** drives the **real** CLI, LangGraph pipeline, LangChain agents and tools, git, bubblewrap, a bare `origin` and a fake `gh`. Only the model is replaced: `tests/fake_model.py` is a `ScriptedModel` that reads the system prompt to know which role it's playing.
 - **Other suites** cover:
-  - config, init and the shipped templates;
+  - config, init and the shipped templates and skills;
   - contracts, dependencies and paths;
   - gates (Rust and Python e2e detection, unconfigured gates);
   - the sandbox, tools and the database;
