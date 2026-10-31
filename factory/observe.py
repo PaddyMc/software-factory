@@ -13,7 +13,8 @@ from .db import ACTIVE, DB, pid_alive, seconds_since
 from .log import clip
 
 DONE = ("merged", "abandoned")
-GLYPHS = {"merged": "✓", "pr_open": "◆", "conflict": "≠", "failed": "✗", "abandoned": "⊘", "queued": "·"}   # running: ▶
+GLYPHS = {"merged": "✓", "pr_open": "◆", "conflict": "≠", "ci_failed": "!", "failed": "✗", "abandoned": "⊘",
+          "queued": "·"}   # running: ▶
 
 
 def fit(line: str, width: int) -> str:
@@ -60,13 +61,14 @@ def detail(db: DB, row) -> str:
         return ready + (f" · last run: {failing_summary(row['note'])}" if st == "failed" and row["note"] else "")
     if st == "pr_open":
         return (row["pr_url"] or "") + (f" · stacked on {row['stacked_on']}" if row["stacked_on"] else "")
-    if st == "conflict":
+    if st in ("conflict", "ci_failed"):
         return f"{row['pr_url'] or ''} · {failing_summary(row['note'])}"
     return failing_summary(row["note"])
 
 
 def strip(db: DB, rows) -> str:
-    """One glyph per task, in plan order: ✓ merged ◆ PR open ≠ PR conflicts ▶ running ✗ failed · queued ⊘ held."""
+    """One glyph per task, in plan order: ✓ merged ◆ PR open ≠ PR conflicts ! CI fails ▶ running ✗ failed
+    · queued ⊘ held."""
     return "".join("▶" if r["status"] in ACTIVE else GLYPHS.get(r["status"], "?") for r in rows)
 
 
@@ -75,9 +77,11 @@ def counts(db: DB, rows) -> str:
     c = Counter()
     for r in rows:
         st = r["status"]
-        c["running" if st in ACTIVE else "PR open" if st == "pr_open" else "held" if st == "abandoned"
-          else ("ready" if db.ready(r["id"]) else "waiting") if st == "queued" else st] += 1
-    rest = [f"{c[k]} {k}" for k in ("PR open", "conflict", "running", "failed", "ready", "waiting", "held") if c[k]]
+        c["running" if st in ACTIVE else "PR open" if st == "pr_open" else "CI failing" if st == "ci_failed"
+          else "held" if st == "abandoned" else ("ready" if db.ready(r["id"]) else "waiting") if st == "queued"
+          else st] += 1
+    rest = [f"{c[k]} {k}" for k in ("PR open", "conflict", "CI failing", "running", "failed", "ready", "waiting", "held")
+            if c[k]]
     return " · ".join([f"{c['merged']}/{len(rows)} merged"] + rest)
 
 
@@ -124,7 +128,7 @@ def render_top(db: DB, home: Path, width: int | None = None, events: int = 12, p
     width = width or shutil.get_terminal_size((160, 40)).columns
     rows = in_plan(db.tasks(), plan)
     by = lambda *sts: [r for r in rows if r["status"] in sts]
-    active, prs, failed = by(*ACTIVE), by("pr_open", "conflict"), by("failed")
+    active, prs, failed = by(*ACTIVE), by("pr_open", "conflict", "ci_failed"), by("failed")
     queued = by("queued")
     ready = [r for r in queued if db.ready(r["id"])]
     total_cost = sum(r["cost_usd"] or 0 for r in rows)
@@ -132,7 +136,7 @@ def render_top(db: DB, home: Path, width: int | None = None, events: int = 12, p
            f"{len(ready)} ready · {len(queued) - len(ready)} waiting · {len(by(*DONE))} done · "
            f"spent ${total_cost:.2f}", ""]
     groups = plan_groups(db, rows)
-    live = lambda rs: any(r["status"] in ACTIVE + ("pr_open", "conflict", "failed") for r in rs)
+    live = lambda rs: any(r["status"] in ACTIVE + ("pr_open", "conflict", "ci_failed", "failed") for r in rs)
     shown = [(n, rs) for n, rs in groups if plan or live(rs)]
     idle = [(n, rs) for n, rs in groups if not (plan or live(rs))]
     head = f"  {'TASK':<32} {'STATUS':<10} {'ELAPSED':>8} {'QUIET':>7} {'COST':>7}  PROGRESS / NOW"

@@ -51,6 +51,9 @@ Read the evidence before rerunning. A rerun costs money and usually fails the sa
 | Sibling PRs of one plan conflict (lockfiles, session logs) | Independent tasks ran in parallel from the same base | Merge one, `factory status --refresh` (the other becomes `conflict`), then `factory run PLAN` |
 | `conflict` resolution `failed` | The builder couldn't reconcile the change, or review or gates rejected the result. The PR still has its old head | `factory show TASK --role resolve`; run the task again to rebuild it from scratch |
 | A conflicting PR stays `pr_open` after refresh | GitHub hadn't computed `mergeable` yet (`UNKNOWN`) | Refresh again in a minute |
+| Status `ci_failed` | A check failed on the PR's head, which is the factory's candidate | `factory show TASK --role ci` for the checks and logs; `factory run TASK` fixes it. If the cause is the CI runner (a missing tool, for example), fix the workflow by hand instead |
+| `… not the factory's candidate: someone pushed to it` | A commit the factory didn't make is on the PR branch | Fix CI on that branch by hand, or `factory run TASK --force` to rebuild |
+| A CI fix `failed`, or the PR goes `ci_failed` again | The builder couldn't reproduce or fix it; the gates can't run CI's own checks, so CI on the new head decides | `factory show TASK --role build`; run the task again to rebuild it from scratch, or fix by hand |
 | PR edits don't apply | `gh pr edit` can fail on some repositories (a deprecated GraphQL field); the factory edits PRs through the REST API instead | By hand: `gh api -X PATCH repos/{owner}/{repo}/pulls/N -f body=…` (or `-f base=…`) |
 
 ## Git and the checkout

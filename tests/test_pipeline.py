@@ -533,3 +533,155 @@ def test_an_initialised_repo_runs_its_starter_plan_with_the_shipped_prompts(tmp_
     runs = {r["role"]: r for r in open_db(home).runs("example-t01")}
     assert {role for role, _ in plays["_calls"]} == {"PLANNER", "BUILDER", "REVIEWER", "VERIFIER"}
     assert runs["pr"]["outcome"] == "opened"
+
+
+FMT = {"__typename": "CheckRun", "workflowName": "factory", "name": "rust fmt", "status": "COMPLETED",
+       "conclusion": "FAILURE", "detailsUrl": "https://github.test/o/r/actions/runs/11/job/22"}
+FMT_LOG = ("2026-10-31T10:00:00.0000000Z assertion failed: the greeting is `hello, world`\n"
+           "2026-10-31T10:00:01.0000000Z ##[error]Process completed with exit code 101.")
+
+
+def _ci_says(fake_gh, branch, head, *checks, logs=None):
+    """GitHub's checks on the PR's head commit."""
+    state = json.loads(fake_gh.read_text())
+    state["prs"][branch].update(commits=[{"oid": "0" * 40}, {"oid": head}], statusCheckRollup=list(checks))
+    state.setdefault("logs", {}).update(logs or {})
+    fake_gh.write_text(json.dumps(state))
+
+
+def test_failing_ci_is_fixed_on_the_pr_branch_then_reviewed_and_gated(factory_repo, home, fake_gh, monkeypatch, capsys):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    row = open_db(home).task("demo-t01")
+    old, base = row["candidate_sha"], row["base_sha"]
+
+    # CI checks something the gates don't, and it fails on the PR's head.
+    _ci_says(fake_gh, "factory/demo-t01", old, FMT, logs={"22": FMT_LOG})
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    captured = capsys.readouterr()
+    assert "demo-t01: CI fails (factory / rust fmt) (`factory run demo-t01` fixes it)" in captured.err
+    assert "!" in captured.out and "1 CI failing" in captured.out
+    assert open_db(home).task("demo-t01")["status"] == "ci_failed"
+
+    plays = scripts(review_verdicts=["APPROVE"])
+    plays["BUILDER"] = [call("write_file", path="src/greet.txt", content="hello, world\n"),
+                        AIMessage("Fixed the greeting CI expects.\nRESULT: DONE")]
+    calls = _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    assert row["status"] == "pr_open" and row["pr_url"] == "https://github.test/pr/1" and row["base_sha"] == base
+    runs = [(r["role"], r["outcome"]) for r in db.runs("demo-t01")]
+    assert runs[runs.index(("pr", "opened")) + 1:] == [("ci", "failing"), ("build", "committed"), ("review", "APPROVE"),
+                                                       ("verify", "pass"), ("verify", "report"), ("pr", "opened")]
+    assert "PLANNER" not in {r for r, _ in calls}                      # the plan is reused, not redone
+    new = row["candidate_sha"]
+    assert git(factory_repo, "rev-parse", f"{new}^") == old             # built on the PR's head, not from scratch
+    assert git(factory_repo, "show", f"{new}:src/greet.txt") == "hello, world"
+    assert git(factory_repo, "show", f"{new}:crates/e2e/tests/greet.rs")  # the task's change is all still there
+    assert git(factory_repo, "ls-remote", "origin", "refs/heads/factory/demo-t01").split()[0] == new
+    assert "(fix CI, attempt 1)" in git(factory_repo, "log", "-1", "--format=%s", new)
+
+    sent = open([r for r in db.runs("demo-t01") if r["role"] == "build"][-1]["transcript"]).read()
+    assert "# Fix failing CI" in sent and "the greeting is `hello, world`" in sent and "# Plan" in sent
+    log = (home / "logs/demo-t01.log").read_text()
+    assert f"fixing CI (factory / rust fmt) on {old[:12]}" in log
+
+    gh = json.loads(fake_gh.read_text())
+    assert sum(c[:2] == ["pr", "create"] for c in gh["calls"]) == 1
+    assert "**CI fixed**: `factory / rust fmt` failed on the previous candidate" in gh["prs"]["factory/demo-t01"]["body"]
+    comment = [c for c in gh["calls"] if c[0] == "api" and c[1].endswith("/issues/1/comments")][-1]
+    assert f"CI failed on {old[:12]} (`factory / rust fmt`)" in comment[-1] and f"{old[:12]} → {new[:12]}" in comment[-1]
+
+    # CI runs again on the new head: the old failure no longer counts.
+    _ci_says(fake_gh, "factory/demo-t01", new, {**FMT, "status": "IN_PROGRESS", "conclusion": ""})
+    assert main(["status", "--refresh"]) == 0 and open_db(home).task("demo-t01")["status"] == "pr_open"
+
+
+def test_ci_is_judged_only_on_the_factorys_candidate(factory_repo, home, fake_gh, monkeypatch, capsys):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    sha = open_db(home).task("demo-t01")["candidate_sha"]
+
+    def refreshed():
+        assert main(["status", "--refresh"]) == 0
+        return open_db(home).task("demo-t01")["status"]
+
+    _ci_says(fake_gh, "factory/demo-t01", "f" * 40, FMT)                # someone else pushed to the branch
+    assert refreshed() == "pr_open"
+    _ci_says(fake_gh, "factory/demo-t01", sha, {**FMT, "conclusion": "CANCELLED"},
+             {**FMT, "name": "rust e2e", "status": "IN_PROGRESS", "conclusion": ""})
+    assert refreshed() == "pr_open"
+    _ci_says(fake_gh, "factory/demo-t01", sha, FMT)
+    assert refreshed() == "ci_failed"
+
+    # The job is re-run and passes (a flake): the run finds nothing to fix, and no agent starts.
+    _ci_says(fake_gh, "factory/demo-t01", sha, {**FMT, "conclusion": "SUCCESS"})
+    calls = _use_model(monkeypatch, scripts(review_verdicts=[]))
+    capsys.readouterr()
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    assert "CI no longer fails on https://github.test/pr/1; nothing to fix" in capsys.readouterr().out
+    assert calls == [] and open_db(home).task("demo-t01")["status"] == "pr_open"
+
+    _ci_says(fake_gh, "factory/demo-t01", sha, FMT)
+    assert refreshed() == "ci_failed"
+    _ci_says(fake_gh, "factory/demo-t01", sha, {**FMT, "conclusion": "SUCCESS"})
+    capsys.readouterr()
+    assert refreshed() == "pr_open" and "demo-t01: CI no longer fails" in capsys.readouterr().err
+
+    # Red again, then a human pushes a fix of their own: the PR is theirs to finish, and stays off the queue.
+    _ci_says(fake_gh, "factory/demo-t01", sha, FMT)
+    assert refreshed() == "ci_failed"
+    _ci_says(fake_gh, "factory/demo-t01", "e" * 40, FMT)
+    assert refreshed() == "pr_open" and "isn't the factory's candidate" in open_db(home).task("demo-t01")["note"]
+
+
+def test_failed_ci_fix_leaves_the_pr_alone(factory_repo, home, fake_gh, monkeypatch):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    old = open_db(home).task("demo-t01")["candidate_sha"]
+    _ci_says(fake_gh, "factory/demo-t01", old, FMT, logs={"22": FMT_LOG})
+    assert main(["status", "--refresh"]) == 0
+
+    plays = scripts(review_verdicts=["APPROVE"])
+    plays["BUILDER"] = [AIMessage("Could not reproduce it.\nRESULT: BLOCKED")]      # changes nothing
+    calls = _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, "--max-attempts", "1", *SANDBOX]) == 1
+    row = open_db(home).task("demo-t01")
+    assert row["status"] == "failed" and row["pr_url"] == "https://github.test/pr/1"
+    assert "produced no changes, so CI still fails" in row["note"]
+    assert f"The PR still holds {old[:12]}, whose CI fails (factory / rust fmt)" in row["note"]
+    assert "REVIEWER" not in {r for r, _ in calls}                     # nothing new to review
+    assert git(factory_repo, "ls-remote", "origin", "refs/heads/factory/demo-t01").split()[0] == old
+
+
+def test_ci_failure_of_a_stacked_pr_whose_dependency_merged_is_restacked_not_fixed(factory_repo, home, fake_gh,
+                                                                                  monkeypatch, capsys):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    plays = scripts(review_verdicts=["APPROVE"])
+    plays["BUILDER"] = [call("write_file", path="crates/e2e/tests/second.rs", content=SECOND),
+                        call("write_file", path="docs/sessions/2026-10-09.md",
+                             content="## [12:00] demo-t01\n## [12:05] demo-t02\n"),
+                        AIMessage("Second thing.\nRESULT: DONE")]
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t02", "--skip-gates", SKIP, *SANDBOX]) == 0
+    old = open_db(home).task("demo-t02")["candidate_sha"]
+    _ci_says(fake_gh, "factory/demo-t02", old, FMT)
+    assert main(["status", "--refresh"]) == 0
+    assert open_db(home).task("demo-t02")["status"] == "ci_failed"
+
+    # demo-t01 is squash-merged before anyone refreshes: CI must judge demo-t02 again on the trunk first.
+    git(factory_repo, "merge", "-q", "--squash", open_db(home).task("demo-t01")["candidate_sha"])
+    git(factory_repo, "commit", "-q", "-m", "demo-t01 (#1)")
+    git(factory_repo, "push", "-q", "origin", "main")
+    open_db(home).update("demo-t01", status="merged")
+    calls = _use_model(monkeypatch, scripts(review_verdicts=[]))
+    capsys.readouterr()
+    assert main(["run", "demo-t02", "--skip-gates", SKIP, *SANDBOX]) == 0
+    assert "demo-t02: rebased onto main, PR retargeted; nothing to fix until CI runs on the new head" in \
+        capsys.readouterr().out
+    row = open_db(home).task("demo-t02")
+    assert calls == [] and row["status"] == "pr_open" and row["base_ref"] == "main" and row["candidate_sha"] != old

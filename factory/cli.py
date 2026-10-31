@@ -161,10 +161,25 @@ def cmd_run_one(a) -> int:
     old_wt = home / "worktrees" / task.id
     if old_wt.exists() and not (row["status"] in ACTIVE and pid_alive(row["pid"])):
         git(root, "worktree", "remove", "--force", str(old_wt))      # a finished run's leftovers
-    resolution = None
+    resolution = ci_fix = None
     try:
         if row["status"] == "conflict" and not a.force:    # resolve the open PR's conflicts; --force rebuilds it
             wt, base_sha, pr_base, trunk, stacked, resolution = _replay(db, root, home, row)
+        elif row["status"] == "ci_failed" and not a.force:  # fix the open PR's failing CI; --force rebuilds it
+            from .stack import restack
+            if (moved := restack(db, root, home, task.id)) and (now := db.task(task.id)["status"]) != "ci_failed":
+                # The failure may have been its dependency's: CI judges the new head first.
+                print(moved + ("; nothing to fix until CI runs on the new head" if now == "pr_open" else ""))
+                return 0
+            row = db.task(task.id)                          # a restack may have retargeted the PR
+            fix = _ci_fix(root, home, row)
+            if fix is None:
+                db.update(task.id, status="pr_open", note=None)
+                print(f"{task.id}: CI no longer fails on {row['pr_url']}; nothing to fix")
+                return 0
+            wt, ci_fix = fix
+            base_sha, pr_base = row["base_sha"], row["base_ref"]
+            stacked = [d for d in (row["stacked_on"] or "").split(",") if d and db.task(d)["status"] != "merged"]
         else:
             deps = [db.task(d) for d in stacked]
             if deps:   # build on the open PRs: start from the first, merge the others in; the PR targets the first
@@ -182,6 +197,9 @@ def cmd_run_one(a) -> int:
         deps = [db.task(d) for d in stacked]
         db.update(task.id, status="queued", base_ref=pr_base, base_sha=base_sha, trunk=trunk,
                   stacked_on=",".join(stacked) or None, attempts=0, note=None, progress=None)
+    elif ci_fix:        # likewise; the PR keeps its base and stack, only its head moves
+        deps = [db.task(d) for d in stacked]
+        db.update(task.id, status="queued", attempts=0, note=None, progress=None)
     else:
         db.update(task.id, status="queued", branch=f"factory/{task.id}", base_ref=pr_base, base_sha=base_sha,
                   trunk=trunk, stacked_on=",".join(stacked) or None,
@@ -191,12 +209,13 @@ def cmd_run_one(a) -> int:
     opts = Options(base_ref=pr_base, max_attempts=a.max_attempts, open_pr=not a.no_pr,
                    skip_gates=tuple(x for x in a.skip_gates.split(",") if x), full_e2e=a.full_e2e,
                    max_cost=a.max_cost, config=cfg, stacked_on=tuple(f"{d['id']} ({d['pr_url']})" for d in deps),
-                   resolution=resolution)
+                   resolution=resolution, ci_fix=ci_fix)
     log = RunLog(log_path(home, task.id), echo=not a.quiet)
     log("run", f"=== {task.id}: worktree {wt} on factory/{task.id} from {pr_base} ({base_sha[:12]})"
                + (f", stacked on {', '.join(stacked)}" if stacked else "")
                + (f", resolving conflicts in {', '.join(resolution.conflicts) or 'nothing (replays cleanly)'}"
                   if resolution else "")
+               + (f", fixing CI ({', '.join(ci_fix.checks)}) on {ci_fix.old_candidate[:12]}" if ci_fix else "")
                + f"; models {', '.join(f'{r}={m}' for r, m in models.items())}")
     print(f"log: {log.path}  (follow elsewhere: factory logs {task.id} -f)", flush=True)
     try:
@@ -208,6 +227,10 @@ def cmd_run_one(a) -> int:
     if resolution and row["status"] == "failed":
         db.update(task.id, note=f"{row['note']}\n\nThe PR still holds {resolution.old_candidate[:12]}, which conflicts "
                                 f"with {resolution.onto}. Running the task again rebuilds it from scratch.")
+        row = db.task(task.id)
+    if ci_fix and row["status"] == "failed":
+        db.update(task.id, note=f"{row['note']}\n\nThe PR still holds {ci_fix.old_candidate[:12]}, whose CI fails "
+                                f"({', '.join(ci_fix.checks)}). Running the task again rebuilds it from scratch.")
         row = db.task(task.id)
     summary = (f"{task.id}: {row['status']} after {row['attempts']} build(s)"
                + (f" — {row['pr_url']}" if row["pr_url"] else "")
@@ -248,6 +271,26 @@ def _replay(db, root: Path, home: Path, row):
     return wt, onto, label, trunk, deps, resolution
 
 
+def _ci_fix(root: Path, home: Path, row):
+    """The open PR's branch at the candidate its CI failed on, and what failed: (worktree, CiFix). None when CI
+    no longer fails there (a job was re-run, or is running again)."""
+    from . import ci
+    from .pipeline import CiFix, PipelineError, branch_name, create_worktree, git
+    pr = _pr_state(row["pr_url"])
+    if not pr:
+        raise PipelineError(f"can't read the checks of {row['pr_url']} from GitHub")
+    red = ci.red(pr, row["candidate_sha"])
+    if red is None:
+        raise PipelineError(f"{row['pr_url']} has head {(pr.get('headRefOid') or '?')[:12]}, not the factory's candidate "
+                            f"{row['candidate_sha'][:12]}: someone pushed to it. Fix CI there, or --force to rebuild")
+    if not red:
+        return None
+    git(root, "fetch", "-q", "origin", branch_name(row["id"]), check=False)   # a PR taken up from another board
+    wt, _ = create_worktree(root, home, row["id"], row["candidate_sha"])
+    return wt, CiFix(old_candidate=row["candidate_sha"], checks=tuple(c.name for c in red),
+                     brief=ci.brief(root, row["pr_url"], row["candidate_sha"], red))
+
+
 def _notify(title: str, body: str) -> None:
     import shutil
     if shutil.which("notify-send"):
@@ -255,13 +298,19 @@ def _notify(title: str, body: str) -> None:
 
 
 def _pr_state(url: str) -> dict:
-    """GitHub's view of a PR: {"state": OPEN|MERGED|CLOSED, "mergeable": MERGEABLE|CONFLICTING|UNKNOWN},
-    or {} when gh fails. GitHub computes `mergeable` lazily: UNKNOWN now is usually known by the next refresh."""
-    p = subprocess.run(["gh", "pr", "view", url, "--json", "state,mergeable"], capture_output=True, text=True)
+    """GitHub's view of a PR: {"state": OPEN|MERGED|CLOSED, "mergeable": MERGEABLE|CONFLICTING|UNKNOWN,
+    "headRefOid": its head sha, "statusCheckRollup": [the checks on that head]}, or {} when gh fails. GitHub
+    computes `mergeable` lazily: UNKNOWN now is usually known by the next refresh."""
+    # The head comes from `commits`: older gh (2.4, Ubuntu's) has no `headRefOid` field and rejects the call.
+    p = subprocess.run(["gh", "pr", "view", url, "--json", "state,mergeable,commits,statusCheckRollup"],
+                       capture_output=True, text=True)
     try:
-        return json.loads(p.stdout) if p.returncode == 0 else {}
+        pr = json.loads(p.stdout) if p.returncode == 0 else {}
     except json.JSONDecodeError:
         return {}
+    if commits := pr.pop("commits", None):
+        pr["headRefOid"] = commits[-1].get("oid")
+    return pr
 
 
 def _factory_prs(root: Path) -> dict[str, dict]:
@@ -318,26 +367,43 @@ def _adopt(db, root: Path, remote: str = "origin") -> None:
 
 
 def _refresh(db) -> None:
+    from . import ci
     _adopt(db, repo_root())
     for row in db.tasks():
         if row["status"] in ACTIVE and row["pid"] and not pid_alive(row["pid"]):
             db.update(row["id"], status="failed", progress=None,
                       note=f"process {row['pid']} exited mid-run (killed or crashed); `factory clean` then rerun")
-        if row["status"] in ("pr_open", "conflict") and row["pr_url"]:
+        if row["status"] in ("pr_open", "conflict", "ci_failed") and row["pr_url"]:
             pr = _pr_state(row["pr_url"])
+            is_open = row["status"] in ("pr_open", "ci_failed")
             if pr.get("state") == "MERGED":
                 db.update(row["id"], status="merged")
             elif pr.get("state") == "CLOSED":
                 db.update(row["id"], status="abandoned", note="PR closed without merge")
             # A stacked PR is checked against its dependency by restack below, not by GitHub.
-            elif pr.get("mergeable") == "CONFLICTING" and row["status"] == "pr_open" and not row["stacked_on"]:
+            elif pr.get("mergeable") == "CONFLICTING" and is_open and not row["stacked_on"]:
                 db.update(row["id"], status="conflict",
                           note=f"its PR conflicts with {row['base_ref']}: `factory run {row['id']}` resolves it")
                 print(f"{row['id']}: conflicts with {row['base_ref']} (`factory run {row['id']}` resolves them)",
                       file=sys.stderr)
+            elif is_open and pr.get("headRefOid"):
+                red = ci.red(pr, row["candidate_sha"])
+                if red and row["status"] == "pr_open":
+                    db.update(row["id"], status="ci_failed",
+                              note=f"CI fails on its head: {ci.names(red)}: `factory run {row['id']}` fixes it")
+                    print(f"{row['id']}: CI fails ({ci.names(red)}) (`factory run {row['id']}` fixes it)",
+                          file=sys.stderr)
+                elif red == [] and row["status"] == "ci_failed":     # re-run and passing, or running again
+                    db.update(row["id"], status="pr_open", note=None)
+                    print(f"{row['id']}: CI no longer fails", file=sys.stderr)
+                elif red is None and row["status"] == "ci_failed":   # someone else pushed to it: not ours to fix
+                    db.update(row["id"], status="pr_open",
+                              note=f"its head {pr['headRefOid'][:12]} isn't the factory's candidate; its CI is left "
+                                   f"to whoever pushed it")
+                    print(f"{row['id']}: someone pushed to its PR; its CI is theirs now", file=sys.stderr)
     from .stack import restack
     for row in db.tasks():          # by id, so a plan's stack moves bottom-up
-        if row["status"] == "pr_open" and row["stacked_on"]:
+        if row["status"] in ("pr_open", "ci_failed") and row["stacked_on"]:
             msg = restack(db, repo_root(), factory_home(), row["id"])
             if msg:
                 print(msg, file=sys.stderr)
@@ -565,7 +631,7 @@ def cmd_requeue(a) -> int:
         elif row["status"] in ACTIVE and pid_alive(row["pid"]):
             print(f"{tid}: running ({row['status']}, pid {row['pid']}); leaving it")
             rc = 1
-        elif row["status"] in ("pr_open", "conflict", "merged"):
+        elif row["status"] in ("pr_open", "conflict", "ci_failed", "merged"):
             print(f"{tid}: {row['status']}; nothing to requeue")
             rc = 1
         elif row["status"] == "queued":
@@ -724,14 +790,14 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("status", help="task board, grouped by plan")
     s.add_argument("plan", nargs="?", help="only this plan (name or path)")
     s.add_argument("--refresh", action="store_true",
-                   help="pick up merged/closed PRs and PRs opened elsewhere from GitHub, and move stacked PRs "
-                        "whose dependencies merged")
+                   help="pick up merged/closed PRs and PRs opened elsewhere from GitHub, move stacked PRs "
+                        "whose dependencies merged, and mark PRs that conflict or fail CI")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_status)
 
     s = sub.add_parser("show", help="a task's runs and reports")
     s.add_argument("task_id")
-    s.add_argument("--role", choices=("plan", "build", "review", "verify", "pr"))
+    s.add_argument("--role", choices=("plan", "build", "resolve", "ci", "review", "verify", "pr"))
     s.set_defaults(fn=cmd_show)
 
     s = sub.add_parser("gates", help="run the deterministic gates for a ref (no agents)")

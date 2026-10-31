@@ -120,6 +120,11 @@ FAKE_GH = textwrap.dedent(f"""\
         sys.exit(0)
     if a[:2] == ["pr", "edit"]:
         save(); sys.exit(0)
+    if a[:1] == ["api"] and a[1].endswith("/logs"):    # api repos/{{owner}}/{{repo}}/actions/jobs/N/logs
+        log = s.get("logs", {{}}).get(a[1].split("/")[-2])
+        save()
+        if log is None: sys.exit(1)
+        print(log); sys.exit(0)
     if a[:1] == ["api"]:
         if "PATCH" in a:   # edit: api -X PATCH repos/{{owner}}/{{repo}}/pulls/N -f base=B -f body=…
             num = a[3].rsplit("/", 1)[1]

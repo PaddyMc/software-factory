@@ -9,9 +9,11 @@ task's own changes. `restack` keeps such a PR correct as you merge its dependenc
 - one of several dependencies merged: point the PR at a dependency that is still open, so merging
   it can never land in an already-merged branch.
 
-Gates ran on the original candidate; the PR gets a comment saying so whenever its commits move. When
-the commits do not rebase cleanly the task becomes `conflict`, and its next run has the builder resolve
-the conflicts (pipeline.replay_worktree), with review and gates run again before the PR is updated.
+Gates ran on the original candidate; the PR gets a comment saying so whenever its commits move, and CI
+runs on the new head (ci.py). When the commits do not rebase cleanly the task becomes `conflict`, and its
+next run has the builder resolve the conflicts (pipeline.replay_worktree), with review and gates run again
+before the PR is updated. A PR whose CI failed (`ci_failed`) is restacked the same way: its new head goes
+back to `pr_open` for CI to judge, since the failure may have come from the dependency.
 """
 
 from __future__ import annotations
@@ -73,11 +75,12 @@ def restack(db: DB, root: Path, home: Path, task_id: str, remote: str = "origin"
     """Bring one open stacked PR up to date with its dependencies. Returns what changed, or None."""
     row = db.task(task_id)
     deps = [d for d in (row["stacked_on"] or "").split(",") if d] if row else []
-    if not deps or row["status"] != "pr_open":
+    if not deps or row["status"] not in ("pr_open", "ci_failed"):
         return None
     status = {d: (db.task(d)["status"] if db.task(d) else None) for d in deps}
     still_open = [d for d in deps if status[d] != "merged"]
     old = row["candidate_sha"]
+    rerun = {"status": "pr_open", "note": None} if row["status"] == "ci_failed" else {}   # a new head: CI runs again
 
     if not still_open:
         trunk = row["trunk"] or "main"
@@ -93,7 +96,7 @@ def restack(db: DB, root: Path, home: Path, task_id: str, remote: str = "origin"
                                          f"commits conflict with it, so the diff also shows their changes until "
                                          f"the factory resolves the conflicts.")
             return f"{task_id}: retargeted to {trunk}; conflicts (`factory run {task_id}` resolves them)"
-        db.update(task_id, base_ref=trunk, base_sha=onto, candidate_sha=new, stacked_on=None)
+        db.update(task_id, base_ref=trunk, base_sha=onto, candidate_sha=new, stacked_on=None, **rerun)
         comment(root, row["pr_url"], f"{', '.join(deps)} merged: rebased onto `{trunk}` ({onto[:12]}) and "
                                      f"retargeted. Candidate {old[:12]} → {new[:12]}; the gates ran on {old[:12]}.")
         return f"{task_id}: rebased onto {trunk}, PR retargeted"
@@ -107,7 +110,7 @@ def restack(db: DB, root: Path, home: Path, task_id: str, remote: str = "origin"
             db.update(task_id, status="conflict",
                       note=f"{deps[0]} moved and this PR's commits conflict with it: `factory run {task_id}` resolves it")
             return f"{task_id}: conflicts with {deps[0]} (`factory run {task_id}` resolves them)"
-        db.update(task_id, base_sha=dep["candidate_sha"], candidate_sha=new)
+        db.update(task_id, base_sha=dep["candidate_sha"], candidate_sha=new, **rerun)
         comment(root, row["pr_url"], f"{deps[0]} moved: rebased onto it. Candidate {old[:12]} → {new[:12]}; "
                                      f"the gates ran on {old[:12]}.")
         return f"{task_id}: rebased onto {deps[0]}"
