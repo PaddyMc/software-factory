@@ -33,10 +33,11 @@ Re-running `factory init` is safe: it keeps existing files, and `--force` overwr
 
 ## Run tasks
 
-A task is a fenced YAML contract in a plan, by default under `docs/plans/` ([format](docs/reference.md#task-contracts)). `/plan-workstream` in Claude Code or OpenCode (`$plan-workstream` in Codex) writes plans with you.
+A task is a fenced YAML contract in a plan, by default under `docs/plans/` ([format](docs/reference.md#task-contracts)). `/plan-workstream` in Claude Code or OpenCode (`$plan-workstream` in Codex) writes plans with you. Credentials come from the environment, so each shell or service is its own instance: see [credentials](docs/reference.md#credentials).
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-...
+export GITHUB_TOKEN=github_pat_...  # optional: this instance's GitHub identity, instead of your gh login
 uv sync                         # or cargo fetch, npm ci, …: the sandbox is offline, so fetch dependencies first
 
 factory validate-plan           # check the contracts
