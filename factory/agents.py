@@ -1,8 +1,10 @@
-"""The four role agents (LangChain `create_agent`), configured from .factory/agents/<role>.md."""
+"""The four role agents (LangChain `create_agent`). Prompts ship in factory/prompts/<role>.md; a repository
+may override one with .factory/agents/<role>.md, and set models and step limits in .factory/config.yaml."""
 
 from __future__ import annotations
 
 import datetime as dt
+from importlib import resources
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,7 +23,7 @@ from .contracts import Task
 from .log import NullLog, clip
 from .tools import PathGuard, ToolLog, diff_tool, read_tools, run_tool, write_tools
 
-AGENTS_DIR = ".factory/agents"
+OVERRIDE_DIR = ".factory/agents"                 # per-repository prompt overrides, in the main checkout
 ROLE_FILES = {"plan": "planner", "build": "builder", "review": "reviewer", "verify": "verifier"}
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 _VERDICT = re.compile(r"^VERDICT:\s*(APPROVE|CHANGES)\s*$", re.M)
@@ -75,8 +77,14 @@ def parse_verdict(text: str) -> str:
     return found[-1] if found else "CHANGES"
 
 
+def prompt_source(root: Path, role: str):
+    """The repository's override if it has one, else the prompt shipped with the factory."""
+    override = root / OVERRIDE_DIR / f"{ROLE_FILES[role]}.md"
+    return override if override.is_file() else resources.files("factory") / "prompts" / f"{ROLE_FILES[role]}.md"
+
+
 def load_role(root: Path, role: str) -> tuple[dict, str]:
-    text = (root / AGENTS_DIR / f"{ROLE_FILES[role]}.md").read_text()
+    text = prompt_source(root, role).read_text()
     m = _FRONTMATTER.match(text)
     return (yaml.safe_load(m.group(1)) or {}, text[m.end():]) if m else ({}, text)
 
@@ -129,8 +137,14 @@ def project_rules(cfg: Config) -> str:
     return "# Project rules (enforced by the factory's gates)\n\n" + _bullets(rules)
 
 
-def role_models(root: Path, override: str | None = None) -> dict[str, str]:
-    return {role: override or load_role(root, role)[0].get("model", DEFAULT_MODEL) for role in ROLE_FILES}
+def role_model(root: Path, role: str, cfg: Config, override: str | None = None) -> str:
+    """`--model` > the config's `models` > the prompt's frontmatter > the default."""
+    return override or cfg.models.get(role) or load_role(root, role)[0].get("model", DEFAULT_MODEL)
+
+
+def role_models(root: Path, override: str | None = None, cfg: Config | None = None) -> dict[str, str]:
+    cfg = cfg or Config()
+    return {role: role_model(root, role, cfg, override) for role in ROLE_FILES}
 
 
 def missing_keys(models: dict[str, str], env: dict) -> list[str]:
@@ -173,9 +187,9 @@ class LangChainRoles:
         self.cfg = cfg or Config()
 
     def _run(self, role: str, ctx: Ctx, tools: list, message: str, tag: str | None = None) -> Output:
-        cfg, instructions = load_role(self.root, role)
-        spec = self.model_override or cfg.get("model", DEFAULT_MODEL)
-        steps = int(cfg.get("max_steps", 60))
+        meta, instructions = load_role(self.root, role)
+        spec = role_model(self.root, role, self.cfg, self.model_override)
+        steps = int(self.cfg.max_steps.get(role) or meta.get("max_steps", 60))
         system = "\n\n".join(x for x in [
             instructions.strip(), contract_block(ctx.task), project_rules(self.cfg),
             f"Today: {dt.date.today().isoformat()}. Worktree root is the tools' working directory.",
@@ -205,7 +219,7 @@ class LangChainRoles:
         if out.stopped is None and out.steps >= steps and out.wants_tools:
             out.stopped = "step limit"
         if out.stopped:
-            ctx.log(tag, f"⚠ stopped: {out.stopped} after {out.steps} steps (raise max_steps in .factory/agents/)")
+            ctx.log(tag, f"⚠ stopped: {out.stopped} after {out.steps} steps (raise max_steps for this role in .factory/config.yaml)")
             ctx.record({"type": "stopped", "reason": out.stopped, "steps": out.steps})
         cost = f", ${out.cost_usd:.4f}" if out.cost_usd is not None else ""
         refused = f", {out.refused} tool calls refused" if out.refused else ""

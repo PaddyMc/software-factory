@@ -2,11 +2,18 @@
 
 `factory run <plan>` takes every **task contract** in one of your repository's plans to a **working pull request** each, for you to review and merge. A task whose dependency isn't merged yet is built on top of the dependency's open PR (a stacked PR), so one run covers the whole plan. For each task, four AI agents, a planner, a builder, a reviewer and a verifier, work in an isolated, sandboxed git worktree. A PR is opened only when every deterministic check passes at the exact candidate commit. A human merging the PR is the approval.
 
-The factory is project-agnostic. Everything specific to a repository lives in that repository:
-- `.factory/config.yaml`: where plans are, which tests every task must add, what runs as unit and e2e gates, and what the sandbox mounts;
-- `.factory/agents/*.md`: the role prompts and their models.
+Install it once, then run `factory init` in each repository that uses it. The factory is project-agnostic: its code, role prompts and workflow skills ship with it, and a repository holds only:
+- `.factory/config.yaml`: where plans are, which tests every task must add, what runs as unit and e2e gates, the models per role, and what the sandbox mounts;
+- the workflow skills under `.claude/skills/`, for Claude Code and OpenCode: `/plan-workstream` writes plans with task contracts, `/review-task` reviews a task's PR, and `factory-ops` answers questions about operating the factory;
+- its plans, and a short "Software factory" section in its agent guidance.
 
-`factory init` scaffolds both, and installs two workflow skills for Claude Code / OpenCode: `/plan-workstream`, which writes plans with task contracts, and `/review-task`, which reviews a task's PR.
+### Policy
+
+- **Merging is the approval.** Agents never merge, push, commit to your checkout, or see secrets; a passing check alone approves nothing. Branch protection is a GitHub setting you own.
+- **Gates decide.** A PR is opened only when every deterministic gate passes at the exact candidate commit. The verifier agent writes the PR report; it can't override a gate.
+- **Isolation.** Agent commands and gates run under bubblewrap: read-only host, empty `$HOME`, `/tmp` and `/run`, cleared environment, no network unless asked. File tools stay in the worktree (reads also reach `dependency_sources`), and never write `.git`.
+- **Scope is the reviewer's call.** The builder may edit any file in the worktree; the contract's goal and non-goals bound the change, and unrelated edits are findings.
+- **Settings come from the main checkout,** never from a task worktree, so an agent can't weaken its own gates or change its own prompt.
 
 ---
 
@@ -14,11 +21,11 @@ The factory is project-agnostic. Everything specific to a repository lives in th
 
 ```bash
 # prerequisites: uv, bubblewrap (bwrap), git, gh (authenticated), your project's toolchain
-uv tool install /path/to/software-factory        # or: alias factory='uv run --project /path/to/software-factory factory'
+uv tool install git+https://github.com/PaddyMc/software-factory   # once; `uv tool upgrade software-factory` later
 
 cd your-repo
-factory init                      # .factory/config.yaml, .factory/agents/*.md, .claude/skills/{plan-workstream,review-task}
-$EDITOR .factory/config.yaml      # plans location, e2e/session-log requirements, unit tests, sandbox
+factory init                      # config, skills, starter plan, session log, AGENTS.md section (see below)
+$EDITOR .factory/config.yaml      # plans location, e2e/session-log requirements, unit tests, models, sandbox
 factory config                    # the effective settings
 
 # write task contracts (see below; /plan-workstream in Claude Code does it with you), then:
@@ -34,6 +41,22 @@ factory run <task-id>             # one task, foreground
 
 The agents' sandbox is offline, so fetch dependencies first (`cargo fetch`, `uv sync`, `npm ci`, …).
 
+To work on the factory itself, install from a checkout instead: `uv tool install --editable /path/to/software-factory`, or `alias factory='uv run --project /path/to/software-factory factory'`.
+
+### `factory init`
+
+Run it at the root of a repository (any subdirectory works; it finds the main checkout). It writes:
+
+| File | What |
+|---|---|
+| `.factory/config.yaml` | Settings, every key documented in comments. `name` is the directory name, `session_log: docs/sessions` is on, and `unit_tests` is guessed from `Cargo.toml` (`cargo test --workspace`) or `pyproject.toml` (`uv run pytest -q`) |
+| `.claude/skills/{plan-workstream,review-task,factory-ops}/` | The workflow skills, copied from the installed factory |
+| `docs/sessions/README.md` | The session-log convention, when the directory is new or empty |
+| `docs/plans/example.md` | When the repository has no plans yet: the contract format and one valid, runnable task. Replace or delete it before `factory run` |
+| `AGENTS.md` | A "Software factory" section between `<!-- factory:begin -->` and `<!-- factory:end -->`. It goes into the first `guidance` file that exists (so a `CLAUDE.md`-only repository gets it there), and `AGENTS.md` is created when there is none |
+
+Re-running is safe: existing files are kept (`keep … (exists; --force overwrites)`), and only the text between the markers is replaced. `--force` rewrites the files, which is how skills pick up a new factory version. `--no-skills` skips the skills, `--session-log DIR` picks another log directory, and `--no-session-log` turns the requirement off.
+
 ---
 
 ## Architecture
@@ -46,7 +69,7 @@ flowchart TB
   Contracts["contracts.py<br/>parse + validate"]:::core
   Sched["scheduler.py<br/>one plan, --parallel"]:::core
   Pipe["pipeline.py · outer loop (LangGraph)<br/>plan → build → review → verify → PR"]:::core
-  Roles[".factory/agents/*.md<br/>role prompts + models"]:::repo
+  Roles["prompts/*.md<br/>role prompts (override: .factory/agents/)"]:::core
   Agents["agents.py · inner loop (LangChain)<br/>planner · builder · reviewer · verifier"]:::core
   Gates["gates.py<br/>deterministic checks"]:::core
   Tools["tools.py<br/>read · write · run · git_diff"]:::core
@@ -101,7 +124,7 @@ Dotted lines are observability data, not control flow.
 | Scheduling | `scheduler.py` | Run one plan's tasks as child `factory run` processes, up to `--parallel`. A task starts once each dependency is merged or has an open PR |
 | Stacking | `stack.py` | After a merge, rebase the PRs stacked on it onto the trunk and retarget them; edit PRs through the GitHub REST API |
 | Outer loop | `pipeline.py` | LangGraph state machine: plan → build → review → verify → PR / fail, or resolve → review → verify for a conflicting PR. Commits the builder's work. Stops early when there is no progress |
-| Inner loop | `agents.py` | One LangChain `create_agent` per role: loads the role file, builds the system prompt (role + contract + project rules + repository guidance), streams steps, counts tokens and cost, records the transcript |
+| Inner loop | `agents.py` | One LangChain `create_agent` per role: loads the role prompt (the repository's override, else the shipped one), builds the system prompt (role + contract + project rules + repository guidance), streams steps, counts tokens and cost, records the transcript |
 | Tools | `tools.py` | `read_file`, `list_dir`, `grep` (the worktree, plus `dependency_sources` read-only), `git_diff`, `write_file`/`edit_file` (anywhere in the worktree except `.git`), `run` (sandboxed; denied commands refused) |
 | Checks | `gates.py`, `verification.py` | Conflict markers, plan untouched, and the configured session-log, e2e, unit and verification checks. Zero tests selected counts as failed |
 | Isolation | `sandbox.py` | bubblewrap: read-only host, empty `$HOME`/`/tmp`/`/run`, cleared environment, no network unless asked |
@@ -252,10 +275,10 @@ sequenceDiagram
 | reviewer | `z-ai/glm-5.3` | 60 | read, `git_diff` | `VERDICT: APPROVE` or `CHANGES` (missing verdict = CHANGES) |
 | verifier | `deepseek/deepseek-v4-flash-0731` | 30 | read, `git_diff`, sandboxed `run` | Nothing: it writes the PR report; **the gates decide** |
 
-Change models and step limits in the frontmatter of `.factory/agents/<role>.md`; `--model` overrides every role for one run. Any `provider:model` that LangChain's `init_chat_model` supports works, with the provider's key in the environment (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
+Set models and step limits per role with `models` and `max_steps` in `.factory/config.yaml`; `--model` overrides every role for one run. To replace a whole prompt, put it in `.factory/agents/<planner|builder|reviewer|verifier>.md` (frontmatter `model` and `max_steps` optional); the config's settings still win over its frontmatter. Any `provider:model` that LangChain's `init_chat_model` supports works, with the provider's key in the environment (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
 
 The system prompt is assembled from four parts:
-1. the role file;
+1. the role prompt, shipped in [`factory/prompts/`](factory/prompts/) or overridden by the repository;
 2. the contract;
 3. a **Project rules** block generated from `.factory/config.yaml`, telling the agent what the gates will require (session log, e2e test, unit commands);
 4. the repository's own guidance: the first file of `guidance` that exists (default `AGENTS.md`, then `CLAUDE.md`).
@@ -286,6 +309,8 @@ No agent can commit, push, call `gh`, run `factory`, or touch the database. The 
 | `unit_tests` | `[]` | Commands for the `unit_tests` gate |
 | `lockfiles` | common lockfiles | Files the `diff` gate notes when they change |
 | `dependency_sources` | cargo registry and git sources, rustup toolchains | Directories the agents' file tools may also read, by absolute path (never write) |
+| `models` | `{}` | Model per role (`plan`, `build`, `review`, `verify`), e.g. `{review: "anthropic:claude-…"}`; over the prompt's frontmatter |
+| `max_steps` | `{}` | Model calls per agent run, per role; over the prompt's frontmatter |
 | `denied_commands` | `[]` | Extra regexes the agents' `run` tool refuses (git push/commit/reset…, `sudo`, `gh`, `terraform apply/destroy` and `factory` are built in) |
 | `sandbox.ro_binds` / `rw_binds` | rustup + uv read-only, `~/.cargo` writable | Host paths visible inside the sandbox (missing ones are skipped) |
 | `sandbox.hide` | cargo credentials | Files masked with `/dev/null` |
@@ -377,16 +402,17 @@ A command that selects zero tests is **inconclusive, not a pass**. `factory gate
 
 ## Skills
 
-`factory init` installs two agent skills into `.claude/skills/`. Claude Code loads them there, and OpenCode reads the same directory. Both are explicit-invocation only, and both read the project's `.factory/config.yaml`, so they carry no project specifics.
+`factory init` copies three agent skills into `.claude/skills/`. Claude Code loads them there, and OpenCode reads the same directory. They read the project's `.factory/config.yaml`, so they carry no project specifics.
 
 | Skill | Use | What it does |
 |---|---|---|
 | [`/plan-workstream`](factory/templates/skills/plan-workstream/SKILL.md) | Before work starts | Grounds in the config, roadmap, plans and code; locks 2–4 strategic decisions with you; writes a plan whose contracts satisfy the configured gates; updates the roadmap; runs `factory validate-plan` |
-| [`/review-task TASK [REF]`](factory/templates/skills/review-task/SKILL.md) | Before you merge | Runs `factory gates` (cheap, then full) on the task's branch, applies the reviewer checklist from `.factory/agents/reviewer.md`, and reports APPROVE or REQUEST CHANGES. It never edits or merges |
+| [`/review-task TASK [REF]`](factory/templates/skills/review-task/SKILL.md) | Before you merge | Runs `factory gates` (cheap, then full) on the task's branch, applies the reviewer agent's checklist, and reports APPROVE or REQUEST CHANGES. It never edits or merges |
+| [`factory-ops`](factory/templates/skills/factory-ops/SKILL.md) | While running | Loads by itself on operational questions: starting runs, what's happening, why a task failed, requeues, holds, merging stacked PRs, resetting the board |
 
-The factory's own agents (planner, builder, reviewer, verifier) are role prompts, not skills. `factory init` writes them to `.factory/agents/` from [`factory/templates/agents/`](factory/templates/agents/).
+`/plan-workstream` and `/review-task` are explicit-invocation only. The factory's own agents (planner, builder, reviewer, verifier) are role prompts, not skills, and stay in the installed package.
 
-Use `factory init --no-skills` to skip the skills. Existing files are kept unless you pass `--force`.
+Use `factory init --no-skills` to skip the skills, and `factory init --force` to refresh them after upgrading the factory (it also rewrites the other scaffolded files, so review the diff).
 
 ---
 
@@ -408,8 +434,9 @@ Agent `run` calls and gate commands execute under bubblewrap (`sandbox.py`):
 
 | Command | Purpose |
 |---|---|
-| `factory init [--force] [--no-skills]` | Scaffold `.factory/config.yaml`, the four role prompts and the two skills |
+| `factory init [--force] [--no-skills] [--session-log DIR \| --no-session-log]` | Set the repository up: config, skills, session log, starter plan, guidance section |
 | `factory config` | Print the effective project settings |
+| `factory prompt ROLE` | Print a role's prompt as the agents get it (the repository's override, else the shipped one), with its model |
 | `factory validate-plan [PLAN…]` | Check contracts |
 | `factory sync` | Load every contract from the plans into the db (statuses kept) |
 | `factory status [PLAN] [--refresh] [--json]` | The board, grouped by plan with a task counter. `--refresh` picks up merged or closed PRs, takes up open or merged PRs opened from another board, moves stacked PRs whose dependencies merged, marks PRs that conflict with their base `conflict`, and fails dead runs |
@@ -470,10 +497,10 @@ Useful `run` flags:
 | `cannot stack TASK: its open dependencies conflict` | Merge one of the dependencies' PRs, `factory status --refresh`, then run again |
 | Status `conflict` | The PR no longer applies to its base. `factory run TASK` (or its plan) resolves it; see [Merge conflicts](#merge-conflicts) |
 | A conflict resolution `failed` | The PR still holds its old head. Run the task again to rebuild it from scratch on the trunk |
-| `⚠ stopped: step limit` in the log | The agent used `max_steps`. Raise it in `.factory/agents/ROLE.md`, or narrow the task |
+| `⚠ stopped: step limit` in the log | The agent used `max_steps`. Raise it with `max_steps: {ROLE: N}` in `.factory/config.yaml`, or narrow the task |
 | Gates fail on network or dependency fetches | The sandbox is offline. Fetch dependencies first, or pass `--network` for tasks that download |
 | A tool is "not found" inside the sandbox | It lives under `$HOME`, which is hidden. Add its directory to `sandbox.ro_binds` and `sandbox.path` |
-| `set OPENROUTER_API_KEY first` | Export the key for the providers named in the role files |
+| `set OPENROUTER_API_KEY first` | Export the key for the providers the roles use (`factory run` lists them) |
 | `error: PaymentRequiredResponseError: … available credits` | OpenRouter credits ran out. Parallel runs reserve credit for their in-flight requests, so this can appear before the balance hits zero. Add credits, then run the plan again |
 | `error: … ConnectError` / `name resolution` | Network outage. Model calls are retried with backoff for about 30 s before the run fails; run the plan again once it's back |
 | A plan run leaves a task `queued` | A dependency has no PR (it failed, is held, or is in another plan). `factory status PLAN` shows what it waits for |

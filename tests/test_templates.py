@@ -1,12 +1,20 @@
-"""`factory init` scaffolds a project; the shipped role prompts match the factory."""
+"""`factory init` sets a repository up; the role prompts and skills ship with the factory and stay generic."""
 
 import re
+import subprocess
+from pathlib import Path
 
 import pytest
+import yaml
 
 from factory import config as C
-from factory.agents import ROLE_FILES, load_role, missing_keys, parse_verdict, role_models
+from factory import contracts
+from factory.agents import ROLE_FILES, load_role, missing_keys, parse_verdict, prompt_source, role_models
 from factory.cli import main
+from factory.scaffold import BEGIN, END, SKILLS
+
+PACKAGE = Path(__file__).resolve().parents[1] / "factory"
+SPECIFIC = ("Cleartree", "did-spec", "did:tree", "tools/factory", "NEXT.md")   # the project this was extracted from
 
 
 @pytest.fixture
@@ -18,66 +26,154 @@ def initialised(repo, monkeypatch, capsys):
     return repo
 
 
-def test_init_writes_config_role_prompts_and_skills(initialised):
+@pytest.fixture
+def fresh(tmp_path, monkeypatch):
+    """An empty git repository: no plans, no guidance, no config."""
+    r = tmp_path / "fresh"
+    r.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(r)], check=True)
+    monkeypatch.chdir(r)
+    return r
+
+
+def test_init_writes_config_skills_session_log_and_guidance(initialised):
     cfg = C.load(initialised)
-    assert cfg.name == "repo" and cfg.e2e is None and cfg.session_log is None
-    for name in ("planner", "builder", "reviewer", "verifier"):
-        assert (initialised / f".factory/agents/{name}.md").is_file()
-    for skill in ("plan-workstream", "review-task"):
+    assert cfg.name == "repo" and cfg.e2e is None and cfg.session_log == "docs/sessions" and cfg.unit_tests == ()
+    for skill in SKILLS:
         assert (initialised / f".claude/skills/{skill}/SKILL.md").is_file()
+    assert (initialised / ".claude/skills/factory-ops/references/troubleshooting.md").is_file()
+    assert (initialised / "docs/sessions/README.md").is_file()
+    assert not (initialised / ".factory/agents").exists()                  # prompts ship with the factory
+    assert not (initialised / "docs/plans/example.md").exists()            # the repo already has plans
+    guidance = (initialised / "AGENTS.md").read_text()
+    assert guidance.startswith("# Demo repo\n") and guidance.count(BEGIN) == 1 and "factory status --refresh" in guidance
 
 
-def test_init_can_skip_skills(repo, monkeypatch):
-    (repo / ".factory/config.yaml").unlink()
-    monkeypatch.chdir(repo)
+def test_init_in_an_empty_repo_gets_a_valid_starter_plan(fresh, capsys):
+    (fresh / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    assert main(["init", "--no-session-log"]) == 0
+    cfg = C.load(fresh)
+    assert cfg.name == "fresh" and cfg.session_log is None and cfg.unit_tests == ("uv run pytest -q",)
+    assert not (fresh / "docs/sessions").exists()
+    assert (fresh / "AGENTS.md").read_text().startswith(BEGIN)
+    plan = fresh / "docs/plans/example.md"
+    tasks, errs = contracts.validate_plan(plan, fresh)
+    assert errs == [] and [t.id for t in tasks] == ["example-t01"]
+    capsys.readouterr()
+    assert main(["validate-plan"]) == 0
+    out = capsys.readouterr().out
+    assert "ok   docs/plans/example.md (1 tasks)" in out and "warn" not in out     # runnable by the factory
+
+
+def test_rust_repos_get_cargo_unit_tests_and_a_custom_session_log(fresh):
+    (fresh / "Cargo.toml").write_text("[workspace]\n")
+    assert main(["init", "--session-log", "notes/log"]) == 0
+    cfg = C.load(fresh)
+    assert cfg.unit_tests == ("cargo test --workspace",) and cfg.session_log == "notes/log"
+    assert (fresh / "notes/log/README.md").is_file()
+
+
+def test_the_section_goes_to_the_guidance_file_agents_read(fresh):
+    (fresh / "CLAUDE.md").write_text("# Mine\n")
     assert main(["init", "--no-skills"]) == 0
-    assert (repo / ".factory/config.yaml").is_file() and not (repo / ".claude").exists()
+    assert not (fresh / "AGENTS.md").exists()                            # agents read the first that exists
+    assert (fresh / "CLAUDE.md").read_text().startswith("# Mine\n\n" + BEGIN)
+    assert not (fresh / ".claude").exists()
 
 
-@pytest.mark.parametrize("skill", ["plan-workstream", "review-task"])
-def test_skills_are_valid_and_generic(initialised, skill):
-    import yaml
-    text = (initialised / f".claude/skills/{skill}/SKILL.md").read_text()
-    front = yaml.safe_load(re.match(r"\A---\n(.*?)\n---\n", text, re.S).group(1))
-    assert front["name"] == skill and len(front["description"]) <= 1024 and "Explicit-invocation only" in front["description"]
-    assert "factory gates" in text or "factory validate-plan" in text
-    for specific in ("Cleartree", "did-spec", "crates/", "cargo", "NEXT.md", "tools/factory"):
-        assert specific not in text, specific
-
-
-def test_init_keeps_existing_files_unless_forced(initialised, capsys):
-    path = initialised / ".factory/agents/builder.md"
-    path.write_text("mine")
+def test_rerun_keeps_files_and_replaces_only_the_section(initialised, capsys):
+    skill = initialised / ".claude/skills/review-task/SKILL.md"
+    skill.write_text("mine")
+    agents = initialised / "AGENTS.md"
+    text = agents.read_text()
+    inside = text[text.index(BEGIN):text.index(END) + len(END)]
+    agents.write_text(text.replace(inside, BEGIN + "\nstale\n" + END) + "\n## Later notes\n")
     assert main(["init"]) == 0
-    assert path.read_text() == "mine" and "keep   .factory/agents/builder.md" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert skill.read_text() == "mine" and "keep   .claude/skills/review-task (exists; --force overwrites)" in out
+    assert "update AGENTS.md (factory section replaced)" in out
+    assert agents.read_text() == text + "\n## Later notes\n"
+    assert main(["init"]) == 0 and "keep   AGENTS.md (factory section up to date)" in capsys.readouterr().out
     assert main(["init", "--force"]) == 0
-    assert path.read_text() != "mine"
+    assert skill.read_text() != "mine" and agents.read_text().count(BEGIN) == 1
+
+
+@pytest.mark.parametrize("skill", SKILLS)
+def test_skills_are_valid_and_generic(skill):
+    root = PACKAGE / "templates/skills" / skill
+    text = (root / "SKILL.md").read_text()
+    front = yaml.safe_load(re.match(r"\A---\n(.*?)\n---\n", text, re.S).group(1))
+    assert front["name"] == skill and len(front["description"]) <= 1024
+    assert ("Explicit-invocation only" in front["description"]) == (skill != "factory-ops")
+    assert "factory " in text
+    for f in root.rglob("*.md"):
+        for specific in (*SPECIFIC, "crates/"):
+            assert specific not in f.read_text(), (f, specific)
+
+
+def test_nothing_in_the_package_names_the_original_project():
+    for f in PACKAGE.rglob("*"):
+        if f.is_file() and f.suffix in (".py", ".md", ".yaml"):
+            for specific in SPECIFIC:
+                assert specific not in f.read_text(), (f, specific)
 
 
 @pytest.mark.parametrize("role", list(ROLE_FILES))
-def test_role_prompts_load_with_models(initialised, role):
-    cfg, body = load_role(initialised, role)
-    assert re.match(r"^openrouter:[\w.-]+/[\w.:-]+$", cfg["model"]) and int(cfg["max_steps"]) > 0
+def test_role_prompts_ship_with_the_factory(repo, role):
+    assert prompt_source(repo, role) == PACKAGE / "prompts" / f"{ROLE_FILES[role]}.md"
+    meta, body = load_role(repo, role)
+    assert re.match(r"^openrouter:[\w.-]+/[\w.:-]+$", meta["model"]) and int(meta["max_steps"]) > 0
     assert f"You are the {ROLE_FILES[role].upper()}" in body
-    assert "Cleartree" not in body and "crates/" not in body        # project-specific rules come from config
+    assert "crates/" not in body                                  # project-specific rules come from config
 
 
-def test_reviewer_prompt_matches_verdict_parser(initialised):
-    _, body = load_role(initialised, "review")
+def test_prompt_command_shows_the_prompt_in_effect(repo, monkeypatch, capsys):
+    monkeypatch.chdir(repo)
+    assert main(["prompt", "reviewer"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith(f"# {PACKAGE / 'prompts/reviewer.md'} · model openrouter:") and "VERDICT: APPROVE" in out
+    assert main(["prompt", "judge"]) == 2
+
+
+def test_a_repository_can_override_a_prompt_and_set_models(repo):
+    override = repo / ".factory/agents/reviewer.md"
+    override.parent.mkdir(parents=True)
+    override.write_text("---\nmodel: openrouter:a/override\nmax_steps: 5\n---\nYou are our REVIEWER.\n")
+    assert load_role(repo, "review") == ({"model": "openrouter:a/override", "max_steps": 5}, "You are our REVIEWER.\n")
+    shipped = load_role(repo, "plan")[0]["model"]
+    cfg = C.parse({"models": {"plan": "anthropic:claude-x"}, "max_steps": {"build": 7}})
+    assert role_models(repo, cfg=cfg) == {"plan": "anthropic:claude-x", "build": load_role(repo, "build")[0]["model"],
+                                          "review": "openrouter:a/override", "verify": load_role(repo, "verify")[0]["model"]}
+    assert set(role_models(repo, "openai:gpt-x", cfg).values()) == {"openai:gpt-x"}      # --model wins
+    assert shipped.startswith("openrouter:") and cfg.max_steps == {"build": 7}
+
+
+@pytest.mark.parametrize("data, error", [
+    ({"models": {"planner": "x"}}, "unknown role"),
+    ({"max_steps": {"build": "lots"}}, "positive integers"),
+    ({"max_steps": {"build": 0}}, "positive integers"),
+])
+def test_bad_role_settings_are_rejected(data, error):
+    with pytest.raises(C.ConfigError, match=error):
+        C.parse(data)
+
+
+def test_reviewer_prompt_matches_verdict_parser(repo):
+    _, body = load_role(repo, "review")
     assert "VERDICT: APPROVE" in body and "VERDICT: CHANGES" in body
     assert parse_verdict("text\nVERDICT: APPROVE\n") == "APPROVE"
     assert parse_verdict("looks fine to me") == "CHANGES"          # missing verdict fails safe
     assert parse_verdict("VERDICT: APPROVE\n...\nVERDICT: CHANGES") == "CHANGES"
 
 
-def test_missing_provider_key_is_reported_before_work(initialised):
-    models = role_models(initialised)
+def test_missing_provider_key_is_reported_before_work(repo):
+    models = role_models(repo)
     assert missing_keys(models, {}) == ["OPENROUTER_API_KEY"]
     assert missing_keys(models, {"OPENROUTER_API_KEY": "x"}) == []
-    assert missing_keys(role_models(initialised, "anthropic:claude-opus-5-5"), {"OPENROUTER_API_KEY": "x"}) == ["ANTHROPIC_API_KEY"]
+    assert missing_keys(role_models(repo, "anthropic:claude-opus-5-5"), {"OPENROUTER_API_KEY": "x"}) == ["ANTHROPIC_API_KEY"]
 
 
 def test_config_command_prints_effective_settings(initialised, capsys):
     assert main(["config"]) == 0
     out = capsys.readouterr().out
-    assert out.startswith("# .factory/config.yaml;") and "name: repo" in out and "plans:" in out
+    assert out.startswith("# .factory/config.yaml;") and "name: repo" in out and "plans:" in out and "models: {}" in out

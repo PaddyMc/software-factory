@@ -28,7 +28,7 @@ factory gates <task-id> --ref <ref>                                          # f
 
 ## 2. Judgment
 
-Apply `.factory/agents/reviewer.md`, the same checklist the factory's reviewer agent uses, to `git diff $(git merge-base <base> <ref>)..<ref>` with the contract open. The contract comes from the plan named in `factory show <task-id>`, or from searching the plans for the task id. Cite `path:line` for every claim.
+Apply the reviewer prompt that `factory prompt review` prints, the same checklist the factory's reviewer agent uses, to `git diff $(git merge-base <base> <ref>)..<ref>` with the contract open. The contract comes from the plan named in `factory show <task-id>`, or from searching the plans for the task id. Cite `path:line` for every claim.
 
 ## 3. Report
 
