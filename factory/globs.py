@@ -1,4 +1,4 @@
-"""Path globs shared by contracts, the agents' path guard and the gates."""
+"""Path globs for the plan settings (`plans`, `exclude`)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import re
 
 
 def glob_to_regex(pattern: str) -> re.Pattern:
-    """`allowed_paths` glob: `**` spans directories, `*` stays within one; a plain path also covers its subtree."""
+    """Path glob: `**` spans directories, `*` stays within one; a plain path also covers its subtree."""
     pattern = pattern.rstrip("/")
     if not any(ch in pattern for ch in "*?["):
         return re.compile("^" + re.escape(pattern) + r"(/.*)?$")

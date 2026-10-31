@@ -3,7 +3,7 @@
 Everything project-specific lives here: where plans are, which test every task must add, what
 runs as the unit and e2e gates, and what the sandbox mounts. The factory itself stays generic.
 Every key is optional. A repository without the file gets plans from `docs/plans/**/*.md` and
-only the universal gates (clean, diff, scope, plan_untouched, verification).
+only the universal gates (clean, diff, conflict_markers, plan_untouched, verification).
 
 The config is always read from the main checkout, never from a task worktree, so an agent
 cannot weaken its own gates.
@@ -60,18 +60,19 @@ class Config:
     home: str | None = None                      # $FACTORY_HOME default; else ~/.local/share/factory/<name>
     plans: tuple[str, ...] = ("docs/plans/**/*.md",)
     exclude: tuple[str, ...] = ()                # globs never read as backlog (e.g. "docs/user/**")
-    guidance: tuple[str, ...] = ("CLAUDE.md", "AGENTS.md")   # appended to every agent's system prompt if present
+    guidance: tuple[str, ...] = ("AGENTS.md", "CLAUDE.md")   # the first that exists joins every agent's prompt
     session_log: str | None = None               # e.g. "docs/sessions": every task adds <dir>/<today>.md
     e2e: E2E | None = None
     unit_tests: tuple[str, ...] = ()             # commands for the unit_tests gate
-    always_allowed: tuple[str, ...] = ()         # globs every task may write (the session log dir is added)
-    warn_only: tuple[str, ...] = ("Cargo.lock", "uv.lock", "package-lock.json", "poetry.lock", "go.sum")
+    lockfiles: tuple[str, ...] = ("Cargo.lock", "uv.lock", "package-lock.json", "poetry.lock", "go.sum")
     denied_commands: tuple[str, ...] = ()        # extra regexes the agents' `run` tool refuses
+    # Directories the agents' file tools may also read by absolute path (dependency sources), never write.
+    dependency_sources: tuple[str, ...] = ("~/.cargo/registry/src", "~/.cargo/git/checkouts", "~/.rustup/toolchains")
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
 
-    def writable_extras(self) -> tuple[str, ...]:
-        """Paths every task may write besides its allowed_paths."""
-        return self.always_allowed + ((f"{self.session_log.rstrip('/')}/*.md",) if self.session_log else ())
+    def dependency_dirs(self, home: Path | None = None) -> tuple[Path, ...]:
+        home = home or Path.home()
+        return tuple(home / p[2:] if p.startswith("~/") else Path(p) for p in self.dependency_sources)
 
     def home_dir(self) -> Path:
         if os.environ.get("FACTORY_HOME"):
@@ -116,7 +117,7 @@ def parse(data: dict | None, default_name: str = "default") -> Config:
     for key in ("home", "session_log"):
         if d.get(key) is not None:
             kw[key] = str(d[key])
-    for key in ("plans", "exclude", "guidance", "unit_tests", "always_allowed", "warn_only", "denied_commands"):
+    for key in ("plans", "exclude", "guidance", "unit_tests", "lockfiles", "denied_commands", "dependency_sources"):
         v = _strs(d, key, CONFIG_PATH)
         if v is not None:
             kw[key] = v

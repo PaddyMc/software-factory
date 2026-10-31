@@ -59,7 +59,7 @@ def test_a_failing_tool_call_goes_back_to_the_model(tmp_path, monkeypatch):
     results = [e["content"] for e in events if e["type"] == "tool"]
     assert results[0] == "error: FileNotFoundError: [Errno 2] No such file or directory: 'infra'"
     assert results[1] == "error: IsADirectoryError: [Errno 21] Is a directory: '.factory'"
-    assert results[2] == "error: PermissionError: ../outside.md is outside the worktree"
+    assert results[2].startswith("error: PermissionError: ../outside.md is outside the worktree and the dependency sources")
     assert sum("⚠ list_dir: error:" in e.get("msg", "") for e in events) == 1
 
 

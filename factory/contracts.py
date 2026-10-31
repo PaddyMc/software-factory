@@ -1,6 +1,6 @@
 """Parse and validate task contracts in plan docs.
 
-A plan carries a fenced ```yaml list whose mappings have exactly the 9 contract
+A plan carries a fenced ```yaml list whose mappings have exactly the 8 contract
 keys. The plan is a spec only: task status lives in the factory database.
 """
 
@@ -19,10 +19,10 @@ from . import config as C
 from .globs import matches_any
 
 KEYS = (
-    "id", "goal", "spec_refs", "depends_on", "allowed_paths",
+    "id", "goal", "spec_refs", "depends_on",
     "non_goals", "acceptance", "verification", "risk",
 )
-LIST_KEYS = ("spec_refs", "depends_on", "allowed_paths", "non_goals", "acceptance", "verification")
+LIST_KEYS = ("spec_refs", "depends_on", "non_goals", "acceptance", "verification")
 RISKS = ("low", "medium", "high")
 ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*-t\d{2}[a-z]?$")
 PLACEHOLDER_RE = re.compile(r"\b(TODO|TBD|FIXME|XXX)\b|<[A-Z_ ]+>")
@@ -39,7 +39,6 @@ class Task:
     goal: str
     spec_refs: tuple[str, ...]
     depends_on: tuple[str, ...]
-    allowed_paths: tuple[str, ...]
     non_goals: tuple[str, ...]
     acceptance: tuple[str, ...]
     verification: tuple[str, ...]
@@ -82,9 +81,8 @@ def task_from_mapping(m: object, plan: str = "") -> Task:
         raise ContractError(f"{plan}: task id {tid!r} must be workstream-prefixed like 'name-t01'")
     if m["risk"] not in RISKS:
         raise ContractError(f"{plan}: task {tid!r} risk {m['risk']!r} not in {RISKS}")
-    for k in ("acceptance", "allowed_paths"):
-        if not m[k]:
-            raise ContractError(f"{plan}: task {tid!r} has empty {k}")
+    if not m["acceptance"]:
+        raise ContractError(f"{plan}: task {tid!r} has empty acceptance")
     return Task(plan=plan, **{k: tuple(m[k]) if k in LIST_KEYS else m[k] for k in KEYS})
 
 
@@ -146,20 +144,6 @@ def check_dependencies(tasks: dict[str, Task]) -> list[str]:
     return errs
 
 
-def check_path(p: str) -> str | None:
-    """Error for an allowed_paths entry that is not a bounded repo-relative path."""
-    if p.startswith(("/", "~")) or "\\" in p:
-        return f"{p!r} is not repo-relative"
-    parts = p.split("/")
-    if ".." in parts or "." in parts:
-        return f"{p!r} escapes or aliases the repository"
-    if parts[0] in ("*", "**") or p in ("", "**", "*"):
-        return f"{p!r} is unbounded"
-    if p.startswith(".git/") or p == ".git":
-        return f"{p!r} targets git internals"
-    return None
-
-
 def check_command(cmd: str) -> list[str]:
     """Command-selection problems in a verification command."""
     errs = []
@@ -181,7 +165,7 @@ def check_command(cmd: str) -> list[str]:
 
 def check_placeholders(t: Task) -> list[str]:
     errs = []
-    for k in ("goal", "acceptance", "verification", "allowed_paths"):
+    for k in ("goal", "acceptance", "verification"):
         vals = [getattr(t, k)] if isinstance(getattr(t, k), str) else list(getattr(t, k))
         errs += [f"{t.id}: placeholder in {k}: {v!r}" for v in vals if PLACEHOLDER_RE.search(v)]
     return errs
@@ -197,7 +181,6 @@ def validate_tasks(tasks: list[Task], known: dict[str, Task] | None = None) -> l
     by_id = {**(known or {}), **{t.id: t for t in tasks}}
     errs += [e for e in check_dependencies(by_id) if any(e.startswith(t.id) or t.id in e for t in tasks)]
     for t in tasks:
-        errs += [f"{t.id}: {e}" for p in t.allowed_paths if (e := check_path(p))]
         errs += [f"{t.id}: {e}" for c in t.verification for e in check_command(c)]
         errs += check_placeholders(t)
     return errs
@@ -219,3 +202,36 @@ def find_task(root: Path, task_id: str) -> Task:
     if task_id not in tasks:
         raise ContractError(f"unknown task {task_id} (no contract in the plans; see `plans` in {C.CONFIG_PATH})")
     return tasks[task_id]
+
+
+def plan_name(plan: str) -> str:
+    """Short name of a plan: its file stem (`docs/plans/infra/deploy.md` -> `deploy`)."""
+    return Path(plan).stem
+
+
+def find_plan(root: Path, ref: str) -> Path | None:
+    """A plan doc by path (repo-relative or absolute) or by name (file stem); None if there is none.
+    Raises ContractError when a name matches more than one plan."""
+    p = Path(ref) if Path(ref).is_absolute() else root / ref
+    if p.is_file():
+        return p
+    hits = [q for q in discover_plans(root) if q.stem == ref]
+    if len(hits) > 1:
+        raise ContractError(f"{ref} matches several plans: " + ", ".join(str(q.relative_to(root)) for q in hits))
+    return hits[0] if hits else None
+
+
+def plan_order(tasks: list[Task]) -> list[Task]:
+    """`tasks` (one plan) in dependency order; ties keep plan order."""
+    ids = {t.id for t in tasks}
+    done: set[str] = set()
+    out: list[Task] = []
+    while len(out) < len(tasks):
+        for t in tasks:
+            if t.id not in done and all(d in done or d not in ids for d in t.depends_on):
+                out.append(t)
+                done.add(t.id)
+                break
+        else:
+            raise ContractError("dependency cycle in " + ", ".join(t.id for t in tasks if t.id not in done))
+    return out

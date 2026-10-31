@@ -13,8 +13,9 @@ from pathlib import Path
 
 from .contracts import Task
 
-STATUSES = ("queued", "planning", "building", "reviewing", "verifying", "pr_open", "merged", "failed", "abandoned")
-ROLES = ("plan", "build", "review", "verify", "pr")
+STATUSES = ("queued", "planning", "building", "reviewing", "verifying", "pr_open", "conflict", "merged", "failed",
+            "abandoned")
+ROLES = ("plan", "build", "resolve", "review", "verify", "pr")
 ACTIVE = ("planning", "building", "reviewing", "verifying")
 
 SCHEMA = """
@@ -53,7 +54,7 @@ CREATE INDEX IF NOT EXISTS runs_task ON runs(task_id, id);
 # Columns added after the first release; ALTERed into older databases on open.
 MIGRATIONS = {
     "tasks": [("progress", "TEXT"), ("pid", "INTEGER"), ("started_at", "TEXT"), ("heartbeat_at", "TEXT"),
-              ("activity", "TEXT"), ("cost_usd", "REAL")],
+              ("activity", "TEXT"), ("cost_usd", "REAL"), ("trunk", "TEXT"), ("stacked_on", "TEXT")],
     "runs": [("steps", "INTEGER NOT NULL DEFAULT 0"), ("tokens_in", "INTEGER NOT NULL DEFAULT 0"),
              ("tokens_out", "INTEGER NOT NULL DEFAULT 0"), ("cost_usd", "REAL"),
              ("refused", "INTEGER NOT NULL DEFAULT 0"), ("transcript", "TEXT")],
@@ -110,14 +111,23 @@ class DB:
             raise KeyError(task_id)
         return Task.from_json(row["contract"])
 
-    def deps_unmet(self, task: Task) -> list[str]:
-        """Dependencies whose PR is not merged."""
-        unmet = []
+    def deps(self, task: Task) -> tuple[list[str], list[str]]:
+        """(open, unmet): dependencies with an open PR, which a dependent is built on top of (stacked),
+        and dependencies with neither a merged nor an open PR, annotated with their status."""
+        open_, unmet = [], []
         for d in task.depends_on:
             row = self.task(d)
-            if row is None or row["status"] != "merged":
+            if row is not None and row["status"] == "merged":
+                continue
+            if row is not None and row["status"] == "pr_open" and row["candidate_sha"]:
+                open_.append(d)
+            else:
                 unmet.append(f"{d} ({row['status'] if row else 'not in factory'})")
-        return unmet
+        return open_, unmet
+
+    def ready(self, task_id: str) -> bool:
+        """Every dependency is merged or has an open PR to build on."""
+        return not self.deps(self.contract(task_id))[1]
 
     # ------------------------------------------------------------ runs
 
@@ -175,12 +185,20 @@ class DB:
         return added, updated, orphaned
 
     def readiness(self, task_id: str) -> str:
-        """For a queued/failed task: 'ready' or what it waits for."""
-        unmet = self.deps_unmet(self.contract(task_id))
-        return "ready" if not unmet else "waits for " + ", ".join(unmet)
+        """For a queued/failed task: 'ready', 'ready, stacks on <open PRs>', or what it waits for."""
+        open_, unmet = self.deps(self.contract(task_id))
+        if unmet:
+            return "waits for " + ", ".join(unmet)
+        return "ready" + (", stacks on " + ", ".join(open_) if open_ else "")
 
     def runs(self, task_id: str) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM runs WHERE task_id=? ORDER BY id", (task_id,)).fetchall()
+
+    def last_report(self, task_id: str, role: str, outcome: str) -> str:
+        """The newest report of `role` that ended with `outcome`, e.g. the plan a PR was built from."""
+        row = self.conn.execute("SELECT report FROM runs WHERE task_id=? AND role=? AND outcome=? ORDER BY id DESC",
+                                (task_id, role, outcome)).fetchone()
+        return (row["report"] or "") if row else ""
 
 
 def open_db(home: Path) -> DB:

@@ -45,25 +45,32 @@ def cmd_validate_plan(a) -> int:
             for e in errs:
                 print(f"     {e}")
             for t in tasks:
-                if not G.e2e_writable(t, cfg):
-                    print(f"     warn: {t.id} is not factory-runnable: no allowed path can hold a new test "
-                          f"under {cfg.e2e.dir} (the e2e_written gate would always fail)")
+                if why := G.manual_reason(t, cfg):
+                    print(f"     warn: {t.id} is not factory-runnable: {why}")
             bad += bool(errs)
     return 1 if bad else 0
 
 
 def cmd_run(a) -> int:
-    if a.ready or len(a.task_ids) > 1:
-        return cmd_run_many(a)
-    if not a.task_ids:
-        print("give a task id, several task ids, or --ready", file=sys.stderr)
+    root = repo_root()
+    try:
+        tasks = contracts.load_all(root)
+        plan = None if a.target in tasks else contracts.find_plan(root, a.target)
+    except contracts.ContractError as e:
+        print(f"FAIL {e}", file=sys.stderr)
+        return 1
+    if a.target in tasks:
+        a.task_id = a.target
+        return cmd_run_one(a)
+    if plan is None:
+        print(f"{a.target} is neither a task id nor a plan (a path, or a plan's file name without .md)",
+              file=sys.stderr)
         return 2
-    a.task_id = a.task_ids[0]
-    return cmd_run_one(a)
+    return cmd_run_plan(a, plan, tasks)
 
 
 def _child_args(a) -> list[str]:
-    """Flags a scheduled child `factory run` inherits from the scheduler's command line."""
+    """Flags each task's child `factory run` inherits from the plan run's command line."""
     out = []
     for flag, value in (("--base", a.base), ("--model", a.model), ("--skip-gates", a.skip_gates or None),
                         ("--max-cost", a.max_cost)):
@@ -77,39 +84,44 @@ def _child_args(a) -> list[str]:
     return out
 
 
-def cmd_run_many(a) -> int:
+def cmd_run_plan(a, plan: Path, tasks: dict) -> int:
+    """Every task of one plan: one PR each, dependents stacked on their dependencies' open PRs."""
     import os
 
     from . import scheduler
     from .agents import missing_keys, role_models
 
     root = repo_root()
+    rel = str(plan.relative_to(root))
+    try:
+        mine = contracts.plan_order([t for t in tasks.values() if t.plan == rel])
+    except contracts.ContractError as e:
+        print(f"FAIL {e}", file=sys.stderr)
+        return 1
+    if not mine:
+        print(f"{rel} has no task contracts", file=sys.stderr)
+        return 1
+    errs = contracts.validate_tasks(mine, tasks)
+    if errs:
+        print("contracts invalid:\n  " + "\n  ".join(errs), file=sys.stderr)
+        return 1
     models = role_models(root, a.model)
     missing = missing_keys(models, os.environ)
     if missing:
         print(f"set {', '.join(missing)} first", file=sys.stderr)
         return 1
-    try:
-        tasks = contracts.load_all(root)
-    except contracts.ContractError as e:
-        print(f"FAIL {e}", file=sys.stderr)
-        return 1
-    unknown = [t for t in a.task_ids if t not in tasks]
-    if unknown:
-        print(f"unknown task(s): {', '.join(unknown)}", file=sys.stderr)
-        return 1
     db = _db()
-    db.sync(tasks)  # the scheduler works from the db; make sure it has the current contracts
-    not_queued = [f"{t} ({db.task(t)['status']})" for t in a.task_ids if db.task(t)["status"] != "queued"]
-    if not_queued:
-        print(f"skipping {', '.join(not_queued)}: only queued tasks start (`factory retry` requeues failed ones)",
-              file=sys.stderr)
-    plan = scheduler.Plan(tasks=list(a.task_ids), ready=a.ready, parallel=a.parallel, watch=a.watch,
-                          budget=a.budget, network_for=tuple(x for x in (a.network_for or "").split(",") if x),
-                          child_args=_child_args(a))
-    results = scheduler.run(db, plan, scheduler.default_launch(root), _refresh)
-    print(scheduler.summary(db, results))
-    return 0 if all(s in ("pr_open", "merged", "verifying") for s in results.values()) else 1
+    db.sync(tasks)       # the run works from the db; make sure it has the current contracts
+    _refresh(db)         # merged dependencies, dead runs, stacked PRs to move
+    skip = tuple(x for x in a.skip_gates.split(",") if x)
+    cfg = C.load(root)
+    manual = {t.id: why for t in mine if (why := G.manual_reason(t, cfg)) and "verification" not in skip}
+    p = scheduler.Plan(name=contracts.plan_name(rel), tasks=[t.id for t in mine], parallel=a.parallel,
+                       network_for=tuple(x for x in (a.network_for or "").split(",") if x),
+                       child_args=_child_args(a), manual=manual)
+    results = scheduler.run(db, p, scheduler.default_launch(root))
+    print(scheduler.summary(db, p))
+    return 0 if all(s in ("pr_open", "merged") for s in results.values()) else 1
 
 
 def cmd_run_one(a) -> int:
@@ -126,10 +138,8 @@ def cmd_run_one(a) -> int:
     if errs:
         print("contract invalid:\n  " + "\n  ".join(errs), file=sys.stderr)
         return 1
-    if not G.e2e_writable(task, cfg) and "e2e_written" not in a.skip_gates:
-        print(f"{task.id} cannot pass the e2e_written gate: none of its allowed_paths can hold a new test under "
-              f"{cfg.e2e.dir}. Fix the contract (add e.g. {cfg.e2e.dir}<name>{cfg.e2e.suffix}), or run it by hand.",
-              file=sys.stderr)
+    if (why := G.manual_reason(task, cfg)) and "verification" not in a.skip_gates:
+        print(f"{task.id}: {why}", file=sys.stderr)
         return 1
     models = role_models(root, a.model)
     missing = missing_keys(models, os.environ)
@@ -143,26 +153,51 @@ def cmd_run_one(a) -> int:
     if row["status"] in ACTIVE + ("pr_open", "merged") and not a.force:
         print(f"{task.id} is {row['status']}; use --force to run again", file=sys.stderr)
         return 1
-    unmet = db.deps_unmet(task)
+    stacked, unmet = db.deps(task)
     if unmet and not a.force:
-        print(f"{task.id} depends on unmerged tasks: {', '.join(unmet)} (use --force to override)", file=sys.stderr)
+        print(f"{task.id} waits for {', '.join(unmet)}: each dependency needs a merged or an open PR "
+              f"(use --force to override)", file=sys.stderr)
         return 1
-    base_ref = a.base or git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    old_wt = home / "worktrees" / task.id
+    if old_wt.exists() and not (row["status"] in ACTIVE and pid_alive(row["pid"])):
+        git(root, "worktree", "remove", "--force", str(old_wt))      # a finished run's leftovers
+    resolution = None
     try:
-        wt, base_sha = create_worktree(root, home, task.id, base_ref)
+        if row["status"] == "conflict" and not a.force:    # resolve the open PR's conflicts; --force rebuilds it
+            wt, base_sha, pr_base, trunk, stacked, resolution = _replay(db, root, home, row)
+        else:
+            deps = [db.task(d) for d in stacked]
+            if deps:   # build on the open PRs: start from the first, merge the others in; the PR targets the first
+                trunk = deps[0]["trunk"] or deps[0]["base_ref"]
+                pr_base, start = f"factory/{stacked[0]}", deps[0]["candidate_sha"]
+                merge = tuple((d["id"], d["candidate_sha"]) for d in deps[1:])
+            else:
+                trunk = a.base or git(root, "rev-parse", "--abbrev-ref", "HEAD")
+                pr_base, start, merge = trunk, _tip_or_local(root, trunk), ()
+            wt, base_sha = create_worktree(root, home, task.id, start, merge)
     except PipelineError as e:
         print(e, file=sys.stderr)
         return 1
-    db.update(task.id, status="queued", branch=f"factory/{task.id}", base_ref=base_ref, base_sha=base_sha,
-              candidate_sha=None, pr_url=None, attempts=0, note=None, progress=None)
+    if resolution:      # the open PR and its candidate stay until the resolution replaces them
+        deps = [db.task(d) for d in stacked]
+        db.update(task.id, status="queued", base_ref=pr_base, base_sha=base_sha, trunk=trunk,
+                  stacked_on=",".join(stacked) or None, attempts=0, note=None, progress=None)
+    else:
+        db.update(task.id, status="queued", branch=f"factory/{task.id}", base_ref=pr_base, base_sha=base_sha,
+                  trunk=trunk, stacked_on=",".join(stacked) or None,
+                  candidate_sha=None, pr_url=None, attempts=0, note=None, progress=None)
     db.claim(task.id, os.getpid())
     sbx = S.make(wt, home / "cache", sandbox=not a.no_sandbox, network=a.network, cfg=cfg.sandbox)
-    opts = Options(base_ref=base_ref, max_attempts=a.max_attempts, open_pr=not a.no_pr,
+    opts = Options(base_ref=pr_base, max_attempts=a.max_attempts, open_pr=not a.no_pr,
                    skip_gates=tuple(x for x in a.skip_gates.split(",") if x), full_e2e=a.full_e2e,
-                   max_cost=a.max_cost, config=cfg)
+                   max_cost=a.max_cost, config=cfg, stacked_on=tuple(f"{d['id']} ({d['pr_url']})" for d in deps),
+                   resolution=resolution)
     log = RunLog(log_path(home, task.id), echo=not a.quiet)
-    log("run", f"=== {task.id}: worktree {wt} on factory/{task.id} from {base_ref} ({base_sha[:12]}); "
-               f"models {', '.join(f'{r}={m}' for r, m in models.items())}")
+    log("run", f"=== {task.id}: worktree {wt} on factory/{task.id} from {pr_base} ({base_sha[:12]})"
+               + (f", stacked on {', '.join(stacked)}" if stacked else "")
+               + (f", resolving conflicts in {', '.join(resolution.conflicts) or 'nothing (replays cleanly)'}"
+                  if resolution else "")
+               + f"; models {', '.join(f'{r}={m}' for r, m in models.items())}")
     print(f"log: {log.path}  (follow elsewhere: factory logs {task.id} -f)", flush=True)
     try:
         result = Pipeline(db, LangChainRoles(root, a.model, cfg=cfg), task, wt, base_sha, sbx, opts, log=log,
@@ -170,6 +205,10 @@ def cmd_run_one(a) -> int:
     finally:
         log.close()
     row = db.task(task.id)
+    if resolution and row["status"] == "failed":
+        db.update(task.id, note=f"{row['note']}\n\nThe PR still holds {resolution.old_candidate[:12]}, which conflicts "
+                                f"with {resolution.onto}. Running the task again rebuilds it from scratch.")
+        row = db.task(task.id)
     summary = (f"{task.id}: {row['status']} after {row['attempts']} build(s)"
                + (f" — {row['pr_url']}" if row["pr_url"] else "")
                + (f" — ${row['cost_usd']:.2f}" if row["cost_usd"] is not None else ""))
@@ -179,25 +218,129 @@ def cmd_run_one(a) -> int:
     return 0 if result.get("outcome") in ("pr_open", "verified") else 1
 
 
+def _tip_or_local(root: Path, trunk: str) -> str:
+    """Start from the trunk as origin has it; the local branch only when origin cannot be reached."""
+    from .pipeline import PipelineError, trunk_tip
+    try:
+        return trunk_tip(root, trunk)
+    except PipelineError as e:
+        print(f"warning: building on the local {trunk}, which may be behind origin: {e}", file=sys.stderr)
+        return trunk
+
+
+def _replay(db, root: Path, home: Path, row):
+    """A conflicting PR's change replayed onto where it now belongs: its one open dependency's candidate, or
+    the trunk as origin has it. Returns (worktree, base sha, PR base, trunk, still-open dependencies, Resolution)."""
+    from .pipeline import PipelineError, branch_name, replay_worktree, trunk_tip
+    from .stack import retarget
+    deps = [d for d in (row["stacked_on"] or "").split(",") if d and db.task(d)["status"] != "merged"]
+    trunk = row["trunk"] or row["base_ref"]
+    if len(deps) > 1:
+        raise PipelineError(f"{row['id']} is stacked on several open PRs ({', '.join(deps)}); merge them, "
+                            f"`factory status --refresh`, then run it again")
+    if deps:
+        onto, label = db.task(deps[0])["candidate_sha"], branch_name(deps[0])
+    else:
+        onto, label = trunk_tip(root, trunk), trunk
+    wt, resolution = replay_worktree(root, home, row["id"], row["base_sha"], row["candidate_sha"], onto, label)
+    if row["base_ref"] != label:        # its dependency merged while it waited: the PR moves to the trunk
+        retarget(root, row["pr_url"], label)
+    return wt, onto, label, trunk, deps, resolution
+
+
 def _notify(title: str, body: str) -> None:
     import shutil
     if shutil.which("notify-send"):
         subprocess.run(["notify-send", title, body or ""], capture_output=True)
 
 
+def _pr_state(url: str) -> dict:
+    """GitHub's view of a PR: {"state": OPEN|MERGED|CLOSED, "mergeable": MERGEABLE|CONFLICTING|UNKNOWN},
+    or {} when gh fails. GitHub computes `mergeable` lazily: UNKNOWN now is usually known by the next refresh."""
+    p = subprocess.run(["gh", "pr", "view", url, "--json", "state,mergeable"], capture_output=True, text=True)
+    try:
+        return json.loads(p.stdout) if p.returncode == 0 else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _factory_prs(root: Path) -> dict[str, dict]:
+    """Every factory PR on GitHub by task id: {"url", "state", "baseRefName"}, an open one ahead of a merged one.
+    Closed PRs are left out (a board reset leaves old ones behind). {} when gh fails."""
+    p = subprocess.run(["gh", "pr", "list", "--state", "all", "--limit", "1000", "--json", "headRefName,url,state,baseRefName"],
+                       cwd=root, capture_output=True, text=True)
+    try:
+        prs = json.loads(p.stdout) if p.returncode == 0 else []
+    except json.JSONDecodeError:
+        return {}
+    found: dict[str, dict] = {}
+    for pr in prs:
+        task_id = pr["headRefName"].removeprefix("factory/")
+        if task_id != pr["headRefName"] and pr["state"] in ("OPEN", "MERGED") and \
+                found.get(task_id, {}).get("state") != "OPEN":
+            found[task_id] = pr
+    return found
+
+
+def _adopt(db, root: Path, remote: str = "origin") -> None:
+    """Take up factory PRs this board didn't open: another maintainer's runs, or this board's before a reset.
+    A queued or failed task with an open or merged PR on factory/<task> becomes pr_open or merged, so everyone
+    working from the same GitHub repo sees the same board. Holds (abandoned) and running tasks are left alone."""
+    from .pipeline import PipelineError, branch_name, git
+    waiting = [r for r in db.tasks() if r["status"] in ("queued", "failed") and not r["pr_url"]]
+    prs = _factory_prs(root) if waiting else {}
+    for row in waiting:
+        pr = prs.get(row["id"])
+        if pr is None:
+            continue
+        branch = branch_name(row["id"])
+        if pr["state"] == "MERGED":
+            db.update(row["id"], status="merged", branch=branch, pr_url=pr["url"], note=None, progress=None)
+            print(f"{row['id']}: merged in {pr['url']} (taken up from GitHub)", file=sys.stderr)
+            continue
+        base = pr["baseRefName"]
+        try:            # the task's own changes are those after where its branch left its base
+            git(root, "fetch", "-q", remote, branch, base)
+            candidate = git(root, "rev-parse", f"{remote}/{branch}")
+            base_sha = git(root, "merge-base", candidate, f"{remote}/{base}")
+        except PipelineError as e:
+            print(f"{row['id']}: can't take up {pr['url']}: {e}", file=sys.stderr)
+            continue
+        dep = base.removeprefix("factory/") if base.startswith("factory/") else None
+        trunk, hops = base, 0
+        while trunk.startswith("factory/") and (up := prs.get(trunk.removeprefix("factory/"))) and hops < 20:
+            trunk, hops = up["baseRefName"], hops + 1       # a stack ends on the trunk
+        db.update(row["id"], status="pr_open", branch=branch, pr_url=pr["url"], base_ref=base, base_sha=base_sha,
+                  candidate_sha=candidate, trunk=None if trunk.startswith("factory/") else trunk, stacked_on=dep,
+                  note="PR opened outside this board; taken up from GitHub", progress=None)
+        print(f"{row['id']}: PR open at {pr['url']}" + (f", stacked on {dep}" if dep else "")
+              + " (taken up from GitHub)", file=sys.stderr)
+
+
 def _refresh(db) -> None:
+    _adopt(db, repo_root())
     for row in db.tasks():
         if row["status"] in ACTIVE and row["pid"] and not pid_alive(row["pid"]):
             db.update(row["id"], status="failed", progress=None,
                       note=f"process {row['pid']} exited mid-run (killed or crashed); `factory clean` then rerun")
-        if row["status"] == "pr_open" and row["pr_url"]:
-            p = subprocess.run(["gh", "pr", "view", row["pr_url"], "--json", "state", "-q", ".state"],
-                               capture_output=True, text=True)
-            state = p.stdout.strip()
-            if state == "MERGED":
+        if row["status"] in ("pr_open", "conflict") and row["pr_url"]:
+            pr = _pr_state(row["pr_url"])
+            if pr.get("state") == "MERGED":
                 db.update(row["id"], status="merged")
-            elif state == "CLOSED":
+            elif pr.get("state") == "CLOSED":
                 db.update(row["id"], status="abandoned", note="PR closed without merge")
+            # A stacked PR is checked against its dependency by restack below, not by GitHub.
+            elif pr.get("mergeable") == "CONFLICTING" and row["status"] == "pr_open" and not row["stacked_on"]:
+                db.update(row["id"], status="conflict",
+                          note=f"its PR conflicts with {row['base_ref']}: `factory run {row['id']}` resolves it")
+                print(f"{row['id']}: conflicts with {row['base_ref']} (`factory run {row['id']}` resolves them)",
+                      file=sys.stderr)
+    from .stack import restack
+    for row in db.tasks():          # by id, so a plan's stack moves bottom-up
+        if row["status"] == "pr_open" and row["stacked_on"]:
+            msg = restack(db, repo_root(), factory_home(), row["id"])
+            if msg:
+                print(msg, file=sys.stderr)
 
 
 def _detail(db, r) -> str:
@@ -208,16 +351,18 @@ def cmd_status(a) -> int:
     db = _db()
     if a.refresh:
         _refresh(db)
-    rows = db.tasks()
+    rows = observe.in_plan(db.tasks(), a.plan)
     if a.json:
         print(json.dumps([dict(r) | {"detail": _detail(db, r)} for r in rows], indent=2))
         return 0
     if not rows:
-        print("no tasks yet — `factory sync` loads every contract from the plans")
-    for r in rows:
-        cost = f"${r['cost_usd']:.2f}" if r["cost_usd"] is not None else ""
-        status = "DEAD" if observe.liveness(r) else r["status"]
-        print(f"{r['id']:<31} {status:<10} builds={r['attempts']:<2} {cost:>6} {_detail(db, r)}")
+        print(f"no tasks in {a.plan}" if a.plan else "no tasks yet — `factory sync` loads every contract from the plans")
+    for name, rs in observe.plan_groups(db, rows):
+        print(f"{name}  {observe.strip(db, rs)}  {observe.counts(db, rs)}")
+        for r in rs:
+            cost = f"${r['cost_usd']:.2f}" if r["cost_usd"] is not None else ""
+            status = "DEAD" if observe.liveness(r) else r["status"]
+            print(f"  {r['id']:<32} {status:<10} builds={r['attempts']:<2} {cost:>6} {_detail(db, r)}")
     return 0
 
 
@@ -227,7 +372,7 @@ def cmd_top(a) -> int:
     db = _db()
     try:
         while True:
-            screen = observe.render_top(db, home, events=a.events)
+            screen = observe.render_top(db, home, events=a.events, plan=a.plan)
             if a.once:
                 print(screen)
                 return 0
@@ -290,8 +435,10 @@ def cmd_sync(a) -> int:
     print(f"synced {len(tasks)} tasks from the plans: {len(added)} added, {len(updated)} updated")
     for t in orphaned:
         print(f"  note: {t} is in the db but no longer in any plan")
-    ready = [r["id"] for r in db.tasks() if r["status"] == "queued" and db.readiness(r["id"]) == "ready"]
+    ready = [r["id"] for r in db.tasks() if r["status"] == "queued" and db.ready(r["id"])]
     print("ready to run: " + (", ".join(ready) if ready else "none"))
+    print("run a whole plan: factory run <plan>   (e.g. factory run "
+          + contracts.plan_name(next(iter(tasks.values())).plan) + ")" if tasks else "")
     return 0
 
 
@@ -367,6 +514,9 @@ def cmd_gates(a) -> int:
     cfg = C.load(root)
     task = contracts.find_task(root, a.task_id)
     sha = git(root, "rev-parse", "--verify", f"{a.ref}^{{commit}}")
+    row = _db().task(task.id)
+    stacked = a.base is None and row is not None and row["stacked_on"] and row["base_sha"]
+    a.base = row["base_sha"] if stacked else (a.base or "main")   # a stacked PR is reviewed against its dependency
     base = git(root, "merge-base", a.base, sha)
     wt = home / "review" / f"{task.id}-{sha[:12]}"
     if not wt.exists():
@@ -397,44 +547,33 @@ def cmd_clean(a) -> int:
     return 0
 
 
-def cmd_retry(a) -> int:
-    """Requeue failed tasks (all of them, or the ones named): remove the leftover worktree and set them back
-    to queued. A scheduler then starts them again, including one already running with --watch."""
-    from .pipeline import git
-
-    root = repo_root()
-    db = _db()
-    targets = [(t, db.task(t)) for t in a.task_ids] if a.task_ids else \
-        [(r["id"], r) for r in db.tasks()
-         if r["status"] == "failed" or (r["status"] in ACTIVE and observe.liveness(r) == "DEAD")]
-    requeued = []
-    for tid, row in targets:
-        if row is None:
-            print(f"{tid} is not in the factory (`factory sync`?)", file=sys.stderr)
-            continue
-        if row["status"] in ACTIVE and pid_alive(row["pid"]):
-            print(f"{tid} is running ({row['status']}); leaving it", file=sys.stderr)
-            continue
-        if row["status"] in ("queued", "pr_open", "merged"):
-            hint = "" if row["status"] == "queued" else f" (`factory run {tid} --force` redoes it)"
-            print(f"{tid} is {row['status']}; nothing to retry{hint}", file=sys.stderr)
-            continue
-        wt = factory_home() / "worktrees" / tid
-        if wt.exists():
-            git(root, "worktree", "remove", "--force", str(wt))
-        db.update(tid, status="queued", progress=None, note=None)
-        requeued.append(tid)
-    if not requeued:
-        print("nothing to retry")
-        return 1 if a.task_ids else 0
-    print(f"requeued {len(requeued)}: {', '.join(requeued)}")
-    print("a scheduler running with --watch starts them; otherwise `factory run --ready --parallel N`")
-    return 0
-
-
 def cmd_abandon(a) -> int:
     _db().update(a.task_id, status="abandoned", note=a.note)
     return 0
+
+
+def cmd_requeue(a) -> int:
+    """Put failed or abandoned tasks back to `queued`, so the next plan run picks them up. Running tasks,
+    open PRs and merged tasks are left alone; the next run replaces any leftover worktree itself."""
+    db = _db()
+    rc = 0
+    for tid in a.task_ids:
+        row = db.task(tid)
+        if row is None:
+            print(f"{tid}: not on the board (run `factory sync` first)")
+            rc = 1
+        elif row["status"] in ACTIVE and pid_alive(row["pid"]):
+            print(f"{tid}: running ({row['status']}, pid {row['pid']}); leaving it")
+            rc = 1
+        elif row["status"] in ("pr_open", "conflict", "merged"):
+            print(f"{tid}: {row['status']}; nothing to requeue")
+            rc = 1
+        elif row["status"] == "queued":
+            print(f"{tid}: already queued")
+        else:
+            db.update(tid, status="queued", note=None, progress=None)
+            print(f"{tid}: {row['status']} -> queued")
+    return rc
 
 
 SKILLS = ("plan-workstream", "review-task")
@@ -503,7 +642,8 @@ def cmd_check_output(a) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="factory", description="plan -> build -> review -> verify -> PR, per task")
+    p = argparse.ArgumentParser(prog="factory", description="plan -> build -> review -> verify -> PR, per task; "
+                                                         "`factory run <plan>` runs a whole plan")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("init", help="scaffold .factory/config.yaml, the role prompts and the workflow skills here")
@@ -518,15 +658,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("plans", nargs="*")
     s.set_defaults(fn=cmd_validate_plan)
 
-    s = sub.add_parser("run", help="run tasks through the four agents and open PRs (one, several, or --ready)")
-    s.add_argument("task_ids", nargs="*", metavar="task_id")
-    s.add_argument("--ready", action="store_true", help="run every ready task (scheduler mode)")
-    s.add_argument("--parallel", type=int, default=3, help="scheduler: max tasks running at once")
-    s.add_argument("--watch", action="store_true",
-                   help="scheduler: keep running; poll GitHub for merged PRs and start newly ready tasks")
-    s.add_argument("--budget", type=float, help="scheduler: stop starting tasks once this many USD are spent")
+    s = sub.add_parser("run", help="run every task of a plan (one PR each) or a single task")
+    s.add_argument("target", help="a plan (path, or file name without .md) or a task id")
+    s.add_argument("--parallel", type=int, default=3, help="plan run: max tasks running at once")
+    s.add_argument("--network-for", help="plan run: comma list of task ids that get --network")
     s.add_argument("--max-cost", type=float, help="abort a task once it has cost this many USD")
-    s.add_argument("--network-for", help="scheduler: comma list of task ids that get --network")
     s.add_argument("--base", help="base branch for the worktree and PR (default: current branch)")
     s.add_argument("--model", help="override every role's model, e.g. openrouter:z-ai/glm-5.3")
     s.add_argument("--max-attempts", type=int, default=3, help="max build attempts (review/gate loops)")
@@ -535,12 +671,13 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--no-pr", action="store_true", help="stop after gates pass; do not push or open a PR")
     s.add_argument("--skip-gates", default="", help="comma list, e.g. e2e_tests (recorded in the PR body)")
     s.add_argument("--full-e2e", action="store_true", help="run the whole e2e suite (e2e.run_all)")
-    s.add_argument("--force", action="store_true", help="run despite status or unmerged dependencies")
+    s.add_argument("--force", action="store_true", help="run despite its status or dependencies without PRs")
     s.add_argument("--quiet", action="store_true", help="log to file only (no terminal echo)")
     s.add_argument("--notify", action="store_true", help="desktop notification (notify-send) when the run ends")
     s.set_defaults(fn=cmd_run)
 
-    s = sub.add_parser("top", help="live dashboard: every running/failed/open/ready task + recent events")
+    s = sub.add_parser("top", help="live dashboard: plans with their task counters, running tasks, recent events")
+    s.add_argument("plan", nargs="?", help="only this plan (name or path)")
     s.add_argument("--interval", type=float, default=2.0)
     s.add_argument("--events", type=int, default=12, help="recent log lines to show (0 = none)")
     s.add_argument("--once", action="store_true", help="print one frame and exit")
@@ -571,8 +708,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("-n", "--lines", type=int, default=0, help="only the last N lines first")
     s.set_defaults(fn=cmd_logs)
 
-    s = sub.add_parser("status", help="task board from the local database")
-    s.add_argument("--refresh", action="store_true", help="update pr_open tasks from GitHub (merged/closed)")
+    s = sub.add_parser("status", help="task board, grouped by plan")
+    s.add_argument("plan", nargs="?", help="only this plan (name or path)")
+    s.add_argument("--refresh", action="store_true",
+                   help="pick up merged/closed PRs and PRs opened elsewhere from GitHub, and move stacked PRs "
+                        "whose dependencies merged")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_status)
 
@@ -584,7 +724,7 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("gates", help="run the deterministic gates for a ref (no agents)")
     s.add_argument("task_id")
     s.add_argument("--ref", default="HEAD")
-    s.add_argument("--base", default="main")
+    s.add_argument("--base", help="default: the PR a stacked task is built on, else main")
     s.add_argument("--skip", default="")
     s.add_argument("--full-e2e", action="store_true")
     s.add_argument("--no-sandbox", action="store_true")
@@ -594,14 +734,14 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("task_id")
     s.set_defaults(fn=cmd_clean)
 
-    s = sub.add_parser("retry", help="requeue failed tasks (all, or the ones named) so a scheduler runs them again")
-    s.add_argument("task_ids", nargs="*")
-    s.set_defaults(fn=cmd_retry)
-
     s = sub.add_parser("abandon", help="mark a task abandoned")
     s.add_argument("task_id")
     s.add_argument("--note", default="")
     s.set_defaults(fn=cmd_abandon)
+
+    s = sub.add_parser("requeue", help="put failed or abandoned tasks back to queued for the next plan run")
+    s.add_argument("task_ids", nargs="+", metavar="TASK")
+    s.set_defaults(fn=cmd_requeue)
 
     s = sub.add_parser("check-output", help="classify a test log; zero tests is not a pass")
     s.add_argument("--cmd", required=True)

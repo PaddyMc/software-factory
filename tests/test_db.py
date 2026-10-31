@@ -26,15 +26,17 @@ def test_upsert_keeps_status_and_refreshes_contract(db):
     assert db.contract(t1.id) == t1
 
 
-def test_dependencies_need_a_merged_pr(db):
+def test_dependencies_are_stacked_on_open_prs_or_merged(db):
     ts = _tasks()
     db.upsert_task(ts["demo-t02"])
-    assert db.deps_unmet(ts["demo-t02"]) == ["demo-t01 (not in factory)"]
+    assert db.deps(ts["demo-t02"]) == ([], ["demo-t01 (not in factory)"])
     db.upsert_task(ts["demo-t01"])
-    db.update("demo-t01", status="pr_open")
-    assert db.deps_unmet(ts["demo-t02"]) == ["demo-t01 (pr_open)"]
+    assert db.readiness("demo-t02") == "waits for demo-t01 (queued)" and not db.ready("demo-t02")
+    db.update("demo-t01", status="pr_open", candidate_sha="abc")
+    assert db.deps(ts["demo-t02"]) == (["demo-t01"], [])
+    assert db.readiness("demo-t02") == "ready, stacks on demo-t01" and db.ready("demo-t02")
     db.update("demo-t01", status="merged")
-    assert db.deps_unmet(ts["demo-t02"]) == []
+    assert db.deps(ts["demo-t02"]) == ([], []) and db.readiness("demo-t02") == "ready"
 
 
 def test_runs_are_recorded_in_order(db):

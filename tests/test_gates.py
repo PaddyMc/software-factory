@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from factory import config as C
 from factory import gates as G
 from factory.contracts import parse_plan
@@ -38,12 +40,23 @@ def test_good_change_passes_all_cheap_gates_and_verification(repo):
     assert _by_name(gs)["unit_tests"].ok is None
 
 
-def test_out_of_scope_and_plan_edit_fail(repo):
+def test_any_file_may_change_but_the_plan(repo):
     task = _task(repo)
-    base, sha = _commit(repo, {**GOOD, "README.md": "x", "docs/plans/demo/demo.md": "edited"})
+    base, sha = _commit(repo, {**GOOD, "README.md": "x", "Cargo.lock": "x", "docs/plans/demo/demo.md": "edited"})
     g = _by_name(G.run_gates(task, repo, base, sha, Unsandboxed(repo), C.load(repo), skip=SKIP))
-    assert not g["scope"].ok and "README.md" in g["scope"].detail
+    assert "scope" not in g and g["diff"].ok and "lockfile changes: Cargo.lock" in g["diff"].detail
     assert not g["plan_untouched"].ok
+
+
+def test_a_verification_the_factory_refuses_makes_a_task_manual(repo):
+    task = _task(repo)
+    cfg = C.load(repo)
+    assert G.manual_reason(task, cfg) == ""
+    manual = replace(task, verification=("terraform -chdir=infra apply -auto-approve",))
+    assert "which the factory refuses; run it by hand" in G.manual_reason(manual, cfg)
+    project = replace(task, verification=("kubectl delete ns demo",))
+    assert G.manual_reason(project, cfg) == ""
+    assert "kubectl delete" in G.manual_reason(project, C.parse({"denied_commands": [r"\bkubectl\s+delete\b"]}))
 
 
 def test_missing_e2e_and_session_log_fail(repo):
@@ -88,7 +101,7 @@ def test_without_a_config_only_the_universal_gates_run(repo):
     git(repo, "commit", "-q", "-m", "no config")
     base, sha = _commit(repo, {"src/greet.txt": "hello\n"})
     gs = G.run_gates(_task(repo), repo, base, sha, Unsandboxed(repo), C.load(repo))
-    assert [g.name for g in gs] == ["clean", "diff", "scope", "plan_untouched", "verification"]
+    assert [g.name for g in gs] == ["clean", "diff", "conflict_markers", "plan_untouched", "verification"]
     assert G.passed(gs), G.table(gs)
 
 
@@ -117,13 +130,15 @@ def test_python_e2e_tests_are_detected_and_run(repo):
     assert sbx.cmds[-1] == "pytest crates/e2e/tests/test_greet.py::test_greets"
 
 
-def test_e2e_writable_follows_the_config(repo):
-    task = _task(repo)
-    assert G.e2e_writable(task, C.load(repo))
-    assert G.e2e_writable(task, C.parse({}))                                  # nothing required
-    assert not G.e2e_writable(task, C.parse({"e2e": {"dir": "tests/e2e"}}))  # src/** cannot hold it
-
-
 def _raw(repo):
     import yaml
     return yaml.safe_load((repo / ".factory/config.yaml").read_text())
+
+
+def test_conflict_markers_fail_the_gate(repo):
+    left = {**GOOD, "src/greet.txt": "<<<<<<< HEAD\nhi\n||||||| parent\n=======\nhello\n>>>>>>> abc (task change)\n"}
+    base, sha = _commit(repo, left)
+    gs = _by_name(G.run_gates(_task(repo), repo, base, sha, Unsandboxed(repo), C.load(repo), skip=SKIP))
+    assert gs["conflict_markers"].ok is False
+    assert gs["conflict_markers"].detail == "conflict markers left at src/greet.txt:1, src/greet.txt:3, src/greet.txt:6"
+    assert G.conflict_markers("+++ b/a.md\n@@ -1 +1,2 @@\n context\n+<<<<<<<< eight is not a marker\n") == []

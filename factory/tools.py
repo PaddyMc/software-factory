@@ -1,6 +1,6 @@
 """LangChain tools, scoped per role.
 
-planner/reviewer: read-only. builder: + write/edit within allowed_paths + sandboxed run.
+planner/reviewer: read-only. builder: + write/edit anywhere in the worktree + sandboxed run.
 verifier: read-only + sandboxed run. Nobody gets commit, push, or database access.
 """
 
@@ -14,8 +14,6 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
-from .globs import glob_to_regex
-
 DENIED_COMMANDS = (
     r"\bgit\s+(push|commit|reset|checkout|switch|rebase|merge|tag|worktree|remote)\b",
     r"\bsudo\b", r"\bterraform\b.*\b(apply|destroy)\b", r"\bgh\b", r"\bfactory\s+",
@@ -24,24 +22,33 @@ HIDDEN_DIRS = ("target", ".git", "node_modules", ".venv", "__pycache__")
 
 
 class PathGuard:
-    def __init__(self, root: Path, allowed: tuple[str, ...] | list[str]):
+    """File tools work in the worktree. Reads may also open dependency sources (crates, toolchain);
+    writes stay out of git internals."""
+
+    def __init__(self, root: Path, sources: tuple[Path, ...] = ()):
         self.root = root.resolve()
-        self.allowed = list(allowed)
-        self._res = [glob_to_regex(a) for a in allowed]
+        self.sources = tuple(s.resolve() for s in sources)    # read-only: `Config.dependency_dirs()`
+
+    def _abs(self, path: str) -> Path:
+        return (self.root / Path(path).expanduser()).resolve()
 
     def rel(self, path: str) -> str:
-        p = (self.root / path).resolve()
+        p = self._abs(path)
         if p != self.root and self.root not in p.parents:
             raise PermissionError(f"{path} is outside the worktree")
         return p.relative_to(self.root).as_posix()
 
-    def allows(self, rel: str) -> bool:
-        return any(r.match(rel) for r in self._res)
+    def readable(self, path: str) -> Path:
+        p = self._abs(path)
+        if any(p == r or r in p.parents for r in (self.root, *self.sources)):
+            return p
+        raise PermissionError(f"{path} is outside the worktree and the dependency sources "
+                              f"({', '.join(map(str, self.sources))})")
 
     def check_write(self, path: str) -> str:
         rel = self.rel(path)
-        if not self.allows(rel):
-            raise PermissionError(f"write to {rel} is outside allowed_paths {self.allowed}")
+        if rel.split("/")[0] == ".git":
+            raise PermissionError(f"write to {rel}: git internals are off limits")
         return rel
 
 
@@ -54,23 +61,24 @@ class ToolLog:
 def read_tools(root: Path, guard: PathGuard) -> list:
     @tool
     def read_file(path: str, start: int = 1, end: int | None = None) -> str:
-        """Read a worktree-relative file. Lines are 1-indexed; `end` is inclusive. Output is numbered."""
-        p = root / guard.rel(path)
+        """Read a worktree-relative file, or a dependency's source by absolute path (e.g. ~/.cargo/registry/src/…).
+        Lines are 1-indexed; `end` is inclusive. Output is numbered."""
+        p = guard.readable(path)
         lines = p.read_text(errors="replace").splitlines()
         end = end or len(lines)
         return "\n".join(f"{i}\t{line}" for i, line in enumerate(lines[start - 1:end], start)) or "(empty)"
 
     @tool
     def list_dir(path: str = ".") -> str:
-        """List a worktree-relative directory (non-recursive). Directories end with '/'."""
-        p = root / guard.rel(path)
+        """List a worktree-relative directory, or a dependency source directory (non-recursive). Directories end with '/'."""
+        p = guard.readable(path)
         return "\n".join(sorted(c.name + ("/" if c.is_dir() else "") for c in p.iterdir()
                                 if c.name not in HIDDEN_DIRS)) or "(empty)"
 
     @tool
     def grep(pattern: str, path: str = ".", glob: str | None = None, max_lines: int = 200) -> str:
-        """Regex search under a worktree-relative path. `glob` filters file names, e.g. '*.rs'."""
-        p = root / guard.rel(path)
+        """Regex search under a worktree-relative path or a dependency source. `glob` filters file names, e.g. '*.rs'."""
+        p = guard.readable(path)
         if shutil.which("rg"):
             cmd = ["rg", "-n", "--no-heading", "-e", pattern, str(p)] + (["-g", glob] if glob else [])
         else:
@@ -97,7 +105,7 @@ def diff_tool(root: Path, base_sha: str) -> list:
 def write_tools(root: Path, guard: PathGuard, log: ToolLog) -> list:
     @tool
     def write_file(path: str, content: str) -> str:
-        """Create or overwrite a file. Must be within the task's allowed_paths."""
+        """Create or overwrite a worktree-relative file."""
         try:
             rel = guard.check_write(path)
         except PermissionError as e:
@@ -110,7 +118,7 @@ def write_tools(root: Path, guard: PathGuard, log: ToolLog) -> list:
 
     @tool
     def edit_file(path: str, old: str, new: str) -> str:
-        """Replace exactly one occurrence of `old` with `new` in a file within allowed_paths."""
+        """Replace exactly one occurrence of `old` with `new` in a worktree-relative file."""
         try:
             rel = guard.check_write(path)
         except PermissionError as e:

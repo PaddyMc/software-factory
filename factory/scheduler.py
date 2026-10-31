@@ -1,15 +1,14 @@
-"""Run many tasks from one command: `factory run --ready --parallel N [--watch]`.
+"""Run a whole plan: `factory run <plan> [--parallel N]`.
 
-The scheduler is a small supervisor loop. Each task runs in its own child
-`factory run <task> --quiet` process (own sandbox, log, transcript, pid
-liveness), so one crash never takes the others down and `factory top` shows
-them all. With --watch it also polls GitHub for merged PRs and starts the
-tasks whose dependencies just merged.
+Every task of the plan without a PR yet runs as its own child `factory run <task> --quiet` process
+(own worktree, sandbox, log, transcript, pid liveness), so one crash never takes the others down and
+`factory top` shows them all. A task starts once each dependency is merged or has an open PR; the
+child then builds it on top of those PRs (stacked, see stack.py). Independent tasks run in parallel,
+up to --parallel. The run ends when nothing more can start, leaving one PR per finished task.
 
-Failed tasks are never retried on their own; `factory retry` puts them back
-to queued and a running scheduler starts them again. Live runs it did not
-start (an earlier scheduler, a single `factory run`) count toward --parallel,
-so restarting the scheduler never doubles the load.
+Rerunning the plan picks up where it stopped: tasks with a PR are kept, failed ones run again, and PRs
+that conflict with their base (`conflict`, found by the refresh the plan run starts with) get their
+conflicts resolved.
 """
 
 from __future__ import annotations
@@ -22,21 +21,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .db import ACTIVE, DB, pid_alive, seconds_since
-from .observe import human_secs
+from .db import ACTIVE, DB, pid_alive
+from .observe import counts, human_secs, strip
 
 
 @dataclass
 class Plan:
-    tasks: list[str]                       # explicit task ids ([] = every ready task with --ready)
-    ready: bool
+    name: str
+    tasks: list[str]                       # the plan's task ids, in dependency order
     parallel: int = 3
-    watch: bool = False
-    budget: float | None = None            # stop launching once this much USD was spent by this scheduler
     poll: float = 5.0
-    refresh_every: float = 60.0
     network_for: tuple[str, ...] = ()      # task ids that get --network
     child_args: list[str] = field(default_factory=list)   # flags passed through to every child run
+    manual: dict[str, str] = field(default_factory=dict)  # task id -> why the factory cannot run it
 
 
 def say(msg: str) -> None:
@@ -51,55 +48,29 @@ def default_launch(repo: Path) -> Callable[[str, list[str]], subprocess.Popen]:
     return launch
 
 
-def blocked(running: dict, results: dict[str, str]) -> set[str]:
-    """Not to be launched: running now, or ended still `queued` (refused before it started, e.g. an invalid
-    contract; launching it again would loop). A task that ended failed and is queued again was requeued
-    by `factory retry`, so it may start again."""
-    return set(running) | {t for t, status in results.items() if status == "queued"}
+def startable(db: DB, plan: Plan, tid: str, started: set[str]) -> bool:
+    """No PR yet (or one that conflicts), not running, not started by this run, and every dependency merged
+    or with an open PR. A task that failed in an earlier run starts again; one that fails in this run does not."""
+    row = db.task(tid)
+    return (row is not None and tid not in started and tid not in plan.manual
+            and row["status"] in ("queued", "failed", "conflict") and db.ready(tid))
 
 
-def candidates(db: DB, plan: Plan, skip: set[str]) -> list[str]:
-    """Tasks that may start now: queued, dependencies merged, not in `skip`."""
-    pool = plan.tasks or ([r["id"] for r in db.tasks()] if plan.ready else [])
-    out = []
-    for tid in pool:
-        row = db.task(tid)
-        if row is None or tid in skip or row["status"] != "queued":
-            continue
-        if db.readiness(tid) == "ready":
-            out.append(tid)
-    return out
-
-
-def pending(db: DB, plan: Plan, skip: set[str]) -> list[str]:
-    """Explicit tasks not started yet (still waiting for dependencies)."""
-    return [t for t in plan.tasks if t not in skip and (db.task(t) or {"status": None})["status"] == "queued"]
-
-
-def elsewhere(db: DB, running: dict) -> list[str]:
-    """Live runs this scheduler did not start; they count toward --parallel."""
-    return [r["id"] for r in db.tasks() if r["status"] in ACTIVE and r["id"] not in running and pid_alive(r["pid"])]
+def elsewhere(db: DB, plan: Plan, running: dict) -> list[str]:
+    """Tasks of the plan being run by another `factory run`; their dependents wait for them."""
+    return [t for t in plan.tasks if t not in running
+            and (r := db.task(t)) is not None and r["status"] in ACTIVE and pid_alive(r["pid"])]
 
 
 def run(db: DB, plan: Plan, launch: Callable[[str, list[str]], subprocess.Popen],
-        refresh: Callable[[DB], None], clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep) -> dict[str, str]:
-    """Supervise until nothing is running and nothing more can start (or forever with --watch).
-    Returns {task_id: final status} for every task this scheduler started."""
+        clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep) -> dict[str, str]:
+    """Supervise until nothing is running and nothing more can start.
+    Returns {task_id: final status} for every task this run started."""
     running: dict[str, tuple[subprocess.Popen, float]] = {}
     results: dict[str, str] = {}
-    spent_at_start = sum(r["cost_usd"] or 0 for r in db.tasks())
-    last_refresh = clock() - plan.refresh_every
-    stopped_for_budget = False
-    say(f"scheduler: parallel {plan.parallel}" + (", watching for merges" if plan.watch else "")
-        + (f", budget ${plan.budget:.2f}" if plan.budget is not None else "")
-        + " — follow with `factory top`")
-    others = elsewhere(db, running)
-    if others:
-        say(f"{len(others)} run(s) already in progress count toward --parallel: " + ", ".join(others))
+    say(f"plan {plan.name}: {len(plan.tasks)} tasks, up to {plan.parallel} at once — follow with `factory top`")
     try:
         while True:
-            # Reap finished children.
             for tid, (proc, t0) in list(running.items()):
                 if proc.poll() is None:
                     continue
@@ -112,54 +83,45 @@ def run(db: DB, plan: Plan, launch: Callable[[str, list[str]], subprocess.Popen]
                 cost = f" ${row['cost_usd']:.2f}" if row["cost_usd"] is not None else ""
                 say(f"done   {tid:<32} {row['status']:<9} {human_secs(clock() - t0)}{cost}  {extra}")
 
-            # Pick up merges so dependents become ready.
-            if plan.watch and clock() - last_refresh >= plan.refresh_every:
-                before = {r["id"]: r["status"] for r in db.tasks()}
-                refresh(db)
-                last_refresh = clock()
-                for r in db.tasks():
-                    if before.get(r["id"]) != r["status"] and r["status"] in ("merged", "abandoned"):
-                        say(f"{r['status']:<6} {r['id']}")
+            free = max(0, plan.parallel - len(running))
+            for tid in [t for t in plan.tasks if startable(db, plan, t, set(running) | set(results))][:free]:
+                args = list(plan.child_args) + (["--network"] if tid in plan.network_for else [])
+                running[tid] = (launch(tid, args), clock())
+                stacks = db.deps(db.contract(tid))[0]
+                say(f"start  {tid:<32} ({len(running)}/{plan.parallel} running)"
+                    + (f" stacked on {', '.join(stacks)}" if stacks else ""))
 
-            # Budget: stop launching (running tasks continue; per-task --max-cost still applies).
-            spent = sum(r["cost_usd"] or 0 for r in db.tasks()) - spent_at_start
-            if plan.budget is not None and spent >= plan.budget and not stopped_for_budget:
-                stopped_for_budget = True
-                say(f"budget reached (${spent:.2f} of ${plan.budget:.2f}); not starting more tasks")
-
-            # Launch.
-            if not stopped_for_budget:
-                others = elsewhere(db, running)
-                free = max(0, plan.parallel - len(running) - len(others))
-                for tid in candidates(db, plan, blocked(running, results))[:free]:
-                    args = list(plan.child_args) + (["--network"] if tid in plan.network_for else [])
-                    running[tid] = (launch(tid, args), clock())
-                    say(f"start  {tid:<32} ({len(running) + len(others)}/{plan.parallel} running)")
-
-            if not running and not plan.watch:
-                skip = blocked(running, results)
-                ready_now = [] if stopped_for_budget else candidates(db, plan, skip)
-                if not (ready_now and elsewhere(db, running)):    # else: runs started elsewhere hold every slot
-                    waiting = pending(db, plan, skip)
-                    if waiting and stopped_for_budget:
-                        say("not started (budget reached): " + ", ".join(waiting))
-                    elif waiting:
-                        say("waiting on unmerged dependencies: " + ", ".join(waiting) + " (use --watch to keep going)")
-                    break
+            if not running and not elsewhere(db, plan, running):
+                break
             sleep(plan.poll)
     except KeyboardInterrupt:
         if running:
-            say(f"scheduler stopped; {len(running)} run(s) continue in the background: " + ", ".join(running))
+            say(f"stopped; {len(running)} run(s) continue in the background: " + ", ".join(running))
     return results
 
 
-def summary(db: DB, results: dict[str, str]) -> str:
-    if not results:
-        return "nothing was started (no ready tasks — `factory sync`, then `factory status`)"
-    lines = []
-    for tid, status in sorted(results.items()):
-        row = db.task(tid)
-        cost = f"${row['cost_usd']:.2f}" if row["cost_usd"] is not None else "-"
-        lines.append(f"  {tid:<32} {status:<9} {cost:>7}  {row['pr_url'] or ''}")
-    total = sum(db.task(t)["cost_usd"] or 0 for t in results)
-    return "\n".join([f"{len(results)} task(s), ${total:.2f}:"] + lines)
+def summary(db: DB, plan: Plan) -> str:
+    """Where every task of the plan ended up, and the PRs to review in merge order."""
+    rows = [db.task(t) for t in plan.tasks]
+    total = sum(r["cost_usd"] or 0 for r in rows)
+    lines = [f"plan {plan.name}  {strip(db, rows)}  {counts(db, rows)} · ${total:.2f}"]
+    for r in rows:
+        st = r["status"]
+        if r["id"] in plan.manual and st not in ("pr_open", "merged"):
+            what = f"manual: {plan.manual[r['id']]}"
+        elif st == "pr_open":
+            what = r["pr_url"] + (f"  stacked on {r['stacked_on']}" if r["stacked_on"] else "")
+        elif st == "conflict":
+            what = f"{r['pr_url']}  {(r['note'] or '').splitlines()[0][:140] if r['note'] else ''}"
+        elif st in ("queued", "failed"):
+            what = db.readiness(r["id"]) if st == "queued" else (r["note"] or "").splitlines()[0][:140] if r["note"] else ""
+        else:
+            what = (r["note"] or "").splitlines()[0][:140] if st == "abandoned" and r["note"] else ""
+        cost = f"${r['cost_usd']:.2f}" if r["cost_usd"] is not None else "-"
+        lines.append(f"  {r['id']:<34} {st:<9} {cost:>7}  {what}")
+    prs = [r["pr_url"] for r in rows if r["status"] == "pr_open"]
+    if prs:
+        lines += ["", "review and merge in this order (a stacked PR targets the one before it; after each merge, "
+                      "`factory status --refresh` moves the next onto the trunk):"]
+        lines += [f"  {u}" for u in prs]
+    return "\n".join(lines)
