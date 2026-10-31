@@ -40,8 +40,15 @@ def test_init_writes_config_skills_session_log_and_guidance(initialised):
     cfg = C.load(initialised)
     assert cfg.name == "repo" and cfg.e2e is None and cfg.session_log == "docs/sessions" and cfg.unit_tests == ()
     for skill in SKILLS:
-        assert (initialised / f".claude/skills/{skill}/SKILL.md").is_file()
-    assert (initialised / ".claude/skills/factory-ops/references/troubleshooting.md").is_file()
+        source = initialised / f".claude/skills/{skill}"
+        codex = initialised / f".agents/skills/{skill}"
+        assert (source / "SKILL.md").is_file()
+        assert codex.is_symlink() and not codex.readlink().is_absolute()
+        assert codex.samefile(source)
+    assert (initialised / ".agents/skills/factory-ops/references/troubleshooting.md").is_file()
+    for skill in ("plan-workstream", "review-task"):
+        policy = initialised / f".agents/skills/{skill}/agents/openai.yaml"
+        assert yaml.safe_load(policy.read_text())["policy"]["allow_implicit_invocation"] is False
     assert (initialised / "docs/sessions/README.md").is_file()
     assert not (initialised / ".factory/agents").exists()                  # prompts ship with the factory
     assert not (initialised / "docs/plans/example.md").exists()            # the repo already has plans
@@ -79,6 +86,7 @@ def test_the_section_goes_to_the_guidance_file_agents_read(fresh):
     assert not (fresh / "AGENTS.md").exists()                            # agents read the first that exists
     assert (fresh / "CLAUDE.md").read_text().startswith("# Mine\n\n" + BEGIN)
     assert not (fresh / ".claude").exists()
+    assert not (fresh / ".agents").exists()
 
 
 def test_rerun_keeps_files_and_replaces_only_the_section(initialised, capsys):
@@ -96,6 +104,69 @@ def test_rerun_keeps_files_and_replaces_only_the_section(initialised, capsys):
     assert main(["init"]) == 0 and "keep   AGENTS.md (factory section up to date)" in capsys.readouterr().out
     assert main(["init", "--force"]) == 0
     assert skill.read_text() != "mine" and agents.read_text().count(BEGIN) == 1
+    codex = initialised / ".agents/skills/review-task"
+    assert codex.is_symlink() and (codex / "SKILL.md").read_text() == skill.read_text()
+
+
+def test_init_adds_codex_links_to_an_existing_installation(fresh):
+    skill = fresh / ".claude/skills/plan-workstream/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("custom planning instructions")
+
+    assert main(["init"]) == 0
+    codex = fresh / ".agents/skills/plan-workstream"
+    assert codex.is_symlink() and (codex / "SKILL.md").read_text() == "custom planning instructions"
+    assert main(["init"]) == 0
+    assert skill.read_text() == "custom planning instructions"
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_init_preserves_existing_codex_skills_even_with_force(fresh, kind):
+    codex = fresh / ".agents/skills/review-task"
+    codex.parent.mkdir(parents=True)
+    if kind == "directory":
+        codex.mkdir()
+        custom = codex / "SKILL.md"
+    else:
+        custom = codex
+    custom.write_text("custom review instructions")
+
+    for args in (["init"], ["init", "--force"]):
+        assert main(args) == 0
+        assert not codex.is_symlink() and custom.read_text() == "custom review instructions"
+        assert (fresh / ".agents/skills/plan-workstream/SKILL.md").is_file()
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_force_replaces_a_different_codex_symlink_without_modifying_its_target(fresh, dangling):
+    target = fresh / "custom-review"
+    if not dangling:
+        target.mkdir()
+        (target / "SKILL.md").write_text("custom review instructions")
+    codex = fresh / ".agents/skills/review-task"
+    codex.parent.mkdir(parents=True)
+    codex.symlink_to(target, target_is_directory=True)
+
+    assert main(["init"]) == 0
+    assert codex.readlink() == target
+    assert main(["init", "--force"]) == 0
+    assert codex.samefile(fresh / ".claude/skills/review-task")
+    if dangling:
+        assert not target.exists()
+    else:
+        assert (target / "SKILL.md").read_text() == "custom review instructions"
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_no_skills_leaves_existing_skills_and_links_untouched(initialised, force):
+    source = initialised / ".claude/skills/review-task/SKILL.md"
+    source.write_text("custom review instructions")
+    codex = initialised / ".agents/skills/review-task"
+    codex.unlink()
+    codex.symlink_to("custom-review", target_is_directory=True)
+
+    assert main(["init", "--no-skills", *(["--force"] if force else [])]) == 0
+    assert source.read_text() == "custom review instructions" and codex.readlink() == Path("custom-review")
 
 
 @pytest.mark.parametrize("skill", SKILLS)

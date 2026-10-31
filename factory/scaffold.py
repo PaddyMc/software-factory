@@ -1,8 +1,8 @@
 """`factory init`: the files a repository needs to use the factory.
 
 The factory's code, role prompts and policy stay in the installed package. A repository gets only its
-settings (.factory/config.yaml), the workflow skills under .claude/skills (where Claude Code and OpenCode
-find them), a starter plan, the session-log directory, and a short section in its agent guidance.
+settings (.factory/config.yaml), the workflow skills under .claude/skills (Claude Code and OpenCode)
+with links under .agents/skills (Codex), a starter plan, the session-log directory, and agent guidance.
 Re-running is safe: existing files are kept unless `force`, and the guidance section is replaced in place.
 """
 
@@ -93,6 +93,23 @@ def init(root: Path, *, force: bool = False, skills: bool = True,
         dest.write_text(text)
         done.append(("wrote", rel, ""))
 
+    def link_skill(name: str) -> None:
+        rel = f".agents/skills/{name}"
+        dest = root / rel
+        target = Path(f"../../.claude/skills/{name}")
+        if dest.is_symlink() and dest.readlink() == target:
+            done.append(("keep", rel, f"links to {target}"))
+            return
+        if dest.is_symlink() and force:
+            dest.unlink()
+        elif dest.exists() or dest.is_symlink():
+            note = "exists; --force replaces symlink" if dest.is_symlink() else "exists; keeping existing Codex skill"
+            done.append(("keep", rel, note))
+            return
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.symlink_to(target, target_is_directory=True)
+        done.append(("linked", rel, f"-> {target}"))
+
     write(C.CONFIG_PATH, config_text(root, session_log))
     cfg = C.load(root)          # what the repository now has, which may be an existing config
     if skills:
@@ -100,9 +117,10 @@ def init(root: Path, *, force: bool = False, skills: bool = True,
             rel = f".claude/skills/{name}"
             if (root / rel).exists() and not force:
                 done.append(("keep", rel, "exists; --force overwrites"))
-                continue
-            for sub, src in _files(templates() / "skills" / name):
-                write(f"{rel}/{sub}", src.read_text())
+            else:
+                for sub, src in _files(templates() / "skills" / name):
+                    write(f"{rel}/{sub}", src.read_text())
+            link_skill(name)
     if cfg.session_log:
         log_dir = root / cfg.session_log
         if not (log_dir.is_dir() and any(log_dir.iterdir())):

@@ -54,8 +54,8 @@ These are read-only and safe to run, as are `top --once`, `logs`, `transcript`, 
 | I merged a PR | `factory status --refresh`. Then the next PR in the stack, or `factory run PLAN` to continue (it also resolves PRs the merge put in `conflict` and fixes PRs in `ci_failed`) |
 | A PR has conflicts | `factory status --refresh`, then `factory run TASK` (or `factory run PLAN`) |
 | A PR's CI is red | `factory status --refresh` (marks it `ci_failed`), then `factory run TASK` (or `factory run PLAN`). `factory show TASK --role ci` shows the failing checks and the logs the builder gets. A problem with the CI runner itself (a missing tool, a broken workflow) is not the task's to fix: fix the workflow by hand |
-| Review a factory PR | `/review-task TASK` |
-| New work | `/plan-workstream` → plan PR → `factory sync` → `factory run PLAN` |
+| Review a factory PR | `/review-task TASK` (Codex: `$review-task TASK`) |
+| New work | `/plan-workstream` (Codex: `$plan-workstream`) → plan PR → `factory sync` → `factory run PLAN` |
 | Several boards | One board per `FACTORY_HOME`. Parallelism comes from `--parallel` and concurrent plan runs. Use a separate `FACTORY_HOME` for experiments |
 | Several people, one backlog | Each keeps their own board; never commit `factory.db`. `factory sync && factory status --refresh` takes up the open and merged `factory/*` PRs others opened. Nothing claims a task across boards, so agree who runs which plan |
 | Costs | `--max-cost USD` caps each task; `top` and `status` show spend. Keep the provider's credits topped up |

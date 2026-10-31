@@ -1,11 +1,13 @@
 ---
 name: plan-workstream
-description: PM-mode workstream planning for a repository run by the software factory. Grounds in the project's settings (.factory/config.yaml), roadmap, existing plans and code; locks strategic decisions with the user before writing; produces a plan doc whose fenced-YAML task contracts `factory run` can execute; updates the roadmap; and on request emits a handoff brief. Explicit-invocation only — invoke only when the user types `/plan-workstream`. Do not auto-trigger on phrases like "plan X" or "let's plan a workstream".
+description: PM-mode workstream planning for a repository run by the software factory. Grounds in the project's settings (.factory/config.yaml), roadmap, existing plans and code; locks strategic decisions with the user before writing; produces a plan doc whose fenced-YAML task contracts `factory run` can execute; updates the roadmap; and on request emits a handoff brief. Explicit-invocation only — invoke when the user selects this skill in Codex (`$plan-workstream` or `/skills`) or types `/plan-workstream`. Do not auto-trigger on phrases like "plan X" or "let's plan a workstream".
 ---
 
 # Plan Workstream
 
 ## Overview
+
+Invoke with `/plan-workstream` in Claude Code or OpenCode, or `$plan-workstream` (or select it through `/skills`) in Codex.
 
 Plan a unit of work as a reviewable, hand-off-able artifact: a plan doc in the project's plans location, whose **task contracts** the software factory executes (`factory run <task-id>`: planner → builder → reviewer → verifier agents, ending in a PR only when every gate passes). Also update the project's roadmap or priority doc if it has one, and (on request) write a concise engineer brief.
 
@@ -37,7 +39,7 @@ Produce a short status summary (what works, what's missing, what's in flight) be
 
 ### Phase 2: Lock decisions
 
-Identify 2-4 **strategic** decisions that shape the workstream: scope, sequencing, prerequisites, trust models, data structures. Ask the user (with `AskUserQuestion` where available):
+Identify 2-4 **strategic** decisions that shape the workstream: scope, sequencing, prerequisites, trust models, data structures. Ask the user (with the host's user-input tool where available):
 
 - Frame each question with 2-3 mutually exclusive options.
 - Mark the recommended option "(Recommended)" and give a one-sentence rationale per option.
