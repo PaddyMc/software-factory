@@ -105,7 +105,8 @@ def cmd_run_plan(a, plan: Path, tasks: dict) -> int:
     if errs:
         print("contracts invalid:\n  " + "\n  ".join(errs), file=sys.stderr)
         return 1
-    models = role_models(root, a.model)
+    cfg = C.load(root)
+    models = role_models(root, a.model, cfg)
     missing = missing_keys(models, os.environ)
     if missing:
         print(f"set {', '.join(missing)} first", file=sys.stderr)
@@ -114,7 +115,6 @@ def cmd_run_plan(a, plan: Path, tasks: dict) -> int:
     db.sync(tasks)       # the run works from the db; make sure it has the current contracts
     _refresh(db)         # merged dependencies, dead runs, stacked PRs to move
     skip = tuple(x for x in a.skip_gates.split(",") if x)
-    cfg = C.load(root)
     manual = {t.id: why for t in mine if (why := G.manual_reason(t, cfg)) and "verification" not in skip}
     p = scheduler.Plan(name=contracts.plan_name(rel), tasks=[t.id for t in mine], parallel=a.parallel,
                        network_for=tuple(x for x in (a.network_for or "").split(",") if x),
@@ -141,7 +141,7 @@ def cmd_run_one(a) -> int:
     if (why := G.manual_reason(task, cfg)) and "verification" not in a.skip_gates:
         print(f"{task.id}: {why}", file=sys.stderr)
         return 1
-    models = role_models(root, a.model)
+    models = role_models(root, a.model, cfg)
     missing = missing_keys(models, os.environ)
     if missing:
         print(f"set {', '.join(missing)} first (models: {', '.join(f'{r}={m}' for r, m in models.items())})",
@@ -576,34 +576,40 @@ def cmd_requeue(a) -> int:
     return rc
 
 
-SKILLS = ("plan-workstream", "review-task")
-
-
 def cmd_init(a) -> int:
-    """Scaffold .factory/config.yaml, the four role prompts and (unless --no-skills) the workflow skills
-    (/plan-workstream, /review-task) under .claude/skills, where Claude Code and OpenCode find them."""
-    from importlib import resources
+    """Set this repository up for the factory: .factory/config.yaml, the workflow skills, a starter plan,
+    the session-log directory and a section in the agent guidance. Existing files are kept unless --force."""
+    from . import scaffold
 
     root = repo_root()
-    templates = resources.files("factory") / "templates"
-    files = {C.CONFIG_PATH: templates / "config.yaml"}
-    files |= {f".factory/agents/{name}": templates / "agents" / name
-              for name in ("planner.md", "builder.md", "reviewer.md", "verifier.md")}
-    if not a.no_skills:
-        files |= {f".claude/skills/{name}/SKILL.md": templates / "skills" / name / "SKILL.md" for name in SKILLS}
-    for rel, src in files.items():
-        dest = root / rel
-        if dest.exists() and not a.force:
-            print(f"keep   {rel} (exists; --force overwrites)")
-            continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        text = src.read_text()
-        if rel == C.CONFIG_PATH:
-            text = text.replace("name: my-project", f"name: {root.name}", 1)
-        dest.write_text(text)
-        print(f"wrote  {rel}")
-    print("next: edit .factory/config.yaml, write task contracts (/plan-workstream), then `factory validate-plan` "
-          "and `factory sync`")
+    try:
+        done = scaffold.init(root, force=a.force, skills=not a.no_skills,
+                             session_log=None if a.no_session_log else a.session_log)
+    except C.ConfigError as e:
+        print(f"{C.CONFIG_PATH}: {e}", file=sys.stderr)
+        return 1
+    for action, rel, note in done:
+        print(f"{action:<6} {rel}" + (f" ({note})" if note else ""))
+    print("\nnext:\n"
+          "  1. review .factory/config.yaml (`factory config` prints the effective settings)\n"
+          "  2. plan work with /plan-workstream, or replace the example plan\n"
+          "  3. factory validate-plan && factory sync\n"
+          "  4. export OPENROUTER_API_KEY=… and `factory run <plan>`")
+    return 0
+
+
+def cmd_prompt(a) -> int:
+    """A role's prompt as the agents get it: the repository's override, else the one shipped with the factory."""
+    from .agents import ROLE_FILES, prompt_source, role_model
+
+    root = repo_root()
+    role = next((r for r, f in ROLE_FILES.items() if a.role in (r, f)), None)
+    if role is None:
+        print(f"unknown role {a.role}; one of {', '.join(ROLE_FILES)}", file=sys.stderr)
+        return 2
+    src = prompt_source(root, role)
+    print(f"# {src} · model {role_model(root, role, C.load(root))}\n")
+    print(src.read_text().rstrip())
     return 0
 
 
@@ -646,10 +652,17 @@ def main(argv: list[str] | None = None) -> int:
                                                          "`factory run <plan>` runs a whole plan")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("init", help="scaffold .factory/config.yaml, the role prompts and the workflow skills here")
+    s = sub.add_parser("init", help="set this repository up: config, skills, starter plan, session log, guidance")
     s.add_argument("--force", action="store_true", help="overwrite existing files")
-    s.add_argument("--no-skills", action="store_true", help="skip .claude/skills/{plan-workstream,review-task}")
+    s.add_argument("--no-skills", action="store_true", help="skip .claude/skills/{plan-workstream,review-task,factory-ops}")
+    s.add_argument("--session-log", default="docs/sessions", metavar="DIR",
+                   help="require a session log entry per task in DIR (default docs/sessions)")
+    s.add_argument("--no-session-log", action="store_true", help="don't require session logs")
     s.set_defaults(fn=cmd_init)
+
+    s = sub.add_parser("prompt", help="print a role's prompt (the repository's override, else the shipped one)")
+    s.add_argument("role", help="plan | build | review | verify (or planner, builder, …)")
+    s.set_defaults(fn=cmd_prompt)
 
     s = sub.add_parser("config", help="print the effective project settings")
     s.set_defaults(fn=cmd_config)

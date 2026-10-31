@@ -499,3 +499,37 @@ def test_refresh_takes_up_merged_prs_but_not_closed_ones_or_holds(factory_repo, 
     assert main(["abandon", "demo-t02", "--note", "hold: not now"]) == 0
     assert main(["status", "--refresh"]) == 0
     assert open_db(home).task("demo-t02")["status"] == "abandoned"     # a hold outranks GitHub
+
+
+def test_an_initialised_repo_runs_its_starter_plan_with_the_shipped_prompts(tmp_path, home, fake_gh, monkeypatch):
+    """`factory init` in an empty repository is all it takes: the example task goes to a PR, with the prompts
+    and the session-log rule that ship with the factory (no .factory/agents overrides)."""
+    import datetime as dt
+
+    origin, r = tmp_path / "starter.git", tmp_path / "starter"
+    git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
+    r.mkdir()
+    git(r, "init", "-q", "-b", "main")
+    monkeypatch.chdir(r)
+    assert main(["init"]) == 0 and not (r / ".factory/agents").exists()
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", "factory init")
+    git(r, "remote", "add", "origin", str(origin))
+    git(r, "push", "-q", "-u", "origin", "main")
+
+    doc = "# The factory here\n\nPlan with /plan-workstream, check with factory validate-plan, review with /review-task.\n"
+    today = dt.date.today().isoformat()
+    plays = {"PLANNER": [AIMessage("**Files**: docs/factory.md\n**Steps**: write it")],
+             "BUILDER": [call("write_file", path="docs/factory.md", content=doc),
+                         call("write_file", path=f"docs/sessions/{today}.md", content="## [12:00] example-t01\n"),
+                         AIMessage("RESULT: DONE")],
+             "REVIEWER": ["VERDICT"], "VERIFIER": [AIMessage("**Summary**\n- documents the factory\n")],
+             "_verdicts": [], "_calls": []}
+    _use_model(monkeypatch, plays)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "x")          # the shipped prompts name OpenRouter models
+    assert main(["run", "example-t01", *SANDBOX]) == 0
+    row = open_db(home).task("example-t01")
+    assert row["status"] == "pr_open" and row["pr_url"].startswith("https://github.test/pr/")
+    runs = {r["role"]: r for r in open_db(home).runs("example-t01")}
+    assert {role for role, _ in plays["_calls"]} == {"PLANNER", "BUILDER", "REVIEWER", "VERIFIER"}
+    assert runs["pr"]["outcome"] == "opened"

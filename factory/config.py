@@ -20,6 +20,7 @@ import yaml
 
 CONFIG_PATH = ".factory/config.yaml"
 E2E_LANGUAGES = ("rust", "python")
+ROLES = ("plan", "build", "review", "verify")
 
 
 class ConfigError(ValueError):
@@ -68,6 +69,8 @@ class Config:
     denied_commands: tuple[str, ...] = ()        # extra regexes the agents' `run` tool refuses
     # Directories the agents' file tools may also read by absolute path (dependency sources), never write.
     dependency_sources: tuple[str, ...] = ("~/.cargo/registry/src", "~/.cargo/git/checkouts", "~/.rustup/toolchains")
+    models: dict[str, str] = field(default_factory=dict)      # role -> `provider:model`, over the prompt's own
+    max_steps: dict[str, int] = field(default_factory=dict)   # role -> model calls allowed per agent run
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
 
     def dependency_dirs(self, home: Path | None = None) -> tuple[Path, ...]:
@@ -123,6 +126,18 @@ def parse(data: dict | None, default_name: str = "default") -> Config:
             kw[key] = v
     for pat in kw.get("denied_commands", ()):
         _regex(pat, "denied_commands")
+    for key in ("models", "max_steps"):
+        v = _dict(d, key, CONFIG_PATH)
+        if v is None:
+            continue
+        unknown = sorted(set(v) - set(ROLES))
+        if unknown:
+            raise ConfigError(f"{key}: unknown role(s) {', '.join(unknown)} (roles: {', '.join(ROLES)})")
+        if key == "max_steps":
+            if not all(x.isdigit() and int(x) > 0 for x in v.values()):
+                raise ConfigError("max_steps values must be positive integers")
+            v = {k: int(x) for k, x in v.items()}
+        kw[key] = v
     if d.get("e2e") is not None:
         e = d["e2e"]
         if not isinstance(e, dict) or not e.get("dir"):

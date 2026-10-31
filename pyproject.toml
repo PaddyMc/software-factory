@@ -1,6 +1,6 @@
 [project]
 name = "software-factory"
-version = "0.2.0"
+version = "0.3.0"
 description = "Software factory: plan -> build -> review -> verify agents per task contract, ending in a PR only when deterministic gates pass"
 requires-python = ">=3.10"
 dependencies = [

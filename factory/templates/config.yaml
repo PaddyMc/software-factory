@@ -25,6 +25,11 @@ guidance: ["AGENTS.md", "CLAUDE.md"]
 # Commands for the unit_tests gate (omit for none).
 # unit_tests: ["pytest -q tests/unit"]
 
+# Models and step limits per role (plan, build, review, verify), over the shipped prompts' defaults.
+# A whole prompt can be replaced with .factory/agents/<planner|builder|reviewer|verifier>.md.
+# models: {review: "openrouter:z-ai/glm-5.3"}
+# max_steps: {build: 150}
+
 # Extra regexes the agents' `run` tool refuses (git push/commit, sudo, gh, terraform apply… are built in).
 # A contract whose verification runs one is done by hand: `factory run` refuses it.
 # denied_commands: ["\\bkubectl\\s+delete\\b"]
