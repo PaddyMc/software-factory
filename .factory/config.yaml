@@ -1,0 +1,44 @@
+# Software factory settings for this repository. Every key is optional; see the
+# factory README ("Configure a project") for the full reference.
+
+# Names the state directory: ~/.local/share/factory/<name> (override with `home:` or $FACTORY_HOME).
+name: "software-factory"
+
+# Markdown files holding task contracts (fenced ```yaml lists), and globs never read as backlog.
+plans: ["docs/plans/**/*.md"]
+exclude: []
+
+# Repository guidance appended to every agent's system prompt: the first file that exists.
+guidance: ["AGENTS.md", "CLAUDE.md"]
+
+# Uncomment to require a session log entry (<dir>/<today>.md) in every task.
+session_log: docs/sessions
+
+# Uncomment to require every task to add a new end-to-end test, and to run it.
+# e2e:
+#   dir: tests/e2e/            # new tests must be added directly under this directory
+#   language: python           # rust (#[test] fns) | python (def test_*)
+#   run_new: "pytest {path}::{name}"     # {target} = file stem, {name} = test fn, {path} = repo-relative file
+#   run_all: "pytest tests/e2e"
+#   run_all_when: ["^src/core/"]         # changed-path regexes that run the whole suite instead
+
+# Commands for the unit_tests gate (omit for none).
+unit_tests: ["uv run pytest -q"]
+
+# Models and step limits per role (plan, build, review, verify), over the shipped prompts' defaults.
+# A whole prompt can be replaced with .factory/agents/<planner|builder|reviewer|verifier>.md.
+# models: {review: "openrouter:z-ai/glm-5.3"}
+# max_steps: {build: 150}
+
+# Extra regexes the agents' `run` tool refuses (git push/commit, sudo, gh, terraform apply… are built in).
+# A contract whose verification runs one is done by hand: `factory run` refuses it.
+# denied_commands: ["\\bkubectl\\s+delete\\b"]
+
+# Directories the agents may also read (never write) by absolute path: dependency sources.
+# dependency_sources: ["~/.cargo/registry/src", "~/.cargo/git/checkouts", "~/.rustup/toolchains"]
+
+# What the bubblewrap sandbox exposes; the defaults mount rustup/cargo and uv if present.
+# sandbox:
+#   ro_binds: ["~/.rustup", "~/.local/bin", "~/.local/share/uv"]
+#   rw_binds: ["~/.cargo"]
+#   env: {CARGO_TARGET_DIR: "{cache}/target", UV_CACHE_DIR: "{cache}/uv"}
