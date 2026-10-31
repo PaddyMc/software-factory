@@ -87,6 +87,21 @@ sandbox:
 
 ---
 
+## Credentials
+
+Each factory instance takes its credentials from its own environment, so two shells or services can run as different identities. They are never in the repository, and agents never see them: both sandboxes clear the environment.
+
+| Variable | Needed | Used for |
+|---|---|---|
+| `OPENROUTER_API_KEY` | Yes, with the default models | The agents' model calls. `factory run` refuses to start without the key of every provider the roles use (`ANTHROPIC_API_KEY` and `OPENAI_API_KEY` for those providers) |
+| `GITHUB_TOKEN` or `GH_TOKEN` | No | The GitHub identity. Unset: `gh` uses your `gh auth login`, and git fetches and pushes with the remote's own credentials (often your SSH key). Set: `gh` uses the token, and git fetches and pushes to github.com over HTTPS with it, an SSH remote rewritten for the call, so a PR and its commits come from the same account. `GH_TOKEN` wins when both are set |
+
+`factory config` names the GitHub identity in use on its first line. git asks a credential helper for the token when it needs it, so the token is never on a command line or written to disk. Only github.com is handled; other hosts use git's own credentials.
+
+A fine-grained token scoped to the repository needs Contents and Pull requests: read and write, Actions and Commit statuses: read (CI checks and job logs), and Workflows: read and write if a task may change `.github/workflows/`. A classic token needs `repo`, plus `workflow` for the same reason.
+
+---
+
 ## Task contracts
 
 A plan carries a fenced `yaml` list. Each item has **exactly** these 8 keys; status lives in the database, never in the plan:
@@ -137,7 +152,7 @@ Use `factory init --no-skills` to skip the skills, and `factory init --force` to
 | Command | Purpose |
 |---|---|
 | `factory init [--force] [--no-skills] [--session-log DIR \| --no-session-log]` | Set the repository up: config, skills, session log, starter plan, guidance section |
-| `factory config` | Print the effective project settings |
+| `factory config` | Print the effective project settings, the state directory and the GitHub identity |
 | `factory prompt ROLE` | Print a role's prompt as the agents get it (the repository's override, else the shipped one), with its model |
 | `factory validate-plan [PLAN…]` | Check contracts |
 | `factory sync` | Load every contract from the plans into the db (statuses kept) |
@@ -196,6 +211,7 @@ Each keeps their own board; GitHub is what they share. `factory sync && factory 
 | Gates fail on network or dependency fetches | The sandbox is offline. Fetch dependencies first, or pass `--network` for tasks that download |
 | A tool is "not found" inside the sandbox | It lives under `$HOME`, which is hidden. Add its directory to `sandbox.ro_binds` and `sandbox.path` |
 | `set OPENROUTER_API_KEY first` | Export the key for the providers the roles use (`factory run` lists them) |
+| A push or `gh` call fails with 403 or `Permission denied` while a token is set | The token can't do it. Give it the permissions under [Credentials](#credentials), or unset `GITHUB_TOKEN`/`GH_TOKEN` to use your gh login |
 | `error: PaymentRequiredResponseError: … available credits` | OpenRouter credits ran out. Parallel runs reserve credit for their in-flight requests, so this can appear before the balance hits zero. Add credits, then run the plan again |
 | `error: … ConnectError` / `name resolution` | Network outage. Model calls are retried with backoff for about 30 s before the run fails; run the plan again once it's back |
 | A plan run leaves a task `queued` | A dependency has no PR (it failed, is held, or is in another plan). `factory status PLAN` shows what it waits for |

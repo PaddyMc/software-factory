@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +25,7 @@ from typing import TypedDict
 from langgraph.graph import END, StateGraph
 
 from . import gates as G
+from . import github
 from .agents import Ctx, Roles
 from .config import Config
 from .contracts import Task
@@ -88,7 +90,9 @@ class State(TypedDict, total=False):
 
 
 def git(cwd: Path, *args: str, check: bool = True) -> str:
-    p = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    """Every git call the factory makes outside the sandbox; with a GitHub token set, its fetches and
+    pushes to github.com use it (see github.py)."""
+    p = subprocess.run(["git", *github.git_options(os.environ), *args], cwd=cwd, capture_output=True, text=True)
     if check and p.returncode != 0:
         raise PipelineError(f"git {' '.join(args)}: {p.stderr.strip()}")
     return p.stdout.strip()

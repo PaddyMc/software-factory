@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 from . import config as C
-from . import contracts, factory_home, repo_root
+from . import contracts, factory_home, github, repo_root
 from . import gates as G
 from . import sandbox as S
 from . import observe
@@ -701,7 +702,7 @@ def cmd_config(a) -> int:
         return v
 
     source = C.CONFIG_PATH if (root / C.CONFIG_PATH).is_file() else "defaults (no config file)"
-    print(f"# {source}; state in {factory_home()}")
+    print(f"# {source}; state in {factory_home()}; GitHub: {github.describe(os.environ)}")
     print(yaml.safe_dump(plain(cfg), sort_keys=False).rstrip())
     return 0
 
