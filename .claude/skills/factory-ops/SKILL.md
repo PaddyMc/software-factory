@@ -75,4 +75,4 @@ These are read-only and safe to run, as are `top --once`, `logs`, `transcript`, 
 
 - `references/troubleshooting.md`: symptom → cause → fix. Read when a run failed, a task won't start, a PR looks wrong, or git refuses.
 - `references/board.md`: checking for active runs and resetting the board. Read before touching factory state.
-- The factory's README: every command and flag, the architecture and the gates.
+- The factory's `docs/reference.md` (every command and flag, config, troubleshooting) and `docs/architecture.md` (the pipeline, the gates, the sandbox).

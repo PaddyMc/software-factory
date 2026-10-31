@@ -1,11 +1,11 @@
 # Factory: what's next
 
-Gaps found by comparing the factory with similar projects (2026-10-31). This list is not backlog: executable work is a task contract in a repository's plans. Smaller known limitations (the reviewer runs before the gates, context cost, the builder re-exploring what the planner read, two boards running one task) are in the README's [Known limitations](README.md#known-limitations-and-next-steps).
+Gaps found by comparing the factory with similar projects (2026-10-31). This list is not backlog: executable work is a task contract in a repository's plans. Smaller known limitations (the reviewer runs before the gates, context cost, the builder re-exploring what the planner read, two boards running one task) are in the [Known limitations](docs/architecture.md#known-limitations-and-next-steps).
 
 | # | Gap | Effort | Depends on |
 |---|---|---|---|
-| ✓ | Read CI on open PRs and fix failures. Done: [CI failures](README.md#ci-failures) | — | — |
-| 1 | Act on human PR review comments | medium | — |
+| ✓ | Read CI on open PRs and fix failures. Done: [CI failures](docs/architecture.md#ci-failures) | — | — |
+| 1 | Act on human PR review comments. Planned: [pr-review-rework](docs/plans/pr-review-rework.md) | medium | — |
 | 2 | The builder writes the test that judges it | small | — |
 | 3 | Nothing measures the factory itself | medium | — |
 | 4 | Learn from feedback | medium | 1, 3 |
@@ -24,7 +24,10 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 - Merge `CiFix` into one `Rework(old_candidate, label, brief)` that both paths use, so the pipeline keeps a single "build on the PR head" entry point.
 - Post a comment saying what was addressed. Leave resolving threads to the human.
 
-**Open question.** Should a comment from the factory's own account, or an approving review left after a request for changes, cancel it?
+**Plan.** [docs/plans/pr-review-rework.md](docs/plans/pr-review-rework.md) (planned 2026-10-31, tasks `pr-review-rework-t01`…`t05`). Decisions the plan locked differ from this sketch:
+- Any review by the PR's author counts as a request too, since GitHub won't let the author request changes on their own PR (the factory opens PRs as you). Conversation comments, the factory's own included, never count.
+- The latest review wins: an approval or a dismissal after a request cancels it.
+- A per-task watermark of addressed reviews replaces "posted after the current head was pushed", so restacks and conflict resolutions keep a pending request.
 
 ## 2. The builder writes the test that judges it
 
