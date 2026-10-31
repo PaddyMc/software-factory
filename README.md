@@ -35,7 +35,7 @@ factory sync                      # load every task contract into the local db
 factory status                    # the board, per plan: ready / waiting / running / PR open / failed
 factory run <plan>                # every task of a plan, one PR each (a plan's file name or path)
 factory top                       # live dashboard, per plan with task counters (another terminal)
-factory status --refresh          # after you merge a PR: picks it up, moves the PRs stacked on it, flags conflicts
+factory status --refresh          # after you merge a PR: picks it up, moves the PRs stacked on it, flags conflicts and failing CI
 factory run <task-id>             # one task, foreground
 ```
 
@@ -123,7 +123,8 @@ Dotted lines are observability data, not control flow.
 | Contracts | `contracts.py` | Read the fenced YAML in plans into `Task` objects (8 keys). Validate schema, IDs, dependencies across plans, command selection, placeholders |
 | Scheduling | `scheduler.py` | Run one plan's tasks as child `factory run` processes, up to `--parallel`. A task starts once each dependency is merged or has an open PR |
 | Stacking | `stack.py` | After a merge, rebase the PRs stacked on it onto the trunk and retarget them; edit PRs through the GitHub REST API |
-| Outer loop | `pipeline.py` | LangGraph state machine: plan → build → review → verify → PR / fail, or resolve → review → verify for a conflicting PR. Commits the builder's work. Stops early when there is no progress |
+| CI | `ci.py` | Read an open PR's checks at its head; the failing jobs' logs become the builder's feedback |
+| Outer loop | `pipeline.py` | LangGraph state machine: plan → build → review → verify → PR / fail; resolve → review → verify for a conflicting PR; ci → build → review → verify for a PR whose CI fails. Commits the builder's work. Stops early when there is no progress |
 | Inner loop | `agents.py` | One LangChain `create_agent` per role: loads the role prompt (the repository's override, else the shipped one), builds the system prompt (role + contract + project rules + repository guidance), streams steps, counts tokens and cost, records the transcript |
 | Tools | `tools.py` | `read_file`, `list_dir`, `grep` (the worktree, plus `dependency_sources` read-only), `git_diff`, `write_file`/`edit_file` (anywhere in the worktree except `.git`), `run` (sandboxed; denied commands refused) |
 | Checks | `gates.py`, `verification.py` | Conflict markers, plan untouched, and the configured session-log, e2e, unit and verification checks. Zero tests selected counts as failed |
@@ -169,6 +170,10 @@ stateDiagram-v2
   pr_open --> conflict: status --refresh finds a conflict
   conflict --> building: factory run resolves it
   conflict --> merged: you merge
+  pr_open --> ci_failed: status --refresh finds CI failing
+  ci_failed --> building: factory run fixes it
+  ci_failed --> pr_open: CI passes again, or a restack moves it
+  ci_failed --> merged: you merge
   planning --> failed
   building --> failed
   reviewing --> failed
@@ -185,6 +190,7 @@ What moves between agents is only what the pipeline hands over:
 | Reviewer (`VERDICT: CHANGES`) | Builder | The review, as feedback to address first |
 | Gates (fail) | Builder | The failing gates' output, as feedback |
 | Gates (pass) | Verifier | The gate table, for the PR report |
+| CI (failing checks) | Builder | The failing checks and their jobs' logs, as feedback, on every attempt of a CI fix |
 
 A build is retried up to `--max-attempts` times (default 3). The run stops earlier when the same gates fail with identical output twice in a row. A task that ends `failed` stays failed until you run it, or its plan, again; the rerun starts from a fresh worktree. `factory requeue TASK…` puts `failed` or `abandoned` tasks back to `queued` without running them.
 
@@ -209,6 +215,32 @@ flowchart TD
 - A resolution is reviewed and gated like any build, and the `conflict_markers` gate fails on any `<<<<<<<`, `|||||||` or `>>>>>>>` line left in the diff. Only then is the PR updated. The push is leased on the PR's old head, so a commit someone pushed to the branch meanwhile is never overwritten.
 - If the resolution fails, the PR keeps its old head and the task ends `failed`. Running it again rebuilds it from scratch on the trunk and updates the same PR. `factory run TASK --force` does the same straight away.
 - Two open dependency PRs that conflict with each other are not resolved: the dependent waits until one merges (`cannot stack`).
+
+## CI failures
+
+The gates run before a PR opens. CI runs after, on every head the PR gets, including the rebased heads a restack pushes, which the gates never saw. CI can also check things the gates don't, such as formatting or lints. `factory status --refresh` reads each open PR's checks at its head (`gh pr view --json statusCheckRollup`). When a check fails on the factory's own candidate, the task becomes `ci_failed`. Running the task, or its plan, then fixes it:
+
+```mermaid
+flowchart TD
+  r(["ci_failed"]) --> moved{"a stacked dependency merged or moved?"}
+  moved -->|"yes"| restack["restack onto it: a new head, back to pr_open<br/>(the failure may have been the dependency's)"]
+  moved -->|"no"| still{"CI still failing on the candidate?"}
+  still -->|"no: re-run and passing, or running"| open(["pr_open, no agent runs"])
+  still -->|"yes"| ci["CI: record the failing checks and their jobs' logs<br/>worktree = the PR's branch at the failing head"]
+  ci --> build["BUILD<br/>builder: plan + failing checks + logs as feedback"]
+  build --> review{"REVIEW"}
+  review -->|"CHANGES"| build
+  review -->|"APPROVE"| verify{"VERIFY: gates"}
+  verify -->|"fail"| build
+  verify -->|"pass"| push["force-push with a lease on the failing head<br/>update the same PR, comment old → new candidate"]
+  push --> again(["pr_open; CI runs on the new head"])
+```
+
+- Only checks that ran on the factory's candidate count. If someone else pushed to the branch, the factory leaves the PR alone, and a `ci_failed` one goes back to `pr_open`. Cancelled, skipped and still-running checks don't count either.
+- Logs come from GitHub Actions jobs, cut at the job's last `##[error]` line and capped at 8,000 characters each. Other checks only get their name and URL.
+- The fix builds on the PR's head, not from scratch, so the planner doesn't run again. The gates measure the whole task diff against the PR's base, as before.
+- A PR whose CI fails blocks its dependents, like a conflicting one: nothing new stacks on it until it's `pr_open` again.
+- If the fix fails, the PR keeps its old head and the task ends `failed`. Running it again rebuilds it from scratch on the trunk and updates the same PR; `factory run TASK --force` does that straight away.
 
 ---
 
@@ -439,10 +471,10 @@ Agent `run` calls and gate commands execute under bubblewrap (`sandbox.py`):
 | `factory prompt ROLE` | Print a role's prompt as the agents get it (the repository's override, else the shipped one), with its model |
 | `factory validate-plan [PLAN…]` | Check contracts |
 | `factory sync` | Load every contract from the plans into the db (statuses kept) |
-| `factory status [PLAN] [--refresh] [--json]` | The board, grouped by plan with a task counter. `--refresh` picks up merged or closed PRs, takes up open or merged PRs opened from another board, moves stacked PRs whose dependencies merged, marks PRs that conflict with their base `conflict`, and fails dead runs |
-| `factory run PLAN [--parallel N] [--network-for T1,T2] [flags]` | Every task of the plan without a PR, one PR each, dependents stacked on open dependency PRs; PRs in `conflict` get their conflicts resolved |
-| `factory run TASK [flags]` | Run one task in the foreground (stacked the same way). On a `conflict` task it resolves the conflicts; `--force` rebuilds it instead |
-| `factory top [PLAN] [--once]` | Live dashboard: each active plan with its glyph strip (✓ merged ◆ PR open ≠ PR conflicts ▶ running ✗ failed · queued ⊘ held) and counter, then its tasks' progress, current action, elapsed and quiet time, cost; recent events |
+| `factory status [PLAN] [--refresh] [--json]` | The board, grouped by plan with a task counter. `--refresh` picks up merged or closed PRs, takes up open or merged PRs opened from another board, moves stacked PRs whose dependencies merged, marks PRs that conflict with their base `conflict` and PRs whose CI fails `ci_failed`, and fails dead runs |
+| `factory run PLAN [--parallel N] [--network-for T1,T2] [flags]` | Every task of the plan without a PR, one PR each, dependents stacked on open dependency PRs; PRs in `conflict` get their conflicts resolved, and PRs in `ci_failed` get their CI fixed |
+| `factory run TASK [flags]` | Run one task in the foreground (stacked the same way). On a `conflict` task it resolves the conflicts, and on a `ci_failed` task it fixes CI; `--force` rebuilds it instead |
+| `factory top [PLAN] [--once]` | Live dashboard: each active plan with its glyph strip (✓ merged ◆ PR open ≠ PR conflicts ! CI fails ▶ running ✗ failed · queued ⊘ held) and counter, then its tasks' progress, current action, elapsed and quiet time, cost; recent events |
 | `factory logs TASK [-f] [-n N]` / `factory logs --all -f` | One task's log, or every task's log merged |
 | `factory trace TASK [--role R] [--attempt N] [--all]` | Per-step model time, tool time, context size, cached tokens, output, cost, calls, largest results |
 | `factory transcript TASK [--role R] [--attempt N] [--all] [--full]` | Exactly what the model saw and did |
@@ -497,6 +529,9 @@ Useful `run` flags:
 | `cannot stack TASK: its open dependencies conflict` | Merge one of the dependencies' PRs, `factory status --refresh`, then run again |
 | Status `conflict` | The PR no longer applies to its base. `factory run TASK` (or its plan) resolves it; see [Merge conflicts](#merge-conflicts) |
 | A conflict resolution `failed` | The PR still holds its old head. Run the task again to rebuild it from scratch on the trunk |
+| Status `ci_failed` | CI fails on the PR's head. `factory show TASK --role ci` names the checks and shows the logs; `factory run TASK` (or its plan) fixes them; see [CI failures](#ci-failures) |
+| `… not the factory's candidate: someone pushed to it` | A commit the factory didn't make is on the PR branch, so its CI isn't the factory's to fix. Fix it there, or `factory run TASK --force` to rebuild |
+| A CI fix `failed` | The PR still holds the failing head. Run the task again to rebuild it from scratch on the trunk |
 | `⚠ stopped: step limit` in the log | The agent used `max_steps`. Raise it with `max_steps: {ROLE: N}` in `.factory/config.yaml`, or narrow the task |
 | Gates fail on network or dependency fetches | The sandbox is offline. Fetch dependencies first, or pass `--network` for tasks that download |
 | A tool is "not found" inside the sandbox | It lives under `$HOME`, which is hidden. Add its directory to `sandbox.ro_binds` and `sandbox.path` |
@@ -521,7 +556,7 @@ uv run pytest -q tests
   - contracts, dependencies and paths;
   - gates (Rust and Python e2e detection, unconfigured gates);
   - the sandbox, tools and the database;
-  - observability, the agent loop, plan runs, stacking, PR take-up and conflict replay.
+  - observability, the agent loop, plan runs, stacking, PR take-up, conflict replay and CI fixes.
 - **CI:** `.github/workflows/ci.yml`.
 
 The agent interface is a single seam: a role receives a `Ctx` with `log`, `progress` and `record` callbacks and returns an `Output`. Replacing LangChain with another runner means implementing the `Roles` protocol in `agents.py`.
@@ -531,12 +566,15 @@ The agent interface is a single seam: a role receives a `Ctx` with `log`, `progr
 - **The reviewer runs before the gates**, so it can approve builds that then fail mechanical checks. Planned: gates first.
 - **Context cost:** whole files stay in context for every later step. Planned: capped tool output, a slimmer system prompt, summarizing old steps.
 - **The builder re-explores what the planner already read.** Planned: the planner hands over exact files and line ranges.
-- **Conflicts are found on refresh, not live.** GitHub computes `mergeable` lazily, so a PR that just started conflicting may show up one `status --refresh` later.
-- **Restacked PRs aren't re-gated.** After a rebase the PR comment names the commit the gates ran on; CI runs on the new one.
+- **Conflicts and CI failures are found on refresh, not live.** GitHub computes `mergeable` lazily, so a PR that just started conflicting may show up one `status --refresh` later.
+- **Restacked PRs aren't re-gated.** After a rebase the PR comment names the commit the gates ran on. CI runs on the new one, and a refresh marks it `ci_failed` if that fails.
+- **A CI fix is gated, but the gates can't run CI's own checks.** The builder is told to reproduce each failure with `run`, and CI on the new head decides. A fix that doesn't hold shows up red again on the next refresh.
 - **Two boards can run the same task at once.** Nothing claims a task across boards. Planned: a draft PR as the claim.
 - **A PR stacked on several dependencies is taken up as stacked on the one it targets**, since the others are merged into its branch and the PR doesn't name them.
 - **Linux only**: the sandbox is bubblewrap.
 - **Branch protection** on your default branch is a GitHub setting; the factory and CI report, they don't enforce merges.
+
+Gaps compared with similar projects, and what to build next: [`NEXT.md`](NEXT.md).
 
 ---
 

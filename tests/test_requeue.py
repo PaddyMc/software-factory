@@ -1,4 +1,5 @@
-"""`factory requeue`: failed or held tasks go back to queued; live, open and merged ones stay put."""
+"""`factory requeue`: failed or held tasks go back to queued; live, open (conflicting, CI failing) and merged
+ones stay put."""
 
 import os
 
@@ -24,3 +25,8 @@ def test_requeue_moves_only_failed_and_abandoned_tasks(repo, home, monkeypatch, 
     assert "demo-t01: pr_open; nothing to requeue" in out and "demo-t02: running (building" in out
     assert "nope-t01: not on the board" in out
     assert [db.task(t)["status"] for t in ("demo-t01", "demo-t02")] == ["pr_open", "building"]
+
+    db.update("demo-t01", status="ci_failed", note="CI fails on its head: rust fmt")   # its open PR is kept
+    assert main(["requeue", "demo-t01"]) == 1
+    assert "demo-t01: ci_failed; nothing to requeue" in capsys.readouterr().out
+    assert db.task("demo-t01")["status"] == "ci_failed"

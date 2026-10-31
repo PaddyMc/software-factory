@@ -138,3 +138,11 @@ def test_a_pr_with_conflicts_runs_again_to_resolve_them(db):
     db.update("demo-t01", status="pr_open", candidate_sha="y", pr_url="v")
     results, launched, _ = _run(db, scheduler.Plan(name="demo", tasks=IDS))
     assert [t for t, _ in launched] == ["demo-t02", "demo-t03"] and results["demo-t03"] == "pr_open"
+
+
+def test_a_pr_whose_ci_fails_runs_again_to_fix_it_and_its_dependents_wait(db):
+    db.update("demo-t01", status="ci_failed", candidate_sha="y", pr_url="v", note="CI fails on its head: rust fmt")
+    db.update("demo-t03", status="pr_open", candidate_sha="x", pr_url="u")
+    assert db.readiness("demo-t02") == "waits for demo-t01 (ci_failed)"     # nothing stacks on a red PR
+    results, launched, _ = _run(db, scheduler.Plan(name="demo", tasks=IDS))
+    assert [t for t, _ in launched] == ["demo-t01", "demo-t02"] and results["demo-t01"] == "pr_open"

@@ -6,9 +6,9 @@ Every task of the plan without a PR yet runs as its own child `factory run <task
 child then builds it on top of those PRs (stacked, see stack.py). Independent tasks run in parallel,
 up to --parallel. The run ends when nothing more can start, leaving one PR per finished task.
 
-Rerunning the plan picks up where it stopped: tasks with a PR are kept, failed ones run again, and PRs
+Rerunning the plan picks up where it stopped: tasks with a PR are kept, failed ones run again, PRs
 that conflict with their base (`conflict`, found by the refresh the plan run starts with) get their
-conflicts resolved.
+conflicts resolved, and PRs whose CI fails (`ci_failed`) get the failures fixed.
 """
 
 from __future__ import annotations
@@ -49,11 +49,11 @@ def default_launch(repo: Path) -> Callable[[str, list[str]], subprocess.Popen]:
 
 
 def startable(db: DB, plan: Plan, tid: str, started: set[str]) -> bool:
-    """No PR yet (or one that conflicts), not running, not started by this run, and every dependency merged
-    or with an open PR. A task that failed in an earlier run starts again; one that fails in this run does not."""
+    """No PR yet (or one that conflicts or fails CI), not running, not started by this run, and every dependency
+    merged or with an open PR. A task that failed in an earlier run starts again; one that fails in this run does not."""
     row = db.task(tid)
     return (row is not None and tid not in started and tid not in plan.manual
-            and row["status"] in ("queued", "failed", "conflict") and db.ready(tid))
+            and row["status"] in ("queued", "failed", "conflict", "ci_failed") and db.ready(tid))
 
 
 def elsewhere(db: DB, plan: Plan, running: dict) -> list[str]:
@@ -111,7 +111,7 @@ def summary(db: DB, plan: Plan) -> str:
             what = f"manual: {plan.manual[r['id']]}"
         elif st == "pr_open":
             what = r["pr_url"] + (f"  stacked on {r['stacked_on']}" if r["stacked_on"] else "")
-        elif st == "conflict":
+        elif st in ("conflict", "ci_failed"):
             what = f"{r['pr_url']}  {(r['note'] or '').splitlines()[0][:140] if r['note'] else ''}"
         elif st in ("queued", "failed"):
             what = db.readiness(r["id"]) if st == "queued" else (r["note"] or "").splitlines()[0][:140] if r["note"] else ""
