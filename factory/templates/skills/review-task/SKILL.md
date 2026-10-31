@@ -1,13 +1,13 @@
 ---
 name: review-task
-description: Review the implementation of one software-factory task contract before merge — typically a factory PR (`factory/<task-id>` branch) or hand-written work. Runs the factory's deterministic gates (`factory gates` — no conflict markers, plan untouched, and whatever .factory/config.yaml configures — session log, a new e2e test, the contract's verification commands, unit and e2e tests), then judges each acceptance criterion and non-goal with the factory's reviewer checklist, producing an APPROVE / REQUEST CHANGES report. Explicit-invocation only — invoke when the user types `/review-task TASK_ID [REF]`; do not auto-trigger on phrases like "review this" (use an ordinary code review for plain diffs).
+description: Review the implementation of one software-factory task contract before merge — typically a factory PR (`factory/TASK_ID` branch) or hand-written work. Runs the factory's deterministic gates (`factory gates` — no conflict markers, plan untouched, and whatever .factory/config.yaml configures — session log, a new e2e test, the contract's verification commands, unit and e2e tests), then judges each acceptance criterion and non-goal with the factory's reviewer checklist, producing an APPROVE / REQUEST CHANGES report. Explicit-invocation only — invoke when the user selects this skill in Codex (`$review-task` or `/skills`) or types `/review-task TASK_ID [REF]`; do not auto-trigger on phrases like "review this" (use an ordinary code review for plain diffs).
 ---
 
 # Review Task
 
 A human-invoked second opinion on one task contract's implementation. It uses the same gates and checklist as the factory's verify and review agents. **Report only:** never edit, commit, push or merge.
 
-`/review-task TASK_ID [REF]`:
+`/review-task TASK_ID [REF]` in Claude Code or OpenCode; `$review-task TASK_ID [REF]` (or select it through `/skills`) in Codex:
 - `REF` defaults to `factory/<task-id>` if that branch exists, else `HEAD`.
 - The base defaults to the repository's default branch (usually `main`).
 

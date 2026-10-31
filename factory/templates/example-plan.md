@@ -13,7 +13,7 @@ Each contract has exactly these 8 keys. Status never goes in the plan; `factory 
 - `verification`: exact commands that pass offline in the sandbox when it is done.
 - `risk`: `low`, `medium` or `high`.
 
-`/plan-workstream` writes plans in this shape with you, and `factory validate-plan` checks them.
+`/plan-workstream` (Codex: `$plan-workstream`) writes plans in this shape with you, and `factory validate-plan` checks them.
 
 ## Task contracts
 

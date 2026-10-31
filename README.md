@@ -4,7 +4,7 @@
 
 Install it once, then run `factory init` in each repository that uses it. The factory is project-agnostic: its code, role prompts and workflow skills ship with it, and a repository holds only:
 - `.factory/config.yaml`: where plans are, which tests every task must add, what runs as unit and e2e gates, the models per role, and what the sandbox mounts;
-- the workflow skills under `.claude/skills/`, for Claude Code and OpenCode: `/plan-workstream` writes plans with task contracts, `/review-task` reviews a task's PR, and `factory-ops` answers questions about operating the factory;
+- the workflow skills under `.claude/skills/`, for Claude Code and OpenCode, linked under `.agents/skills/` for Codex: `plan-workstream` writes plans with task contracts, `review-task` reviews a task's PR, and `factory-ops` answers questions about operating the factory;
 - its plans, and a short "Software factory" section in its agent guidance.
 
 ### Policy
@@ -28,7 +28,7 @@ factory init                      # config, skills, starter plan, session log, A
 $EDITOR .factory/config.yaml      # plans location, e2e/session-log requirements, unit tests, models, sandbox
 factory config                    # the effective settings
 
-# write task contracts (see below; /plan-workstream in Claude Code does it with you), then:
+# write task contracts (/plan-workstream in Claude Code/OpenCode, $plan-workstream in Codex), then:
 factory validate-plan
 export OPENROUTER_API_KEY=sk-or-...
 factory sync                      # load every task contract into the local db
@@ -51,11 +51,14 @@ Run it at the root of a repository (any subdirectory works; it finds the main ch
 |---|---|
 | `.factory/config.yaml` | Settings, every key documented in comments. `name` is the directory name, `session_log: docs/sessions` is on, and `unit_tests` is guessed from `Cargo.toml` (`cargo test --workspace`) or `pyproject.toml` (`uv run pytest -q`) |
 | `.claude/skills/{plan-workstream,review-task,factory-ops}/` | The workflow skills, copied from the installed factory |
+| `.agents/skills/{plan-workstream,review-task,factory-ops}` | Relative symlinks to those same skill folders, for Codex discovery |
 | `docs/sessions/README.md` | The session-log convention, when the directory is new or empty |
 | `docs/plans/example.md` | When the repository has no plans yet: the contract format and one valid, runnable task. Replace or delete it before `factory run` |
 | `AGENTS.md` | A "Software factory" section between `<!-- factory:begin -->` and `<!-- factory:end -->`. It goes into the first `guidance` file that exists (so a `CLAUDE.md`-only repository gets it there), and `AGENTS.md` is created when there is none |
 
 Re-running is safe: existing files are kept (`keep … (exists; --force overwrites)`), and only the text between the markers is replaced. `--force` rewrites the files, which is how skills pick up a new factory version. `--no-skills` skips the skills, `--session-log DIR` picks another log directory, and `--no-session-log` turns the requirement off.
+
+Codex links are also added when re-running `factory init` in a repository initialized by an older version. Existing files and directories at the Codex skill paths are preserved, even with `--force`; an existing symlink to a different target is replaced only with `--force`. To refresh the skill instructions for Codex after upgrading, use `factory init --force` (this also rewrites the other scaffolded files).
 
 ---
 
@@ -434,15 +437,17 @@ A command that selects zero tests is **inconclusive, not a pass**. `factory gate
 
 ## Skills
 
-`factory init` copies three agent skills into `.claude/skills/`. Claude Code loads them there, and OpenCode reads the same directory. They read the project's `.factory/config.yaml`, so they carry no project specifics.
+`factory init` copies three agent skills into `.claude/skills/`. Claude Code loads them there, and OpenCode reads the same directory. Relative links under `.agents/skills/` let Codex load the same files, including references and invocation policy. They read the project's `.factory/config.yaml`, so they carry no project specifics.
 
-| Skill | Use | What it does |
-|---|---|---|
-| [`/plan-workstream`](factory/templates/skills/plan-workstream/SKILL.md) | Before work starts | Grounds in the config, roadmap, plans and code; locks 2–4 strategic decisions with you; writes a plan whose contracts satisfy the configured gates; updates the roadmap; runs `factory validate-plan` |
-| [`/review-task TASK [REF]`](factory/templates/skills/review-task/SKILL.md) | Before you merge | Runs `factory gates` (cheap, then full) on the task's branch, applies the reviewer agent's checklist, and reports APPROVE or REQUEST CHANGES. It never edits or merges |
-| [`factory-ops`](factory/templates/skills/factory-ops/SKILL.md) | While running | Loads by itself on operational questions: starting runs, what's happening, why a task failed, requeues, holds, merging stacked PRs, resetting the board |
+| Skill | Codex invocation | Use | What it does |
+|---|---|---|---|
+| [`/plan-workstream`](factory/templates/skills/plan-workstream/SKILL.md) | `$plan-workstream` | Before work starts | Grounds in the config, roadmap, plans and code; locks 2–4 strategic decisions with you; writes a plan whose contracts satisfy the configured gates; updates the roadmap; runs `factory validate-plan` |
+| [`/review-task TASK [REF]`](factory/templates/skills/review-task/SKILL.md) | `$review-task TASK [REF]` | Before you merge | Runs `factory gates` (cheap, then full) on the task's branch, applies the reviewer agent's checklist, and reports APPROVE or REQUEST CHANGES. It never edits or merges |
+| [`factory-ops`](factory/templates/skills/factory-ops/SKILL.md) | `$factory-ops` or automatic | While running | Loads by itself on operational questions: starting runs, what's happening, why a task failed, requeues, holds, merging stacked PRs, resetting the board |
 
 `/plan-workstream` and `/review-task` are explicit-invocation only. The factory's own agents (planner, builder, reviewer, verifier) are role prompts, not skills, and stay in the installed package.
+
+In Codex CLI or the IDE extension, type `$` to select a skill or select it through `/skills`. If newly installed skills do not appear, restart Codex. Codex uses `$plan-workstream` and `$review-task`; the bare slash names in the table are the Claude Code/OpenCode invocation syntax. See the [official Codex skills documentation](https://developers.openai.com/codex/skills/).
 
 Use `factory init --no-skills` to skip the skills, and `factory init --force` to refresh them after upgrading the factory (it also rewrites the other scaffolded files, so review the diff).
 

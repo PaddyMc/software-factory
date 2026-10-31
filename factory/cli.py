@@ -658,7 +658,7 @@ def cmd_init(a) -> int:
         print(f"{action:<6} {rel}" + (f" ({note})" if note else ""))
     print("\nnext:\n"
           "  1. review .factory/config.yaml (`factory config` prints the effective settings)\n"
-          "  2. plan work with /plan-workstream, or replace the example plan\n"
+          "  2. plan work with /plan-workstream (Codex: $plan-workstream), or replace the example plan\n"
           "  3. factory validate-plan && factory sync\n"
           "  4. export OPENROUTER_API_KEY=… and `factory run <plan>`")
     return 0
@@ -720,7 +720,7 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("init", help="set this repository up: config, skills, starter plan, session log, guidance")
     s.add_argument("--force", action="store_true", help="overwrite existing files")
-    s.add_argument("--no-skills", action="store_true", help="skip .claude/skills/{plan-workstream,review-task,factory-ops}")
+    s.add_argument("--no-skills", action="store_true", help="skip workflow skills in .claude/skills and Codex links in .agents/skills")
     s.add_argument("--session-log", default="docs/sessions", metavar="DIR",
                    help="require a session log entry per task in DIR (default docs/sessions)")
     s.add_argument("--no-session-log", action="store_true", help="don't require session logs")
