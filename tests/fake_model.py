@@ -22,7 +22,7 @@ def scripts(review_verdicts: list[str], greeting: str = "hello") -> dict[str, li
             call("write_file", path="src/greet.txt", content=f"{greeting}\n"),
             call("write_file", path="crates/e2e/tests/greet.rs", content=E2E),
             call("write_file", path="docs/sessions/2026-10-09.md", content="## [12:00] demo-t01\n"),
-            call("write_file", path="README.md", content="out of scope"),   # refused by the guard
+            call("write_file", path=".git/config", content="clobbered"),   # refused by the guard
             call("run", command="grep -q hello src/greet.txt"),
             AIMessage("Wrote the greeting and e2e test.\nRESULT: DONE"),
         ],

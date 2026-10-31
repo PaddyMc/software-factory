@@ -72,3 +72,28 @@ def test_cost_from_cached_openrouter_prices(home):
     assert prices.cost("openrouter:unknown/model", 10, 10) is None
     assert prices.cost("anthropic:claude-opus-5-5", 10, 10) is None
     prices._memo.clear()
+
+
+def test_top_and_status_group_tasks_by_plan_with_a_task_counter(home, capsys):
+    import os
+    from conftest import TASK
+    db = _db(home)
+    for t in parse_text(plan_text(TASK.replace("demo-", "other-")), "docs/plans/x/other.md"):
+        db.upsert_task(t)
+    db.update("demo-t01", status="pr_open", candidate_sha="c1", pr_url="https://github.test/pr/1")
+    db.update("demo-t02", status="building", stacked_on="demo-t01")
+    db.claim("demo-t02", os.getpid())
+    screen = observe.render_top(db, home, width=200)
+    assert "demo  ◆▶  0/2 merged · 1 PR open · 1 running · $0.00" in screen
+    lines = screen.splitlines()
+    assert lines.index(next(l for l in lines if l.startswith("demo  "))) < \
+        lines.index(next(l for l in lines if l.startswith("  demo-t01")))
+    assert "other plans" in screen and "other" in screen.split("other plans")[1]
+    assert "0/2 merged · 1 ready · 1 waiting" in screen.split("other plans")[1]
+    only = observe.render_top(db, home, width=200, plan="other")
+    assert "other  ··  0/2 merged · 1 ready · 1 waiting" in only and "demo-t01" not in only
+
+    assert main(["status", "demo"]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == "demo  ◆▶  0/2 merged · 1 PR open · 1 running" and "other-t01" not in out
+    assert "https://github.test/pr/1" in out

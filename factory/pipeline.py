@@ -3,6 +3,10 @@
 Review "changes" and gate failures loop back to build with feedback, up to
 `max_attempts` builds. A PR is opened only when every gate passes, so the end
 state is either a working PR or a failed task with reasons — never a broken PR.
+
+A PR that conflicts with its base runs resolve -> review -> verify -> PR instead:
+its change is replayed onto the new base, the builder resolves the conflicted
+files, and review and gates run again on the result before the PR is updated.
 """
 
 from __future__ import annotations
@@ -29,6 +33,20 @@ class PipelineError(RuntimeError):
 
 
 @dataclass
+class Resolution:
+    """An open PR's change replayed onto a base it conflicts with (see `replay_worktree`)."""
+    onto: str                              # what it is replayed onto: the trunk, or factory/<dependency>
+    old_candidate: str                     # the PR's head before: the push lease, and what the comment names
+    conflicts: tuple[str, ...] = ()        # files left with conflict markers; empty = it replayed cleanly
+    brief: str = ""                        # the builder's task message: conflicted files and both sides' diffs
+
+
+class Replayed:
+    """The run record's output when a change replays cleanly: no agent ran."""
+    text = "Replayed cleanly onto the new base; no conflicts to resolve."
+
+
+@dataclass
 class Options:
     base_ref: str
     max_attempts: int = 3
@@ -38,6 +56,8 @@ class Options:
     remote: str = "origin"
     max_cost: float | None = None          # abort the task once its recorded cost exceeds this (USD)
     config: Config = field(default_factory=Config)   # loaded from the main checkout, never the worktree
+    stacked_on: tuple[str, ...] = ()       # open dependency PRs this task is built on ("task-t01 (url)")
+    resolution: Resolution | None = None   # resolve this PR's conflicts instead of building from the plan
 
 
 class State(TypedDict, total=False):
@@ -66,14 +86,76 @@ def branch_name(task_id: str) -> str:
     return f"factory/{task_id}"
 
 
-def create_worktree(root: Path, home: Path, task_id: str, base_ref: str) -> tuple[Path, str]:
+def create_worktree(root: Path, home: Path, task_id: str, base_ref: str,
+                    merge: tuple[tuple[str, str], ...] = ()) -> tuple[Path, str]:
+    """A fresh worktree on factory/<task> at `base_ref`. `merge` is more (label, sha) work to build on:
+    the other open dependency PRs of a task stacked on several. Returns (worktree, base sha): the task's
+    own changes are everything after the base sha."""
     wt = home / "worktrees" / task_id
     if wt.exists():
         raise PipelineError(f"worktree {wt} exists from a previous run; `factory clean {task_id}` first")
     wt.parent.mkdir(parents=True, exist_ok=True)
     base_sha = git(root, "rev-parse", "--verify", f"{base_ref}^{{commit}}")
     git(root, "worktree", "add", "-q", "-B", branch_name(task_id), str(wt), base_sha)
+    if merge:
+        labels = ", ".join(label for label, _ in merge)
+        p = subprocess.run(["git", "merge", "-q", "--no-ff", "--no-edit", "-m", f"factory: stack {task_id} on {labels}",
+                            *(sha for _, sha in merge)], cwd=wt, capture_output=True, text=True)
+        if p.returncode != 0:
+            git(wt, "merge", "--abort", check=False)
+            git(root, "worktree", "remove", "--force", str(wt), check=False)
+            raise PipelineError(f"cannot stack {task_id}: its open dependencies conflict ({labels}); "
+                                f"merge one of their PRs first. {p.stdout.strip()} {p.stderr.strip()}".strip())
+        base_sha = git(wt, "rev-parse", "HEAD")
     return wt, base_sha
+
+
+def trunk_tip(root: Path, trunk: str, remote: str = "origin") -> str:
+    """The trunk as `remote` has it now. A local branch can be behind what was merged on GitHub, and a task
+    built on it starts without its merged dependencies."""
+    git(root, "fetch", "-q", remote, trunk)
+    return git(root, "rev-parse", f"{remote}/{trunk}")
+
+
+DIFF_LIMIT = 20000
+
+
+def _diff(root: Path, a: str, b: str, paths: tuple[str, ...]) -> str:
+    out = git(root, "diff", f"{a}..{b}", "--", *paths)
+    return out[:DIFF_LIMIT] + ("\n… (truncated: read the files)" if len(out) > DIFF_LIMIT else "") if out else "(none)"
+
+
+def replay_worktree(root: Path, home: Path, task_id: str, old_base: str, candidate: str, onto: str,
+                    label: str) -> tuple[Path, Resolution]:
+    """A fresh worktree on factory/<task> at `onto` with the task's change (old_base..candidate, squashed)
+    applied but not committed. Conflicted files keep diff3 markers for the builder to resolve."""
+    wt = home / "worktrees" / task_id
+    if wt.exists():
+        raise PipelineError(f"worktree {wt} exists from a previous run; `factory clean {task_id}` first")
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    squash = git(root, "commit-tree", f"{candidate}^{{tree}}", "-p", old_base, "-m", "task change")
+    git(root, "worktree", "add", "-q", "-B", branch_name(task_id), str(wt), onto)
+    p = subprocess.run(["git", "-c", "merge.conflictStyle=diff3", "cherry-pick", "--no-commit", squash],
+                       cwd=wt, capture_output=True, text=True)
+    conflicts = tuple(f for f in git(wt, "diff", "--name-only", "--diff-filter=U").splitlines() if f)
+    if p.returncode != 0 and not conflicts:
+        git(root, "worktree", "remove", "--force", str(wt), check=False)
+        raise PipelineError(f"cannot replay {task_id} onto {label}: {p.stderr.strip()}")
+    git(wt, "reset", "-q")                 # unstage: the build step commits whatever the worktree holds
+    if not conflicts and not git(wt, "status", "--porcelain"):
+        git(root, "worktree", "remove", "--force", str(wt), check=False)
+        raise PipelineError(f"{task_id}'s change is already on {label}: nothing to replay")
+    brief = "\n\n".join([
+        f"# Resolve merge conflicts\n\nThis task's change was built, reviewed and gated on an older base. `{label}` "
+        f"has moved since ({onto[:12]}), and the change no longer applies cleanly. The worktree is `{label}` with the "
+        f"change replayed on top, uncommitted. Files that merged cleanly are already right. These files hold "
+        f"diff3 conflict markers: `<<<<<<< HEAD` opens the new base's version, `|||||||` the old base's, "
+        f"`=======` the task's, and `>>>>>>> … (task change)` ends the hunk.",
+        "\n".join(f"- {f}" for f in conflicts),
+        f"## What the task changed in them (old base → its PR)\n\n```diff\n{_diff(root, old_base, candidate, conflicts)}\n```",
+        f"## What changed upstream in them (old base → {label})\n\n```diff\n{_diff(root, old_base, onto, conflicts)}\n```",
+    ]) if conflicts else ""
+    return wt, Resolution(onto=label, old_candidate=candidate, conflicts=conflicts, brief=brief)
 
 
 class Pipeline:
@@ -150,17 +232,42 @@ class Pipeline:
         out = self.role("plan", "planning", 0, lambda: (o := self.roles.plan(self.ctx(s)), "done", o.text, None))
         return {"plan": out.text, "attempt": 0, "feedback": ""}
 
+    def _commit(self, out, message: str):
+        """Commit whatever the agent left in the worktree; returns (out, outcome, report, sha) for `role`."""
+        git(self.wt, "add", "-A")
+        if not git(self.wt, "diff", "--cached", "--name-only"):
+            return out, "no-changes", out.text, None
+        git(self.wt, "commit", "-q", "-m", message)
+        return out, "committed", out.text, git(self.wt, "rev-parse", "HEAD")
+
+    def resolve(self, s: State) -> State:
+        """Entry point when resolving: commit the replayed change, having the builder fix any conflicts first.
+        A clean replay goes straight to the gates; a resolution is reviewed like any build."""
+        r = self.opts.resolution
+        plan = self.db.last_report(self.task.id, "plan", "done")
+        message = f"factory({self.task.id}): {self.task.goal[:60]} (on {r.onto})"
+        if not r.conflicts:
+            self.role("resolve", "building", 0, lambda: self._commit(Replayed(), message))
+            sha = git(self.wt, "rev-parse", "HEAD")
+            self.db.update(self.task.id, candidate_sha=sha)
+            return {"plan": plan, "attempt": 0, "sha": sha, "verdict": "APPROVE"}
+        self.db.update(self.task.id, attempts=1)
+        ctx = self.ctx({**s, "plan": plan, "attempt": 1}, resolution=r.brief)
+        self.role("resolve", "building", 1, lambda: self._commit(self.roles.resolve(ctx), message))
+        sha = git(self.wt, "rev-parse", "HEAD")
+        if sha == self.base_sha:
+            return {"plan": plan, "attempt": 1, "sha": sha, "verdict": "CHANGES",
+                    "feedback": "The conflict resolution left no changes. Re-apply the task's change on the new base."}
+        self.db.update(self.task.id, candidate_sha=sha)
+        return {"plan": plan, "attempt": 1, "sha": sha, "verdict": ""}
+
     def build(self, s: State) -> State:
         attempt = s.get("attempt", 0) + 1
         self.db.update(self.task.id, attempts=attempt)
 
         def run():
             out = self.roles.build(self.ctx({**s, "attempt": attempt}))
-            git(self.wt, "add", "-A")
-            if not git(self.wt, "diff", "--cached", "--name-only"):
-                return out, "no-changes", out.text, None
-            git(self.wt, "commit", "-q", "-m", f"factory({self.task.id}): {self.task.goal[:60]} (attempt {attempt})")
-            return out, "committed", out.text, git(self.wt, "rev-parse", "HEAD")
+            return self._commit(out, f"factory({self.task.id}): {self.task.goal[:60]} (attempt {attempt})")
 
         out = self.role("build", "building", attempt, run)
         sha = git(self.wt, "rev-parse", "HEAD")
@@ -210,13 +317,16 @@ class Pipeline:
 
         def run():
             branch = branch_name(self.task.id)
-            git(self.wt, "push", "-q", "--force-with-lease", "-u", self.opts.remote, f"HEAD:refs/heads/{branch}")
+            r = self.opts.resolution    # replace exactly the PR head it resolved, never a commit pushed since
+            lease = f"--force-with-lease=refs/heads/{branch}:{r.old_candidate}" if r else "--force-with-lease"
+            git(self.wt, "push", "-q", lease, "-u", self.opts.remote, f"HEAD:refs/heads/{branch}")
             # Only an OPEN PR is reused: `gh pr view <branch>` also matches closed/merged ones from earlier runs.
             existing = subprocess.run(["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "url",
                                        "-q", ".[0].url // empty"], cwd=self.wt, capture_output=True, text=True)
             if existing.returncode == 0 and existing.stdout.strip():
+                from .stack import edit_pr
                 url = existing.stdout.strip()
-                subprocess.run(["gh", "pr", "edit", url, "--body", body], cwd=self.wt, capture_output=True, text=True)
+                edit_pr(self.wt, url, body=body)
             else:
                 p = subprocess.run(["gh", "pr", "create", "--base", self.opts.base_ref, "--head", branch,
                                     "--title", f"{self.task.id}: {self.task.goal[:70]}", "--body", body],
@@ -227,6 +337,13 @@ class Pipeline:
             return url, "opened", url, s["sha"]
 
         self.pr_url = self.role("pr", "verifying", s["attempt"], run)
+        if self.opts.resolution:
+            from .stack import comment
+            r = self.opts.resolution
+            what = (f"resolved conflicts in {', '.join(f'`{f}`' for f in r.conflicts)}" if r.conflicts
+                    else "it now replays cleanly")
+            comment(self.wt, self.pr_url, f"Rebuilt on `{r.onto}` ({self.base_sha[:12]}): {what}. Candidate "
+                                          f"{r.old_candidate[:12]} → {s['sha'][:12]}; review and gates ran on {s['sha'][:12]}.")
         self.db.update(self.task.id, status="pr_open", pr_url=self.pr_url, progress=None)
         self._event("stage", f"pr_open: {self.pr_url}")
         return {"outcome": "pr_open"}
@@ -245,6 +362,12 @@ class Pipeline:
             f"Factory task **`{t.id}`** from `{t.plan}` — {t.goal}",
             f"Candidate `{s['sha']}` on base `{self.opts.base_ref}` (`{self.base_sha[:12]}`), "
             f"{s['attempt']} build attempt(s). Gates passed; merging is the human gate.",
+            *([f"**Stacked** on {', '.join(self.opts.stacked_on)}: merge those first. This PR shows only "
+               f"`{t.id}`'s changes; after they merge, `factory status --refresh` moves it onto the trunk."]
+              if self.opts.stacked_on else []),
+            *([f"**Conflicts resolved** on `{r.onto}`: " + (", ".join(f"`{f}`" for f in r.conflicts) if r.conflicts
+               else "none left") + f". Previous candidate `{r.old_candidate[:12]}`."]
+              if (r := self.opts.resolution) else []),
             "## Verifier report\n\n" + s.get("verify", ""),
             "## Gates\n\n" + s.get("gates", ""),
             "<details><summary>Reviewer report</summary>\n\n" + s.get("review", "") + "\n\n</details>",
@@ -255,12 +378,14 @@ class Pipeline:
 
     def graph(self):
         g = StateGraph(State)
-        for name in ("plan", "build", "review", "verify", "pr", "fail"):
+        for name in ("plan", "resolve", "build", "review", "verify", "pr", "fail"):
             g.add_node(name, getattr(self, name))
-        g.set_entry_point("plan")
+        g.set_entry_point("resolve" if self.opts.resolution else "plan")
         g.add_edge("plan", "build")
         g.add_edge("build", "review")
         more = lambda s: s["attempt"] < self.opts.max_attempts and not s.get("stuck")
+        g.add_conditional_edges("resolve", lambda s: "verify" if s["verdict"] == "APPROVE" else "review" if not s["verdict"]
+                                else ("build" if more(s) else "fail"))
         g.add_conditional_edges("review", lambda s: "verify" if s["verdict"] == "APPROVE" else ("build" if more(s) else "fail"))
         g.add_conditional_edges("verify", lambda s: "pr" if s["gates_ok"] else ("build" if more(s) else "fail"))
         g.add_edge("pr", END)

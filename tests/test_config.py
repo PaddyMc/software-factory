@@ -14,13 +14,14 @@ def test_defaults_without_a_file(tmp_path):
     cfg = C.load(tmp_path)
     assert cfg.name == tmp_path.name and cfg.plans == ("docs/plans/**/*.md",)
     assert cfg.e2e is None and cfg.session_log is None and cfg.unit_tests == ()
-    assert cfg.writable_extras() == ()
+    assert cfg.guidance == ("AGENTS.md", "CLAUDE.md") and "Cargo.lock" in cfg.lockfiles
 
 
 def test_full_config_parses():
     cfg = C.parse({
         "name": "shop", "plans": "plans/*.md", "exclude": ["plans/drafts/**"], "guidance": ["AGENTS.md"],
-        "session_log": "notes/", "unit_tests": "make test", "always_allowed": ["CHANGELOG.md"],
+        "session_log": "notes/", "unit_tests": "make test", "lockfiles": ["yarn.lock"],
+        "dependency_sources": ["~/.cache/pip/src", "/opt/vendor"],
         "denied_commands": [r"\bkubectl\b"],
         "e2e": {"dir": "tests/e2e", "language": "python", "run_new": "pytest {path}::{name}",
                 "run_all": "pytest tests/e2e", "run_all_when": ["^src/core/"]},
@@ -28,7 +29,8 @@ def test_full_config_parses():
     })
     assert cfg.plans == ("plans/*.md",) and cfg.unit_tests == ("make test",)
     assert cfg.e2e.dir == "tests/e2e/" and cfg.e2e.suffix == ".py" and cfg.e2e.run_all_when == ("^src/core/",)
-    assert cfg.writable_extras() == ("CHANGELOG.md", "notes/*.md")
+    assert cfg.lockfiles == ("yarn.lock",)
+    assert cfg.dependency_dirs(Path("/home/me")) == (Path("/home/me/.cache/pip/src"), Path("/opt/vendor"))
     assert cfg.sandbox.ro_binds == ("~/.pyenv",) and cfg.sandbox.rw_binds == ()
     assert cfg.sandbox.env == {"PIP_CACHE_DIR": "{cache}/pip"}
     assert cfg.sandbox.offline_env == C.SandboxConfig().offline_env       # unspecified keys keep defaults

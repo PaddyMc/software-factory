@@ -9,9 +9,8 @@ import pytest
 TASK = """\
 - id: demo-t01
   goal: "Add the greeting module"
-  spec_refs: ["docs/spec/03-did-method.md#41-create"]
+  spec_refs: ["docs/spec/greeting.md#hello"]
   depends_on: []
-  allowed_paths: ["src/**", "crates/e2e/tests/**"]
   non_goals: ["Anything else"]
   acceptance: ["src/greet.txt says hello"]
   verification: ["grep -q hello src/greet.txt"]
@@ -20,7 +19,6 @@ TASK = """\
   goal: "Do the second thing"
   spec_refs: []
   depends_on: [demo-t01]
-  allowed_paths: ["crates/e2e/**"]
   non_goals: []
   acceptance: ["Second thing done"]
   verification: ["true"]
@@ -67,7 +65,7 @@ def repo(tmp_path: Path) -> Path:
     r = tmp_path / "repo"
     (r / "docs/plans/demo").mkdir(parents=True)
     (r / "docs/plans/demo/demo.md").write_text(plan_text())
-    (r / "CLAUDE.md").write_text("# Demo repo\n")
+    (r / "AGENTS.md").write_text("# Demo repo\n")
     (r / ".factory").mkdir()
     (r / ".factory/config.yaml").write_text(DEMO_CONFIG)
     (r / ".gitignore").write_text("__pycache__/\n")
@@ -107,13 +105,27 @@ FAKE_GH = textwrap.dedent(f"""\
         pr = s["prs"].get(key) or next((p for p in s["prs"].values() if p["url"] == key), None)
         save()
         if not pr: sys.exit(1)
-        print(pr["state"] if "state" in a[a.index("--json") + 1] else pr["url"]); sys.exit(0)
+        fields = a[a.index("--json") + 1].split(",")
+        if "-q" in a: print(pr["state"] if "state" in fields else pr["url"]); sys.exit(0)
+        print(json.dumps({{f: pr.get(f, "MERGEABLE" if f == "mergeable" else None) for f in fields}})); sys.exit(0)
+    if a[:2] == ["pr", "list"] and "--head" not in a:
+        save()
+        print(json.dumps([{{"headRefName": h, "url": p["url"], "state": p["state"], "baseRefName": p["base"]}}
+                          for h, p in s["prs"].items()]))
+        sys.exit(0)
     if a[:2] == ["pr", "list"]:
         pr = s["prs"].get(a[a.index("--head") + 1])
         save()
         if pr and pr["state"] == "OPEN": print(pr["url"])
         sys.exit(0)
     if a[:2] == ["pr", "edit"]:
+        save(); sys.exit(0)
+    if a[:1] == ["api"]:
+        if "PATCH" in a:   # edit: api -X PATCH repos/{{owner}}/{{repo}}/pulls/N -f base=B -f body=…
+            num = a[3].rsplit("/", 1)[1]
+            for pr in s["prs"].values():
+                if pr["url"].endswith("/" + num):
+                    pr.update(a[i + 1].split("=", 1) for i, x in enumerate(a) if x == "-f")
         save(); sys.exit(0)
     save(); sys.exit(2)
     """)

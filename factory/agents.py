@@ -39,6 +39,7 @@ class Ctx:
     plan: str = ""
     feedback: str = ""
     gates: str = ""
+    resolution: str = ""                    # resolve only: the conflict brief (see pipeline.replay_worktree)
     log: Callable[[str, str], None] = field(default_factory=NullLog)          # (tag, message)
     # (steps, max_steps, tokens_in, tokens_out, cost_usd | None, refused_tool_calls)
     progress: Callable[..., None] = lambda *a: None
@@ -55,7 +56,7 @@ class Output:
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float | None = None
-    refused: int = 0                         # tool calls refused (scope, denied commands)
+    refused: int = 0                         # tool calls refused (paths, denied commands)
     stopped: str | None = None               # why the loop ended early, e.g. "step limit"
     wants_tools: bool = False                # last model call asked for tools (so it was not finished)
 
@@ -63,6 +64,7 @@ class Output:
 class Roles(Protocol):
     def plan(self, ctx: Ctx) -> Output: ...
     def build(self, ctx: Ctx) -> Output: ...
+    def resolve(self, ctx: Ctx) -> Output: ...
     def review(self, ctx: Ctx) -> Output: ...
     def verify(self, ctx: Ctx) -> Output: ...
 
@@ -95,7 +97,6 @@ def contract_block(task: Task) -> str:
         f"# Task `{task.id}` (from `{task.plan}`)",
         f"**Goal:** {task.goal}",
         f"**Spec references:**\n{_bullets(task.spec_refs)}",
-        f"**Allowed write paths:**\n{_bullets(task.allowed_paths)}",
         f"**Non-goals:**\n{_bullets(task.non_goals)}",
         f"**Acceptance criteria:**\n{_bullets(task.acceptance)}",
         f"**Verification commands:**\n{_bullets(f'`{c}`' for c in task.verification)}",
@@ -104,16 +105,17 @@ def contract_block(task: Task) -> str:
 
 
 def _repo_guidance(worktree: Path, files: tuple[str, ...]) -> str:
-    """The repository's own agent guidance (CLAUDE.md, AGENTS.md, …), whichever exist."""
-    return "\n\n".join(f"# Repository guidance ({name})\n\n{(worktree / name).read_text()}"
-                       for name in files if (worktree / name).is_file())
+    """The repository's own agent guidance: the first of `files` (AGENTS.md, CLAUDE.md, …) that exists."""
+    for name in files:
+        p = worktree / name
+        if p.is_file():
+            return f"# Repository guidance ({name})\n\n{p.read_text()}"
+    return ""
 
 
 def project_rules(cfg: Config) -> str:
     """What the gates will check beyond the contract, generated from .factory/config.yaml."""
-    rules = ["Writes outside the task's allowed paths are refused, and the scope gate fails on them."]
-    if cfg.writable_extras():
-        rules.append("Every task may also write: " + ", ".join(f"`{p}`" for p in cfg.writable_extras()) + ".")
+    rules = []
     if cfg.session_log:
         rules.append(f"Add a session log entry to `{cfg.session_log.rstrip('/')}/<today>.md` (what changed, files, "
                      "commands run). The session_log gate fails without it.")
@@ -170,7 +172,7 @@ class LangChainRoles:
         self.model_factory = model_factory
         self.cfg = cfg or Config()
 
-    def _run(self, role: str, ctx: Ctx, tools: list, message: str) -> Output:
+    def _run(self, role: str, ctx: Ctx, tools: list, message: str, tag: str | None = None) -> Output:
         cfg, instructions = load_role(self.root, role)
         spec = self.model_override or cfg.get("model", DEFAULT_MODEL)
         steps = int(cfg.get("max_steps", 60))
@@ -183,7 +185,7 @@ class LangChainRoles:
             middleware=[ModelCallLimitMiddleware(run_limit=steps, exit_behavior="end"),
                         ModelRetryMiddleware(**MODEL_RETRY, on_failure="error"), tool_errors(ctx.worktree)],
         )
-        tag = f"{role}#{ctx.attempt}" if role in ("build", "review") else role
+        tag = tag or (f"{role}#{ctx.attempt}" if role in ("build", "review") else role)
         ctx.log(tag, f"start ({spec}, max {steps} steps)")
         ctx.record({"type": "system", "model": spec, "max_steps": steps, "content": system})
         ctx.record({"type": "human", "content": message})
@@ -246,8 +248,8 @@ class LangChainRoles:
             flag = "⚠ " if content.startswith(("refused", "error")) else ""
             ctx.log(tag, f"← {flag}{m.name}: {clip(content, 160) or '(empty)'}")
 
-    def _guard(self, ctx: Ctx, writable: bool = False) -> PathGuard:
-        return PathGuard(ctx.worktree, (*ctx.task.allowed_paths, *self.cfg.writable_extras()) if writable else ("**",))
+    def _guard(self, ctx: Ctx) -> PathGuard:
+        return PathGuard(ctx.worktree, self.cfg.dependency_dirs())
 
     def plan(self, ctx: Ctx) -> Output:
         tools = read_tools(ctx.worktree, self._guard(ctx))
@@ -255,12 +257,24 @@ class LangChainRoles:
 
     def build(self, ctx: Ctx) -> Output:
         log = ToolLog()
-        tools = (read_tools(ctx.worktree, self._guard(ctx)) + write_tools(ctx.worktree, self._guard(ctx, True), log)
+        guard = self._guard(ctx)
+        tools = (read_tools(ctx.worktree, guard) + write_tools(ctx.worktree, guard, log)
                  + run_tool(ctx.sandbox, log, self.cfg.denied_commands))
         msg = f"Implement task {ctx.task.id} (attempt {ctx.attempt}).\n\n# Plan\n\n{ctx.plan}"
         if ctx.feedback:
             msg += f"\n\n# Feedback to address first\n\n{ctx.feedback}"
         out = self._run("build", ctx, tools, msg)
+        out.log = log
+        return out
+
+    def resolve(self, ctx: Ctx) -> Output:
+        """The builder, resolving a replayed change's conflicts."""
+        log = ToolLog()
+        guard = self._guard(ctx)
+        tools = (read_tools(ctx.worktree, guard) + write_tools(ctx.worktree, guard, log)
+                 + run_tool(ctx.sandbox, log, self.cfg.denied_commands))
+        msg = f"Resolve the merge conflicts of task {ctx.task.id}.\n\n{ctx.resolution}\n\n# The task's plan\n\n{ctx.plan}"
+        out = self._run("build", ctx, tools, msg, tag="resolve")
         out.log = log
         return out
 
@@ -271,6 +285,7 @@ class LangChainRoles:
         return out
 
     def verify(self, ctx: Ctx) -> Output:
-        tools = read_tools(ctx.worktree, self._guard(ctx)) + diff_tool(ctx.worktree, ctx.base_sha) + run_tool(ctx.sandbox, ToolLog(), self.cfg.denied_commands)
+        tools = (read_tools(ctx.worktree, self._guard(ctx)) + diff_tool(ctx.worktree, ctx.base_sha)
+                 + run_tool(ctx.sandbox, ToolLog(), self.cfg.denied_commands))
         return self._run("verify", ctx, tools,
                          f"All gates passed for task {ctx.task.id}. Write the PR report.\n\n# Gates\n\n{ctx.gates}")

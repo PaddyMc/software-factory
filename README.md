@@ -1,6 +1,6 @@
 # Software factory
 
-`factory run <task>` takes one **task contract** from your repository's plans to a **working pull request**. Four AI agents, a planner, a builder, a reviewer and a verifier, work in an isolated, sandboxed git worktree. A PR is opened only when every deterministic check passes at the exact candidate commit. A human merging the PR is the approval.
+`factory run <plan>` takes every **task contract** in one of your repository's plans to a **working pull request** each, for you to review and merge. A task whose dependency isn't merged yet is built on top of the dependency's open PR (a stacked PR), so one run covers the whole plan. For each task, four AI agents, a planner, a builder, a reviewer and a verifier, work in an isolated, sandboxed git worktree. A PR is opened only when every deterministic check passes at the exact candidate commit. A human merging the PR is the approval.
 
 The factory is project-agnostic. Everything specific to a repository lives in that repository:
 - `.factory/config.yaml`: where plans are, which tests every task must add, what runs as unit and e2e gates, and what the sandbox mounts;
@@ -25,10 +25,11 @@ factory config                    # the effective settings
 factory validate-plan
 export OPENROUTER_API_KEY=sk-or-...
 factory sync                      # load every task contract into the local db
-factory status                    # the board: ready / waiting / running / PR open / failed
+factory status                    # the board, per plan: ready / waiting / running / PR open / failed
+factory run <plan>                # every task of a plan, one PR each (a plan's file name or path)
+factory top                       # live dashboard, per plan with task counters (another terminal)
+factory status --refresh          # after you merge a PR: picks it up, moves the PRs stacked on it, flags conflicts
 factory run <task-id>             # one task, foreground
-factory run --ready --parallel 3 --watch   # every ready task; dependents start as PRs merge
-factory top                       # live dashboard (another terminal)
 ```
 
 The agents' sandbox is offline, so fetch dependencies first (`cargo fetch`, `uv sync`, `npm ci`, …).
@@ -43,7 +44,7 @@ flowchart TB
   Config[".factory/config.yaml<br/>project settings"]:::repo
   CLI["factory CLI · cli.py<br/>run · top · status · trace"]:::you
   Contracts["contracts.py<br/>parse + validate"]:::core
-  Sched["scheduler.py<br/>--ready --parallel --watch"]:::core
+  Sched["scheduler.py<br/>one plan, --parallel"]:::core
   Pipe["pipeline.py · outer loop (LangGraph)<br/>plan → build → review → verify → PR"]:::core
   Roles[".factory/agents/*.md<br/>role prompts + models"]:::repo
   Agents["agents.py · inner loop (LangChain)<br/>planner · builder · reviewer · verifier"]:::core
@@ -72,7 +73,7 @@ flowchart TB
   Pipe -->|"commit, push, gh pr"| GH --> Merge
   Pipe --> DB
   Agents -.->|"log, progress, transcript"| Files
-  Merge -.->|"status --refresh"| DB
+  Merge -.->|"status --refresh<br/>(restacks dependents)"| DB
   DB --> Obs
   Files --> Obs
 
@@ -94,14 +95,15 @@ Dotted lines are observability data, not control flow.
 
 | Layer | Module | Responsibility |
 |---|---|---|
-| Entry | `cli.py` | Commands, pre-run checks (contract valid, e2e path writable, API keys present, dependencies merged), worktree setup, `init` and `config` |
+| Entry | `cli.py` | Commands, pre-run checks (contract valid, factory-runnable, API keys present, dependencies merged or with open PRs), worktree setup, `status --refresh`, `init` and `config` |
 | Settings | `config.py` | Load and validate `.factory/config.yaml` from the **main checkout** (never a task worktree, so an agent can't weaken its own gates) |
-| Contracts | `contracts.py` | Read the fenced YAML in plans into `Task` objects (9 keys). Validate schema, IDs, dependencies across plans, path bounds, command selection, placeholders |
-| Scheduling | `scheduler.py` | Start ready tasks as child `factory run` processes, up to `--parallel`. Poll merges with `--watch`. Enforce `--budget` |
-| Outer loop | `pipeline.py` | LangGraph state machine: plan → build → review → verify → PR / fail. Commits the builder's work. Stops early when there is no progress |
+| Contracts | `contracts.py` | Read the fenced YAML in plans into `Task` objects (8 keys). Validate schema, IDs, dependencies across plans, command selection, placeholders |
+| Scheduling | `scheduler.py` | Run one plan's tasks as child `factory run` processes, up to `--parallel`. A task starts once each dependency is merged or has an open PR |
+| Stacking | `stack.py` | After a merge, rebase the PRs stacked on it onto the trunk and retarget them; edit PRs through the GitHub REST API |
+| Outer loop | `pipeline.py` | LangGraph state machine: plan → build → review → verify → PR / fail, or resolve → review → verify for a conflicting PR. Commits the builder's work. Stops early when there is no progress |
 | Inner loop | `agents.py` | One LangChain `create_agent` per role: loads the role file, builds the system prompt (role + contract + project rules + repository guidance), streams steps, counts tokens and cost, records the transcript |
-| Tools | `tools.py` | `read_file`, `list_dir`, `grep`, `git_diff`, `write_file`/`edit_file` (only inside `allowed_paths`), `run` (sandboxed; denied commands refused) |
-| Checks | `gates.py`, `verification.py` | Scope, plan untouched, and the configured session-log, e2e, unit and verification checks. Zero tests selected counts as failed |
+| Tools | `tools.py` | `read_file`, `list_dir`, `grep` (the worktree, plus `dependency_sources` read-only), `git_diff`, `write_file`/`edit_file` (anywhere in the worktree except `.git`), `run` (sandboxed; denied commands refused) |
+| Checks | `gates.py`, `verification.py` | Conflict markers, plan untouched, and the configured session-log, e2e, unit and verification checks. Zero tests selected counts as failed |
 | Isolation | `sandbox.py` | bubblewrap: read-only host, empty `$HOME`/`/tmp`/`/run`, cleared environment, no network unless asked |
 | State | `db.py` | SQLite `tasks` (status, branch, SHAs, PR, pid, heartbeat, activity, cost) and `runs` (every role step: outcome, report, steps, tokens, cost, refused calls, transcript path) |
 | Observability | `observe.py`, `log.py`, `prices.py` | Dashboard, merged logs, traces, transcripts, liveness, OpenRouter cost |
@@ -113,8 +115,8 @@ Dotted lines are observability data, not control flow.
 ```mermaid
 flowchart TD
   start(["factory run TASK"]) --> pre{"pre-run checks"}
-  pre -->|"invalid contract, no e2e path, no API key, dependencies unmerged"| refused(["refused, nothing created"])
-  pre -->|"ok"| setup["worktree factory/TASK from the current branch<br/>sandbox, log, db status queued"]
+  pre -->|"invalid contract, refused verification command, no API key, a dependency without a PR"| refused(["refused, nothing created"])
+  pre -->|"ok"| setup["worktree factory/TASK from origin's copy of the current branch,<br/>or from the open PRs of its dependencies<br/>sandbox, log, db status queued"]
   setup --> plan["PLAN<br/>planner agent, read-only"]
   plan --> build["BUILD<br/>builder agent writes; the factory commits"]
   build --> review{"REVIEW<br/>reviewer verdict"}
@@ -126,7 +128,7 @@ flowchart TD
   verify -->|"pass"| report["verifier agent writes the PR report"]
   report --> pr["git push + gh pr create"]
   pr --> open(["pr_open"])
-  open -->|"you merge, then status --refresh"| merged(["merged, dependents become ready"])
+  open -->|"you merge, then status --refresh"| merged(["merged; PRs stacked on it move onto the trunk"])
 ```
 
 ```mermaid
@@ -141,11 +143,14 @@ stateDiagram-v2
   verifying --> pr_open: gates passed
   pr_open --> merged: you merge
   pr_open --> abandoned: PR closed
+  pr_open --> conflict: status --refresh finds a conflict
+  conflict --> building: factory run resolves it
+  conflict --> merged: you merge
   planning --> failed
   building --> failed
   reviewing --> failed
   verifying --> failed
-  failed --> queued: factory retry
+  failed --> planning: factory run (plan or task) again
   merged --> [*]
 ```
 
@@ -158,7 +163,52 @@ What moves between agents is only what the pipeline hands over:
 | Gates (fail) | Builder | The failing gates' output, as feedback |
 | Gates (pass) | Verifier | The gate table, for the PR report |
 
-A build is retried up to `--max-attempts` times (default 3). The run stops earlier when the same gates fail with identical output twice in a row. A task that ends `failed` stays failed: nothing reruns it automatically. `factory retry` puts failed tasks back to `queued`, and a scheduler then starts them again, including one already running with `--watch`.
+A build is retried up to `--max-attempts` times (default 3). The run stops earlier when the same gates fail with identical output twice in a row. A task that ends `failed` stays failed until you run it, or its plan, again; the rerun starts from a fresh worktree. `factory requeue TASK…` puts `failed` or `abandoned` tasks back to `queued` without running them.
+
+## Merge conflicts
+
+An open PR can stop applying to its base: another PR merged first and changed the same lines, or a stacked PR's dependency merged or moved. `factory status --refresh` finds both cases. It checks GitHub's `mergeable` for PRs on the trunk, and the restack rebase for stacked PRs. Either way the task becomes `conflict`. Running the task, or its plan, then resolves it instead of rebuilding:
+
+```mermaid
+flowchart TD
+  c(["conflict"]) --> replay["worktree at the new base (origin's trunk, or the dependency's candidate)<br/>the PR's change replayed on it as one diff, uncommitted"]
+  replay -->|"applies cleanly"| verify{"VERIFY: gates"}
+  replay -->|"conflicts"| resolve["RESOLVE<br/>builder agent: conflicted files with diff3 markers,<br/>both sides' diffs, the task's original plan"]
+  resolve --> review{"REVIEW"}
+  review -->|"CHANGES"| build["BUILD with feedback"] --> review
+  review -->|"APPROVE"| verify
+  verify -->|"pass"| push["force-push with a lease on the old head<br/>update the same PR, comment old → new candidate"]
+  verify -->|"fail"| build
+  push --> open(["pr_open"])
+```
+
+- The planner doesn't run again: the builder gets the plan the PR was built from.
+- A resolution is reviewed and gated like any build, and the `conflict_markers` gate fails on any `<<<<<<<`, `|||||||` or `>>>>>>>` line left in the diff. Only then is the PR updated. The push is leased on the PR's old head, so a commit someone pushed to the branch meanwhile is never overwritten.
+- If the resolution fails, the PR keeps its old head and the task ends `failed`. Running it again rebuilds it from scratch on the trunk and updates the same PR. `factory run TASK --force` does the same straight away.
+- Two open dependency PRs that conflict with each other are not resolved: the dependent waits until one merges (`cannot stack`).
+
+---
+
+## Running a plan: stacked PRs
+
+`factory run <plan>` (a plan's file name without `.md`, or its path) runs every task of the plan that has no PR yet, in dependency order, up to `--parallel` at once. Each task runs as its own child `factory run <task> --quiet` process, so one crash never stops the others.
+
+A task starts once each of its dependencies is **merged or has an open PR**. When a dependency's PR is still open, the task is **stacked** on it:
+
+- its worktree starts from the dependency's candidate commit (several open dependencies are merged together first; if they conflict, the task waits until one merges);
+- its PR targets `factory/<dependency>`, so the PR shows only the task's own changes;
+- its gates measure the diff and the new e2e test against that base.
+
+```text
+main ── t01 ◆ PR #10 (base main)
+          └── t02 ◆ PR #11 (base factory/t01)
+                └── t03 ◆ PR #12 (base factory/t02)
+       t04 ◆ PR #13 (base main, independent of the others)
+```
+
+Review and merge from the bottom of each stack up. After each merge, run `factory status --refresh`. It picks up the merge and moves every PR stacked on the merged one: the PR's own commits are rebased onto the trunk (or onto its moved dependency) and the PR is retargeted, with a comment saying which commit the gates ran on. GitHub doesn't retarget stacked PRs on its own unless the repository deletes head branches on merge, so refresh before merging the next PR in a stack.
+
+The run ends when nothing more can start, and prints each task's outcome and the PRs in merge order. Run the plan again to continue: tasks with PRs are kept, failed tasks run again, and tasks that waited on them start once they have PRs. `abandoned` tasks (holds) are skipped. Tasks whose verification the factory refuses are reported as manual.
 
 ---
 
@@ -187,7 +237,7 @@ sequenceDiagram
 - **Context grows every step.** Each step re-sends the entire conversation. In practice 95–98% of tokens are re-read input, and output is small. `factory trace` shows the growth step by step.
 - **Step limits.** Each step is 4 LangGraph nodes (call-limit hook, model, call-limit hook, tools). `ModelCallLimitMiddleware` enforces `max_steps`; the graph recursion limit (`4 × max_steps + 25`) is only a backstop.
 - **Recoverable errors.** These come back to the model as results so the agent can adjust:
-  - a write outside the allowed paths, or a denied command, returns `refused: …`;
+  - a write into `.git` or outside the worktree, or a denied command, returns `refused: …`;
   - a failing tool call returns `error: …`.
 
   Both are flagged with ⚠ in the log.
@@ -198,7 +248,7 @@ sequenceDiagram
 | Role | Default model (OpenRouter) | `max_steps` | Tools | Decides |
 |---|---|---|---|---|
 | planner | `z-ai/glm-5.3` | 40 | read | The implementation plan |
-| builder | `deepseek/deepseek-v4-pro-0813` | 120 | read, write in `allowed_paths` (plus the session log and `always_allowed`), sandboxed `run` | The change |
+| builder | `deepseek/deepseek-v4-pro-0813` | 120 | read, write anywhere in the worktree except `.git`, sandboxed `run` | The change, or a conflicting PR's resolution |
 | reviewer | `z-ai/glm-5.3` | 60 | read, `git_diff` | `VERDICT: APPROVE` or `CHANGES` (missing verdict = CHANGES) |
 | verifier | `deepseek/deepseek-v4-flash-0731` | 30 | read, `git_diff`, sandboxed `run` | Nothing: it writes the PR report; **the gates decide** |
 
@@ -208,7 +258,7 @@ The system prompt is assembled from four parts:
 1. the role file;
 2. the contract;
 3. a **Project rules** block generated from `.factory/config.yaml`, telling the agent what the gates will require (session log, e2e test, unit commands);
-4. the repository's own guidance files (`guidance`, default `CLAUDE.md` and `AGENTS.md`).
+4. the repository's own guidance: the first file of `guidance` that exists (default `AGENTS.md`, then `CLAUDE.md`).
 
 The shipped role prompts therefore carry no project specifics.
 
@@ -226,7 +276,7 @@ No agent can commit, push, call `gh`, run `factory`, or touch the database. The 
 | `home` | — | State directory override (`$FACTORY_HOME` wins over both) |
 | `plans` | `["docs/plans/**/*.md"]` | Markdown files holding task contracts |
 | `exclude` | `[]` | Globs never read as backlog (e.g. `docs/ideas/**`) |
-| `guidance` | `["CLAUDE.md", "AGENTS.md"]` | Repository guidance appended to every agent's prompt, if present |
+| `guidance` | `["AGENTS.md", "CLAUDE.md"]` | Repository guidance: the first file that exists is appended to every agent's prompt |
 | `session_log` | — | Directory: every task must add `<dir>/<today>.md` (`session_log` gate) |
 | `e2e.dir` | — | Every task must add a new test directly under this directory (`e2e_written` gate) |
 | `e2e.language` | `rust` | How new tests are found: `rust` (`#[test]`, `#[tokio::test]` fns) or `python` (`def test_*`) |
@@ -234,8 +284,8 @@ No agent can commit, push, call `gh`, run `factory`, or touch the database. The 
 | `e2e.run_all` | — | The whole suite (used with `--full-e2e`, or when `run_all_when` matches) |
 | `e2e.run_all_when` | `[]` | Regexes over changed paths that run the whole suite instead of only the new tests |
 | `unit_tests` | `[]` | Commands for the `unit_tests` gate |
-| `always_allowed` | `[]` | Globs every task may write besides its `allowed_paths` |
-| `warn_only` | common lockfiles | Files that may change outside `allowed_paths` with only a warning |
+| `lockfiles` | common lockfiles | Files the `diff` gate notes when they change |
+| `dependency_sources` | cargo registry and git sources, rustup toolchains | Directories the agents' file tools may also read, by absolute path (never write) |
 | `denied_commands` | `[]` | Extra regexes the agents' `run` tool refuses (git push/commit/reset…, `sudo`, `gh`, `terraform apply/destroy` and `factory` are built in) |
 | `sandbox.ro_binds` / `rw_binds` | rustup + uv read-only, `~/.cargo` writable | Host paths visible inside the sandbox (missing ones are skipped) |
 | `sandbox.hide` | cargo credentials | Files masked with `/dev/null` |
@@ -280,16 +330,13 @@ sandbox:
 
 ## Task contracts
 
-A plan carries a fenced `yaml` list. Each item has **exactly** these 9 keys; status lives in the database, never in the plan:
+A plan carries a fenced `yaml` list. Each item has **exactly** these 8 keys; status lives in the database, never in the plan:
 
 ```yaml
 - id: my-workstream-t01               # workstream-prefixed, unique across plans
   goal: "One observable deliverable"
   spec_refs: ["docs/spec/api.md#orders"]
-  depends_on: []                      # task ids, may be in other plans; runs only after these merge
-  allowed_paths:                      # the only paths the builder may write
-    - src/orders/**
-    - tests/e2e/test_orders.py        # if e2e.dir is configured: somewhere a new e2e test can go
+  depends_on: []                      # task ids, may be in other plans; stacks on their open PRs, or waits
   non_goals: ["What not to do"]
   acceptance: ["Observable condition proving it is done"]
   verification: ["uv run pytest tests/e2e/test_orders.py::test_refund_flow"]
@@ -299,11 +346,12 @@ A plan carries a fenced `yaml` list. Each item has **exactly** these 9 keys; sta
 `factory validate-plan` checks:
 - schema;
 - dependencies, including across plans and for cycles;
-- path bounds;
 - command selection;
 - placeholders.
 
-It also warns about contracts that can't hold a new e2e test when the project requires one, and `factory run` refuses those. Plans without a task block are not executable. `/plan-workstream` writes plans in this shape (see [Skills](#skills)).
+It also warns about contracts whose verification runs a command the factory refuses (`terraform apply`, `sudo`, `gh`, `denied_commands`, …), and `factory run` refuses them: those tasks are done by hand.
+
+Contracts don't fence the builder in: it can edit any file in the worktree. The goal and the non-goals bound the change, and the reviewer treats unrelated edits as findings. Plans without a task block are not executable. `/plan-workstream` writes plans in this shape (see [Skills](#skills)).
 
 ---
 
@@ -314,8 +362,8 @@ They run in the sandbox against the exact candidate commit, in this order. Gates
 | Gate | Passes when |
 |---|---|
 | `clean` | Worktree HEAD is the candidate and the worktree has no uncommitted changes |
-| `diff` | The candidate changes something |
-| `scope` | Every changed file is in `allowed_paths`, the session log, or `always_allowed`. `warn_only` files only warn |
+| `diff` | The candidate changes something. Changed `lockfiles` are noted |
+| `conflict_markers` | No added line opens, splits or closes a merge-conflict hunk |
 | `plan_untouched` | The task's plan doc was not edited |
 | `session_log` *(configured)* | A `<session_log>/*.md` entry was added |
 | `e2e_written` *(configured)* | A new test was added under `e2e.dir` |
@@ -364,18 +412,18 @@ Agent `run` calls and gate commands execute under bubblewrap (`sandbox.py`):
 | `factory config` | Print the effective project settings |
 | `factory validate-plan [PLAN…]` | Check contracts |
 | `factory sync` | Load every contract from the plans into the db (statuses kept) |
-| `factory status [--refresh] [--json]` | The board. `--refresh` picks up merged or closed PRs and fails dead runs |
-| `factory run TASK [flags]` | Run one task in the foreground |
-| `factory run --ready \| T1 T2 … --parallel N [--watch] [--budget USD]` | Scheduler: many tasks, each as its own child process. Only `queued` tasks start; live runs it did not start count toward `--parallel` |
-| `factory top [--once]` | Live dashboard: progress, current action, elapsed and quiet time, cost, recent events |
+| `factory status [PLAN] [--refresh] [--json]` | The board, grouped by plan with a task counter. `--refresh` picks up merged or closed PRs, takes up open or merged PRs opened from another board, moves stacked PRs whose dependencies merged, marks PRs that conflict with their base `conflict`, and fails dead runs |
+| `factory run PLAN [--parallel N] [--network-for T1,T2] [flags]` | Every task of the plan without a PR, one PR each, dependents stacked on open dependency PRs; PRs in `conflict` get their conflicts resolved |
+| `factory run TASK [flags]` | Run one task in the foreground (stacked the same way). On a `conflict` task it resolves the conflicts; `--force` rebuilds it instead |
+| `factory top [PLAN] [--once]` | Live dashboard: each active plan with its glyph strip (✓ merged ◆ PR open ≠ PR conflicts ▶ running ✗ failed · queued ⊘ held) and counter, then its tasks' progress, current action, elapsed and quiet time, cost; recent events |
 | `factory logs TASK [-f] [-n N]` / `factory logs --all -f` | One task's log, or every task's log merged |
 | `factory trace TASK [--role R] [--attempt N] [--all]` | Per-step model time, tool time, context size, cached tokens, output, cost, calls, largest results |
 | `factory transcript TASK [--role R] [--attempt N] [--all] [--full]` | Exactly what the model saw and did |
 | `factory show TASK [--role R]` | Every step's report and stats |
-| `factory gates TASK [--ref R] [--base B] [--skip …]` | Deterministic gates only, in a throwaway worktree |
-| `factory retry [TASK…]` | Requeue every failed (or dead) task, or the ones named: removes the leftover worktree and sets `queued` |
+| `factory gates TASK [--ref R] [--base B] [--skip …]` | Deterministic gates only, in a throwaway worktree. The base defaults to the PR a stacked task is built on, else the default branch |
+| `factory requeue TASK…` | Put `failed` or `abandoned` tasks back to `queued` so the next plan run picks them up (refuses running, open-PR and merged tasks) |
 | `factory clean TASK` | Remove a task's worktree |
-| `factory abandon TASK` | Mark a task abandoned (also a way to hold a task back from `--ready`) |
+| `factory abandon TASK` | Mark a task abandoned (a hold: plan runs skip it) |
 | `factory check-output --cmd C --exit N LOG` | Classify a test log (for CI) |
 
 Useful `run` flags:
@@ -392,7 +440,7 @@ Useful `run` flags:
 | `--full-e2e` | Always run the whole e2e suite |
 | `--notify` | Desktop notification when the run ends |
 | `--quiet` | Log to the file only |
-| `--force` | Run even if the status or unmerged dependencies would refuse |
+| `--force` | Run even if the status, or a dependency without a PR, would refuse |
 
 ---
 
@@ -408,23 +456,28 @@ Useful `run` flags:
 
 `FACTORY_HOME` defaults to `~/.local/share/factory/<name>` (or the config's `home`). Set it to keep a separate board, for example for experiments.
 
+**Several maintainers.** Each keeps their own board; GitHub is what they share. `factory sync && factory status --refresh` (and every plan run, which starts with a refresh) takes up the factory PRs this board didn't open: a `queued` or `failed` task with an open PR on `factory/TASK` becomes `pr_open`, with its candidate, base and stack read from the PR and its branch, and one with a merged PR becomes `merged`. Closed PRs are history and are ignored; holds (`abandoned`) and running tasks are left alone. Logs, transcripts and costs stay with the board that ran the task.
+
 ---
 
 ## Troubleshooting
 
 | Symptom | Cause, and what to do |
 |---|---|
-| `cannot pass the e2e_written gate` | The project requires an e2e test, and none of the contract's `allowed_paths` is under `e2e.dir`. Fix the contract, or do the task by hand |
+| `… which the factory refuses; run it by hand` | The contract's verification runs a denied command. Do the task by hand, or `--skip-gates verification` |
 | `.factory/config.yaml: unknown key …` | A typo in the config; `factory config` shows what was understood |
-| `worktree … exists from a previous run` | `factory retry TASK` (or `factory clean TASK`), then run again |
-| Status `DEAD` | The `factory run` process died (killed, crashed). `factory status --refresh` marks it failed; `factory retry` requeues it |
+| Status `DEAD` | The `factory run` process died (killed, crashed). `factory status --refresh` marks it failed; run the task or its plan again |
+| `cannot stack TASK: its open dependencies conflict` | Merge one of the dependencies' PRs, `factory status --refresh`, then run again |
+| Status `conflict` | The PR no longer applies to its base. `factory run TASK` (or its plan) resolves it; see [Merge conflicts](#merge-conflicts) |
+| A conflict resolution `failed` | The PR still holds its old head. Run the task again to rebuild it from scratch on the trunk |
 | `⚠ stopped: step limit` in the log | The agent used `max_steps`. Raise it in `.factory/agents/ROLE.md`, or narrow the task |
 | Gates fail on network or dependency fetches | The sandbox is offline. Fetch dependencies first, or pass `--network` for tasks that download |
 | A tool is "not found" inside the sandbox | It lives under `$HOME`, which is hidden. Add its directory to `sandbox.ro_binds` and `sandbox.path` |
 | `set OPENROUTER_API_KEY first` | Export the key for the providers named in the role files |
-| `error: PaymentRequiredResponseError: … available credits` | OpenRouter credits ran out. Parallel runs reserve credit for their in-flight requests, so this can appear before the balance hits zero. Add credits, then `factory retry` |
-| `error: … ConnectError` / `name resolution` | Network outage. Model calls are retried with backoff for about 30 s before the run fails; `factory retry` once it's back |
-| A task never starts in `--watch` | Its dependencies' PRs aren't merged (`factory status` shows what it waits for), or it is `failed` (`factory retry`) |
+| `error: PaymentRequiredResponseError: … available credits` | OpenRouter credits ran out. Parallel runs reserve credit for their in-flight requests, so this can appear before the balance hits zero. Add credits, then run the plan again |
+| `error: … ConnectError` / `name resolution` | Network outage. Model calls are retried with backoff for about 30 s before the run fails; run the plan again once it's back |
+| A plan run leaves a task `queued` | A dependency has no PR (it failed, is held, or is in another plan). `factory status PLAN` shows what it waits for |
+| A stacked PR shows its dependency's changes | Its dependency merged but its commits didn't rebase cleanly, so it is `conflict` and targets the trunk already. Run the task to resolve it |
 | Costs show `-` | The model isn't on OpenRouter's price list, or the list couldn't be fetched |
 
 ---
@@ -441,7 +494,7 @@ uv run pytest -q tests
   - contracts, dependencies and paths;
   - gates (Rust and Python e2e detection, unconfigured gates);
   - the sandbox, tools and the database;
-  - observability, the agent loop and the scheduler.
+  - observability, the agent loop, plan runs, stacking, PR take-up and conflict replay.
 - **CI:** `.github/workflows/ci.yml`.
 
 The agent interface is a single seam: a role receives a `Ctx` with `log`, `progress` and `record` callbacks and returns an `Output`. Replacing LangChain with another runner means implementing the `Roles` protocol in `agents.py`.
@@ -451,7 +504,10 @@ The agent interface is a single seam: a role receives a `Ctx` with `log`, `progr
 - **The reviewer runs before the gates**, so it can approve builds that then fail mechanical checks. Planned: gates first.
 - **Context cost:** whole files stay in context for every later step. Planned: capped tool output, a slimmer system prompt, summarizing old steps.
 - **The builder re-explores what the planner already read.** Planned: the planner hands over exact files and line ranges.
-- **Parallel PRs can conflict** (lockfiles, session logs). Planned: conflict detection in `status --refresh` and a `factory rebase`.
+- **Conflicts are found on refresh, not live.** GitHub computes `mergeable` lazily, so a PR that just started conflicting may show up one `status --refresh` later.
+- **Restacked PRs aren't re-gated.** After a rebase the PR comment names the commit the gates ran on; CI runs on the new one.
+- **Two boards can run the same task at once.** Nothing claims a task across boards. Planned: a draft PR as the claim.
+- **A PR stacked on several dependencies is taken up as stacked on the one it targets**, since the others are merged into its branch and the PR doesn't name them.
 - **Linux only**: the sandbox is bubblewrap.
 - **Branch protection** on your default branch is a GitHub setting; the factory and CI report, they don't enforce merges.
 

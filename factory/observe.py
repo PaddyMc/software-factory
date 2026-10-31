@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import shutil
 import time
+from collections import Counter
 from pathlib import Path
 
+from .contracts import ContractError, plan_name, plan_order
 from .db import ACTIVE, DB, pid_alive, seconds_since
 from .log import clip
 
 DONE = ("merged", "abandoned")
+GLYPHS = {"merged": "✓", "pr_open": "◆", "conflict": "≠", "failed": "✗", "abandoned": "⊘", "queued": "·"}   # running: ▶
 
 
 def fit(line: str, width: int) -> str:
@@ -56,8 +59,46 @@ def detail(db: DB, row) -> str:
         ready = db.readiness(row["id"])
         return ready + (f" · last run: {failing_summary(row['note'])}" if st == "failed" and row["note"] else "")
     if st == "pr_open":
-        return row["pr_url"] or ""
+        return (row["pr_url"] or "") + (f" · stacked on {row['stacked_on']}" if row["stacked_on"] else "")
+    if st == "conflict":
+        return f"{row['pr_url'] or ''} · {failing_summary(row['note'])}"
     return failing_summary(row["note"])
+
+
+def strip(db: DB, rows) -> str:
+    """One glyph per task, in plan order: ✓ merged ◆ PR open ≠ PR conflicts ▶ running ✗ failed · queued ⊘ held."""
+    return "".join("▶" if r["status"] in ACTIVE else GLYPHS.get(r["status"], "?") for r in rows)
+
+
+def counts(db: DB, rows) -> str:
+    """Task counter for one plan: '2/5 merged · 1 PR open · 1 running · 1 waiting'."""
+    c = Counter()
+    for r in rows:
+        st = r["status"]
+        c["running" if st in ACTIVE else "PR open" if st == "pr_open" else "held" if st == "abandoned"
+          else ("ready" if db.ready(r["id"]) else "waiting") if st == "queued" else st] += 1
+    rest = [f"{c[k]} {k}" for k in ("PR open", "conflict", "running", "failed", "ready", "waiting", "held") if c[k]]
+    return " · ".join([f"{c['merged']}/{len(rows)} merged"] + rest)
+
+
+def plan_groups(db: DB, rows) -> list[tuple[str, list]]:
+    """[(plan name, its tasks in dependency order)], plans sorted by name."""
+    by: dict[str, list] = {}
+    for r in rows:
+        by.setdefault(r["plan"], []).append(r)
+    out = []
+    for plan, rs in sorted(by.items(), key=lambda kv: plan_name(kv[0])):
+        try:
+            order = {t.id: i for i, t in enumerate(plan_order([db.contract(r["id"]) for r in rs]))}
+        except ContractError:
+            order = {}
+        out.append((plan_name(plan), sorted(rs, key=lambda r: (order.get(r["id"], 0), r["id"]))))
+    return out
+
+
+def in_plan(rows, plan: str | None) -> list:
+    """Rows of one plan (by name or path), or all rows."""
+    return [r for r in rows if plan in (None, r["plan"], plan_name(r["plan"]))]
 
 
 def _cost(row) -> str:
@@ -77,32 +118,42 @@ def recent_events(home: Path, task_ids: list[str], limit: int) -> list[str]:
     return [l for _, _, l in lines[-limit:]]
 
 
-def render_top(db: DB, home: Path, width: int | None = None, events: int = 12) -> str:
+def render_top(db: DB, home: Path, width: int | None = None, events: int = 12, plan: str | None = None) -> str:
+    """Plans that are running, have open PRs or failures, each with its task counter and every task;
+    the other plans one line each; then the latest events."""
     width = width or shutil.get_terminal_size((160, 40)).columns
-    rows = db.tasks()
+    rows = in_plan(db.tasks(), plan)
     by = lambda *sts: [r for r in rows if r["status"] in sts]
-    active, prs, failed = by(*ACTIVE), by("pr_open"), by("failed")
+    active, prs, failed = by(*ACTIVE), by("pr_open", "conflict"), by("failed")
     queued = by("queued")
-    ready = [r for r in queued if db.readiness(r["id"]) == "ready"]
+    ready = [r for r in queued if db.ready(r["id"])]
     total_cost = sum(r["cost_usd"] or 0 for r in rows)
     out = [f"factory · {len(active)} running · {len(prs)} PR open · {len(failed)} failed · "
            f"{len(ready)} ready · {len(queued) - len(ready)} waiting · {len(by(*DONE))} done · "
            f"spent ${total_cost:.2f}", ""]
-    head = f"{'TASK':<30} {'STATUS':<10} {'ELAPSED':>8} {'QUIET':>7} {'COST':>7}  PROGRESS / NOW"
-    out += [head, "-" * min(width, len(head) + 40)]
-    shown = active + failed + prs + ready
-    for r in shown:
-        running = r["status"] in ACTIVE
-        elapsed = human_secs(seconds_since(r["started_at"])) if running else ""
-        quiet = human_secs(seconds_since(r["heartbeat_at"])) if running else ""
-        dead = liveness(r)
-        status = "DEAD" if dead else r["status"]
-        line = f"{r['id']:<30} {status:<10} {elapsed:>8} {quiet:>7} {_cost(r):>7}  {detail(db, r)}"
-        out.append(fit(line, width))
-        if running and r["activity"]:
-            out.append(fit(f"{'':<30} {'':<10} {'':>8} {'':>7} {'':>7}  ↳ " + clip(r["activity"], 400), width))
+    groups = plan_groups(db, rows)
+    live = lambda rs: any(r["status"] in ACTIVE + ("pr_open", "conflict", "failed") for r in rs)
+    shown = [(n, rs) for n, rs in groups if plan or live(rs)]
+    idle = [(n, rs) for n, rs in groups if not (plan or live(rs))]
+    head = f"  {'TASK':<32} {'STATUS':<10} {'ELAPSED':>8} {'QUIET':>7} {'COST':>7}  PROGRESS / NOW"
+    if shown:
+        out += [head, "-" * min(width, len(head) + 40)]
+    for name, rs in shown:
+        cost = sum(r["cost_usd"] or 0 for r in rs)
+        out.append(fit(f"{name}  {strip(db, rs)}  {counts(db, rs)} · ${cost:.2f}", width))
+        for r in rs:
+            running = r["status"] in ACTIVE
+            elapsed = human_secs(seconds_since(r["started_at"])) if running else ""
+            quiet = human_secs(seconds_since(r["heartbeat_at"])) if running else ""
+            status = "DEAD" if liveness(r) else r["status"]
+            out.append(fit(f"  {r['id']:<32} {status:<10} {elapsed:>8} {quiet:>7} {_cost(r):>7}  {detail(db, r)}", width))
+            if running and r["activity"]:
+                out.append(fit(f"  {'':<32} {'':<10} {'':>8} {'':>7} {'':>7}  ↳ " + clip(r["activity"], 400), width))
     if not shown:
-        out.append("(nothing running, open, failed, or ready — `factory sync`, then `factory run <task>`)")
+        out.append("(no plan is running or has an open PR or a failure — `factory run <plan>`)")
+    if idle:
+        out += ["", "other plans"]
+        out += [fit(f"  {n:<32} {strip(db, rs):<10} {counts(db, rs)}", width) for n, rs in idle]
     recent_ids = [r["id"] for r in active + failed + prs]
     if recent_ids and events:
         out += ["", "recent events"]

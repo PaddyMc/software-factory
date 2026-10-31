@@ -1,6 +1,6 @@
 ---
 name: review-task
-description: Review the implementation of one software-factory task contract before merge — typically a factory PR (`factory/<task-id>` branch) or hand-written work. Runs the factory's deterministic gates (`factory gates` — scope within allowed_paths, plan untouched, and whatever .factory/config.yaml configures — session log, a new e2e test, the contract's verification commands, unit and e2e tests), then judges each acceptance criterion and non-goal with the factory's reviewer checklist, producing an APPROVE / REQUEST CHANGES report. Explicit-invocation only — invoke when the user types `/review-task TASK_ID [REF]`; do not auto-trigger on phrases like "review this" (use an ordinary code review for plain diffs).
+description: Review the implementation of one software-factory task contract before merge — typically a factory PR (`factory/<task-id>` branch) or hand-written work. Runs the factory's deterministic gates (`factory gates` — no conflict markers, plan untouched, and whatever .factory/config.yaml configures — session log, a new e2e test, the contract's verification commands, unit and e2e tests), then judges each acceptance criterion and non-goal with the factory's reviewer checklist, producing an APPROVE / REQUEST CHANGES report. Explicit-invocation only — invoke when the user types `/review-task TASK_ID [REF]`; do not auto-trigger on phrases like "review this" (use an ordinary code review for plain diffs).
 ---
 
 # Review Task
@@ -24,7 +24,7 @@ factory gates <task-id> --ref <ref>                                          # f
 - **Which gates exist** depends on `.factory/config.yaml`; `factory config` shows it.
 - **Whole e2e suite:** pass `--full-e2e` when the change touches paths matched by `e2e.run_all_when`.
 - **Timeouts:** allow a generous one, since a cold build plus tests can take minutes.
-- **Early stop:** if `scope`, `plan_untouched` or `e2e_written` fails on the cheap pass, stop and report.
+- **Early stop:** if `conflict_markers`, `plan_untouched` or `e2e_written` fails on the cheap pass, stop and report.
 
 ## 2. Judgment
 

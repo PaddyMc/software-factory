@@ -1,8 +1,8 @@
 """Deterministic gates for a candidate commit. These — not an agent — decide pass/fail.
 
-Always: clean, diff, scope, plan_untouched, verification. When the project configures them
-(`.factory/config.yaml`): session_log, e2e_written, unit_tests, e2e_tests. Order:
-clean, diff, scope, plan_untouched, session_log, e2e_written, verification, unit_tests, e2e_tests.
+Always: clean, diff, conflict_markers, plan_untouched, verification. When the project configures
+them (`.factory/config.yaml`): session_log, e2e_written, unit_tests, e2e_tests. Order: clean, diff,
+conflict_markers, plan_untouched, session_log, e2e_written, verification, unit_tests, e2e_tests.
 """
 
 from __future__ import annotations
@@ -15,11 +15,11 @@ from pathlib import Path
 
 from .config import E2E, Config
 from .contracts import Task
-from .globs import matches_any
-from .tools import PathGuard
+from .tools import DENIED_COMMANDS
 from .verification import PASS, classify, tests_run
 
-CHEAP = ("clean", "diff", "scope", "plan_untouched", "session_log", "e2e_written")
+CHEAP = ("clean", "diff", "conflict_markers", "plan_untouched", "session_log", "e2e_written")
+CONFLICT_MARKER = re.compile(r"^\+(<{7}|\|{7}|>{7})( |$)")
 ALL = CHEAP + ("verification", "unit_tests", "e2e_tests")
 
 
@@ -34,13 +34,12 @@ class Gate:
         return {True: "PASS", False: "FAIL", None: "skip"}[self.ok]
 
 
-def e2e_writable(task: Task, cfg: Config) -> bool:
-    """Can this contract satisfy the e2e_written gate? True when the project requires no e2e test."""
-    if cfg.e2e is None:
-        return True
-    guard = PathGuard(Path("."), task.allowed_paths)
-    return guard.allows(cfg.e2e.dir + "__probe__" + cfg.e2e.suffix) or any(
-        p.startswith(cfg.e2e.dir) and p.endswith(cfg.e2e.suffix) for p in task.allowed_paths)
+def manual_reason(task: Task, cfg: Config) -> str:
+    """Why the factory cannot run this task ("" if it can): a verification command it refuses
+    (terraform apply, sudo, gh, the project's denied_commands …) can only be run by hand."""
+    denied = DENIED_COMMANDS + cfg.denied_commands
+    refused = [c for c in task.verification if any(re.search(p, c) for p in denied)]
+    return f"verification runs {refused[0]!r}, which the factory refuses; run it by hand" if refused else ""
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -87,6 +86,24 @@ def new_e2e_tests(patch: str, e2e: E2E) -> list[NewTest]:
     return found
 
 
+def conflict_markers(patch: str) -> list[str]:
+    """`path:line` of every added line that opens, splits or closes a merge-conflict hunk."""
+    found, path, line = [], None, 0
+    for text in patch.splitlines():
+        if text.startswith("+++ "):
+            path = text[6:] if text.startswith("+++ b/") else None
+        elif text.startswith("@@"):
+            m = re.search(r"\+(\d+)", text)
+            line = int(m.group(1)) if m else 0
+        elif path and text.startswith("+"):
+            if CONFLICT_MARKER.match(text):
+                found.append(f"{path}:{line}")
+            line += 1
+        elif path and not text.startswith("-"):
+            line += 1
+    return found
+
+
 def _summary(output: str) -> str:
     lines = [l for l in output.splitlines() if l.startswith("test result") or "FAILED" in l or "panicked" in l]
     return "\n".join(lines[-12:]) or "\n".join(output.splitlines()[-12:])
@@ -102,16 +119,15 @@ def run_gates(task: Task, worktree: Path, base: str, sha: str, sandbox, cfg: Con
              f"HEAD {head[:12]} vs candidate {sha[:12]}; {'clean' if clean else 'dirty worktree'}"))
 
     files = changed_files(worktree, base, sha)
-    add(Gate("diff", bool(files), f"{len(files)} files changed" if files else "no changes"))
+    lock = [f for f in files if f in cfg.lockfiles]
+    changed = f"{len(files)} files changed" + (f" (lockfile changes: {', '.join(lock)})" if lock else "")
+    add(Gate("diff", bool(files), changed if files else "no changes"))
 
-    guard = PathGuard(worktree, task.allowed_paths)
-    outside = [f for f in files if not guard.allows(f) and f not in cfg.warn_only
-               and not matches_any(f, cfg.writable_extras())]
-    lock = [f for f in files if f in cfg.warn_only]
-    add(Gate("scope", not outside, ("outside allowed_paths: " + ", ".join(outside)) if outside else
-             "all files within allowed_paths" + (f" (lockfile changes: {', '.join(lock)})" if lock else "")))
+    markers = conflict_markers(git(worktree, "diff", f"{base}..{sha}"))
+    add(Gate("conflict_markers", not markers, ("conflict markers left at " + ", ".join(markers[:20])) if markers
+             else "no conflict markers"))
 
-    plan_touched = task.plan in files and not guard.allows(task.plan)
+    plan_touched = task.plan in files
     add(Gate("plan_untouched", not plan_touched, f"{task.plan} edited" if plan_touched else "plan unchanged"))
 
     if cfg.session_log:

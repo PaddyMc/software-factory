@@ -52,16 +52,16 @@ Write `<plans-dir>/[<area>/unimplemented/]<workstream-slug>.md` using the templa
 
 The plan MUST include a detailed, bounded **Task Contracts** section. Every contract is one independently reviewable task with a stable, workstream-prefixed unique `id` (`<slug>-t01`). Do not hide implementation work only in milestone prose.
 
-Use a fenced YAML list whose items contain exactly these keys and no others: `id`, `goal`, `spec_refs`, `depends_on`, `allowed_paths`, `non_goals`, `acceptance`, `verification`, `risk`. Each contract is executed on its own by `factory run <id>`, so it must be self-contained.
+Use a fenced YAML list whose items contain exactly these keys and no others: `id`, `goal`, `spec_refs`, `depends_on`, `non_goals`, `acceptance`, `verification`, `risk`. Each contract is executed on its own by `factory run <id>`, so it must be self-contained.
 
 - **Status lives in the factory database, not the plan.** `factory status` shows it.
-- **Dependencies.** A task runs only after its `depends_on` PRs are merged.
+- **Dependencies.** A task runs once each `depends_on` task is merged or has an open PR. On an open PR it is built on top of it (a stacked PR), and the human merges bottom-up.
   - IDs must resolve within this plan, or to explicitly linked tasks in other plans.
   - The dependency graph must be acyclic.
-  - Tasks whose write scopes overlap must be serialized through `depends_on`, not presented as parallel.
+  - Tasks that touch the same files must be serialized through `depends_on`, not presented as parallel.
 - **Prerequisites.** If a task needs a human decision or an external prerequisite before it can run, say so in prose immediately after the YAML ("Prerequisite for `<id>`: …"), never in a YAML field.
 - **The human gate is the PR merge.** Never encode approval in a contract.
-- **Bounded paths.** Keep each task to repo-relative `allowed_paths` (`src/orders/**`, never `**`).
+- **Bounded change.** The builder may write anywhere in the worktree, so bound each task by its goal, acceptance and non-goals; name the modules it touches. The reviewer treats unrelated edits as findings.
 - **Honest risk and decided content.** Assign `risk: low | medium | high` honestly. Make `goal` and `acceptance` observable, and leave no unresolved product decisions in any task.
 - **Milestone mapping.** Map every milestone to task IDs outside the YAML, in a table. Cover tests and docs where relevant.
 - **Verification commands** are exact and runnable **offline in the sandbox** at the candidate commit:
@@ -69,9 +69,9 @@ Use a fenced YAML list whose items contain exactly these keys and no others: `id
   - planned tests labelled as planned additions;
   - a filter that selects zero tests is a failure, not a pass.
 - **Gate requirements from `.factory/config.yaml`:**
-  - with `e2e`, every task adds a NEW test directly under `e2e.dir`, so its `allowed_paths` must cover a file there. `factory run` refuses contracts that can't;
-  - with `session_log`, every task adds `<session_log>/<today>.md`. That path is writable automatically, so don't list it.
-- **Work the factory can't run.** For example, a change to the factory itself, or one needing secrets or spending money. Keep it as a contract and state in prose that it's done by hand. `factory validate-plan` will warn about it.
+  - with `e2e`, every task adds a NEW test directly under `e2e.dir`;
+  - with `session_log`, every task adds `<session_log>/<today>.md`.
+- **Work the factory can't run.** For example, a change to the factory itself, or one needing secrets or spending money. Keep it as a contract and state in prose that it's done by hand. A contract whose verification runs a command the factory refuses (`sudo`, `gh`, `terraform apply`, the project's `denied_commands`) is refused by `factory run`, and `factory validate-plan` warns about it.
 
 ### Phase 4: Coordinate
 
@@ -123,9 +123,6 @@ When the user asks for an engineer brief, write one with the brief template belo
   spec_refs:
     - "<path/to/spec.md#section>"
   depends_on: []
-  allowed_paths:
-    - <src/module/**>
-    - <e2e dir from .factory/config.yaml>/<new_test_file>
   non_goals:
     - "<explicitly excluded behavior>"
   acceptance:
