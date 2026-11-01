@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -20,4 +21,76 @@ jobs:
           # Ubuntu 24.04 runners restrict unprivileged user namespaces, which bwrap needs.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - uses: astral-sh/setup-uv@v5
-      - run: uv run pytest -q -rs tests
+      - run: uv run --locked pytest -q -rs tests
+
+  package:
+    name: build and install release packages
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Check package and tag versions
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          uv run --locked python - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          lock = tomllib.loads(Path("uv.lock").read_text())
+          package = [p for p in lock["package"] if p["name"] == project["name"]]
+          if len(package) != 1 or package[0]["version"] != project["version"]:
+              raise SystemExit("pyproject.toml and uv.lock must have the same project version")
+          tag = os.environ["RELEASE_TAG"]
+          if tag:
+              if not re.fullmatch(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", tag):
+                  raise SystemExit("Release tags must have the form vMAJOR.MINOR.PATCH")
+              if tag != "v" + project["version"]:
+                  raise SystemExit(f"Tag {tag} does not match package version {project['version']}")
+          PY
+          if [[ -n "$RELEASE_TAG" ]]; then
+            test "$(git cat-file -t "$RELEASE_TAG")" = tag
+            git merge-base --is-ancestor HEAD origin/main
+          fi
+      - name: Build source distribution and wheel
+        run: uv build --no-sources
+      - name: Install the wheel and initialize a fresh repository
+        run: |
+          uv venv "$RUNNER_TEMP/release-smoke"
+          uv pip install --python "$RUNNER_TEMP/release-smoke/bin/python" dist/*.whl
+          "$RUNNER_TEMP/release-smoke/bin/factory" --help
+          git init -q -b main "$RUNNER_TEMP/release-smoke-repo"
+          cd "$RUNNER_TEMP/release-smoke-repo"
+          "$RUNNER_TEMP/release-smoke/bin/factory" init
+          "$RUNNER_TEMP/release-smoke/bin/python" - <<'PY'
+          from pathlib import Path
+
+          for name in ("plan-workstream", "review-task", "factory-ops"):
+              source = Path(".claude/skills") / name
+              link = Path(".agents/skills") / name
+              assert (source / "SKILL.md").is_file(), name
+              assert link.is_symlink() and link.samefile(source), name
+          assert Path(".agents/skills/factory-ops/references/troubleshooting.md").is_file()
+          for name in ("plan-workstream", "review-task"):
+              assert (Path(".agents/skills") / name / "agents/openai.yaml").is_file(), name
+          assert Path(".factory/config.yaml").is_file()
+          assert Path("docs/plans/example.md").is_file()
+          assert Path("docs/sessions/README.md").is_file()
+          assert Path("AGENTS.md").is_file()
+          PY
+      - name: Checksum release packages
+        working-directory: dist
+        run: sha256sum *.whl *.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: dist/*
+          if-no-files-found: error
