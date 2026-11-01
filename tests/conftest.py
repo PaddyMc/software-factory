@@ -131,7 +131,25 @@ FAKE_GH = textwrap.dedent(f"""\
             for pr in s["prs"].values():
                 if pr["url"].endswith("/" + num):
                     pr.update(a[i + 1].split("=", 1) for i, x in enumerate(a) if x == "-f")
-        save(); sys.exit(0)
+            save(); sys.exit(0)
+        path = a[2] if a[1] == "--paginate" else a[1]
+        if any(path.endswith(suf) for suf in s.get("broken", [])):
+            save(); print("not json"); sys.exit(0)
+        parts = path.split("?", 1)[0].strip("/").split("/")
+        def pages(items):
+            for i in range(0, len(items), 2):
+                save(); print(json.dumps(items[i:i + 2]))
+            if not items:
+                save(); print("[]")
+        if len(parts) == 6 and parts[3] == "collaborators" and parts[5] == "permission":
+            save(); print(json.dumps({{"permission": s.get("permissions", {{}}).get(parts[4], "write")}})); sys.exit(0)
+        pr = next((p for p in s["prs"].values() if p["url"].endswith("/" + parts[4])), None) if len(parts) >= 5 else None
+        if not pr:
+            save(); sys.exit(1)
+        if len(parts) == 5 and parts[3] == "pulls":
+            save(); print(json.dumps({{"user": {{"login": pr.get("author", "you")}}}})); sys.exit(0)
+        if len(parts) == 6 and parts[3] == "pulls" and parts[5] in ("reviews", "comments"):
+            pages(pr.get(parts[5], [])); sys.exit(0)
     save(); sys.exit(2)
     """)
 
