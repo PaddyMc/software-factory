@@ -4,7 +4,7 @@ The gates run before a PR opens; CI runs after, on every head the PR gets, inclu
 restack pushes, which the gates never saw. `factory status --refresh` reads each open PR's checks at its
 head. When one fails on the factory's own candidate, the task becomes `ci_failed`, and its next run has
 the builder fix the failures on the PR's branch, with the failing jobs' logs as feedback; review and gates
-run again before the same PR is updated (pipeline.CiFix).
+run again before the same PR is updated (pipeline.Rework).
 """
 
 from __future__ import annotations
