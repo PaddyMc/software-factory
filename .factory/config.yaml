@@ -1,5 +1,5 @@
 # Software factory settings for this repository. Every key is optional; see the
-# factory README ("Configure a project") for the full reference.
+# factory's docs/reference.md ("Configure a project") for the full reference.
 
 # Names the state directory: ~/.local/share/factory/<name> (override with `home:` or $FACTORY_HOME).
 name: "software-factory"
