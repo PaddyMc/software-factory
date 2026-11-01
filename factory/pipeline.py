@@ -8,8 +8,8 @@ A PR that conflicts with its base runs resolve -> review -> verify -> PR instead
 its change is replayed onto the new base, the builder resolves the conflicted
 files, and review and gates run again on the result before the PR is updated.
 
-A PR whose CI fails runs ci -> build -> review -> verify -> PR: the builder works
-on the PR's branch with the failing jobs' logs as feedback (see ci.py).
+An open PR whose CI fails is reworked: rework -> build -> review -> verify -> PR: the
+builder works on the PR's branch with the failing jobs' logs as feedback (see ci.py).
 """
 
 from __future__ import annotations
@@ -47,11 +47,47 @@ class Resolution:
 
 
 @dataclass
-class CiFix:
-    """An open PR whose CI fails on its head (ci.py): fixed on its branch, then reviewed and gated again."""
-    old_candidate: str                     # the head CI failed on: the build starts there; the push lease
-    checks: tuple[str, ...]                # the failing checks' names
-    brief: str = ""                        # the builder's feedback: the failing checks and their logs
+class Rework:
+    """An open PR's head, reworked on its branch, then reviewed and gated again."""
+    kind: str                              # the run role, and the key into KINDS: "ci" for a failing CI
+    old_candidate: str                     # the PR head: the build starts there; the push is leased on it
+    what: tuple[str, ...]                  # the names of what triggered it: the failing checks' names
+    brief: str = ""                        # the builder's feedback, kept in view on every attempt
+    through: int | None = None             # the highest review id the brief covers (a review rework)
+
+
+@dataclass(frozen=True)
+class Kind:
+    """The kind-specific wording of one rework (see `KINDS`): looked up from `Rework.kind`."""
+    entry_outcome: str
+    commit_suffix: object
+    no_change: str
+    comment: object
+    body_line: object
+    failure_note: object
+    log: object
+
+
+KINDS = {
+    "ci": Kind(
+        entry_outcome="failing",
+        commit_suffix=lambda attempt: f"(fix CI, attempt {attempt})",
+        no_change="The previous attempt produced no changes, so CI still fails. Fix the failures.",
+        comment=lambda r, new_sha: (
+            f"CI failed on {r.old_candidate[:12]} ({', '.join(f'`{c}`' for c in r.what)}): fixed. Candidate "
+            f"{r.old_candidate[:12]} → {new_sha[:12]}; review and gates ran on {new_sha[:12]}, and CI runs on it now."
+        ),
+        body_line=lambda r: (
+            f"**CI fixed**: " + ", ".join(f"`{c}`" for c in r.what) +
+            f" failed on the previous candidate `{r.old_candidate[:12]}`."
+        ),
+        failure_note=lambda r: (
+            f"The PR still holds {r.old_candidate[:12]}, whose CI fails ({', '.join(r.what)}). "
+            f"Running the task again rebuilds it from scratch."
+        ),
+        log=lambda r: f"fixing CI ({', '.join(r.what)}) on {r.old_candidate[:12]}",
+    ),
+}
 
 
 class Replayed:
@@ -71,7 +107,7 @@ class Options:
     config: Config = field(default_factory=Config)   # loaded from the main checkout, never the worktree
     stacked_on: tuple[str, ...] = ()       # open dependency PRs this task is built on ("task-t01 (url)")
     resolution: Resolution | None = None   # resolve this PR's conflicts instead of building from the plan
-    ci_fix: CiFix | None = None            # fix this PR's failing CI instead of building from the plan
+    rework: Rework | None = None           # rework this open PR's head (its failing CI) instead of building from the plan
 
 
 class State(TypedDict, total=False):
@@ -184,8 +220,8 @@ class Pipeline:
         self.transcript: Path | None = None
         self.pr_url: str | None = None
         self.run_id: int | None = None
-        # A build that leaves HEAD here changed nothing: the base, or the PR head whose CI it is fixing.
-        self.start_sha = opts.ci_fix.old_candidate if opts.ci_fix else base_sha
+        # A build that leaves HEAD here changed nothing: the base, or the PR head being reworked.
+        self.start_sha = opts.rework.old_candidate if opts.rework else base_sha
 
     # ------------------------------------------------------------ helpers
 
@@ -279,30 +315,30 @@ class Pipeline:
         self.db.update(self.task.id, candidate_sha=sha)
         return {"plan": plan, "attempt": 1, "sha": sha, "verdict": ""}
 
-    def ci(self, s: State) -> State:
-        """Entry point when fixing CI: record what failed, then build on the PR's head with it as feedback."""
-        f = self.opts.ci_fix
-        self.role("ci", "building", 0, lambda: (None, "failing", f.brief, f.old_candidate))
-        return {"plan": self.db.last_report(self.task.id, "plan", "done"), "attempt": 0, "feedback": f.brief}
+    def rework(self, s: State) -> State:
+        """Entry point when reworking: record what triggered it, then build on the PR's head with the brief."""
+        r = self.opts.rework
+        self.role(r.kind, "building", 0, lambda: (None, KINDS[r.kind].entry_outcome, r.brief, r.old_candidate))
+        return {"plan": self.db.last_report(self.task.id, "plan", "done"), "attempt": 0, "feedback": r.brief}
 
     def build(self, s: State) -> State:
         attempt = s.get("attempt", 0) + 1
         self.db.update(self.task.id, attempts=attempt)
-        feedback, f = s.get("feedback", ""), self.opts.ci_fix
-        if f and f.brief not in feedback:          # the CI failures stay in view on every attempt
-            feedback = f"{feedback}\n\n{f.brief}".strip()
+        feedback, r = s.get("feedback", ""), self.opts.rework
+        if r and r.brief not in feedback:          # the brief stays in view on every attempt
+            feedback = f"{feedback}\n\n{r.brief}".strip()
 
         def run():
             out = self.roles.build(self.ctx({**s, "attempt": attempt, "feedback": feedback}))
             return self._commit(out, f"factory({self.task.id}): {self.task.goal[:60]} "
-                                     + (f"(fix CI, attempt {attempt})" if f else f"(attempt {attempt})"))
+                                     + (KINDS[r.kind].commit_suffix(attempt) if r else f"(attempt {attempt})"))
 
         out = self.role("build", "building", attempt, run)
         sha = git(self.wt, "rev-parse", "HEAD")
         if sha == self.start_sha:
             return {"attempt": attempt, "sha": sha, "verdict": "CHANGES",
-                    "feedback": "The previous attempt produced no changes, so CI still fails. Fix the failures."
-                    if f else "The previous attempt produced no changes. Implement the task."}
+                    "feedback": KINDS[r.kind].no_change
+                    if r else "The previous attempt produced no changes. Implement the task."}
         self.db.update(self.task.id, candidate_sha=sha)
         return {"attempt": attempt, "sha": sha}
 
@@ -346,7 +382,7 @@ class Pipeline:
 
         def run():
             branch = branch_name(self.task.id)
-            redo = self.opts.resolution or self.opts.ci_fix  # replace exactly the PR head it resolved or fixed,
+            redo = self.opts.resolution or self.opts.rework  # replace exactly the PR head it resolved or reworked,
             lease = (f"--force-with-lease=refs/heads/{branch}:{redo.old_candidate}"   # never a commit pushed since
                      if redo else "--force-with-lease")
             git(self.wt, "push", "-q", lease, "-u", self.opts.remote, f"HEAD:refs/heads/{branch}")
@@ -374,11 +410,9 @@ class Pipeline:
                     else "it now replays cleanly")
             comment(self.wt, self.pr_url, f"Rebuilt on `{r.onto}` ({self.base_sha[:12]}): {what}. Candidate "
                                           f"{r.old_candidate[:12]} → {s['sha'][:12]}; review and gates ran on {s['sha'][:12]}.")
-        if f := self.opts.ci_fix:
+        if r := self.opts.rework:
             from .stack import comment
-            comment(self.wt, self.pr_url, f"CI failed on {f.old_candidate[:12]} ({', '.join(f'`{c}`' for c in f.checks)}): "
-                                          f"fixed. Candidate {f.old_candidate[:12]} → {s['sha'][:12]}; review and gates "
-                                          f"ran on {s['sha'][:12]}, and CI runs on it now.")
+            comment(self.wt, self.pr_url, KINDS[r.kind].comment(r, s["sha"]))
         self.db.update(self.task.id, status="pr_open", pr_url=self.pr_url, progress=None)
         self._event("stage", f"pr_open: {self.pr_url}")
         return {"outcome": "pr_open"}
@@ -403,8 +437,7 @@ class Pipeline:
             *([f"**Conflicts resolved** on `{r.onto}`: " + (", ".join(f"`{f}`" for f in r.conflicts) if r.conflicts
                else "none left") + f". Previous candidate `{r.old_candidate[:12]}`."]
               if (r := self.opts.resolution) else []),
-            *([f"**CI fixed**: " + ", ".join(f"`{c}`" for c in f.checks) + f" failed on the previous candidate "
-               f"`{f.old_candidate[:12]}`."] if (f := self.opts.ci_fix) else []),
+            *([KINDS[r.kind].body_line(r)] if (r := self.opts.rework) else []),
             "## Verifier report\n\n" + s.get("verify", ""),
             "## Gates\n\n" + s.get("gates", ""),
             "<details><summary>Reviewer report</summary>\n\n" + s.get("review", "") + "\n\n</details>",
@@ -415,11 +448,11 @@ class Pipeline:
 
     def graph(self):
         g = StateGraph(State)
-        for name in ("plan", "resolve", "ci", "build", "review", "verify", "pr", "fail"):
+        for name in ("plan", "resolve", "rework", "build", "review", "verify", "pr", "fail"):
             g.add_node(name, getattr(self, name))
-        g.set_entry_point("resolve" if self.opts.resolution else "ci" if self.opts.ci_fix else "plan")
+        g.set_entry_point("resolve" if self.opts.resolution else "rework" if self.opts.rework else "plan")
         g.add_edge("plan", "build")
-        g.add_edge("ci", "build")
+        g.add_edge("rework", "build")
         g.add_edge("build", "review")
         more = lambda s: s["attempt"] < self.opts.max_attempts and not s.get("stuck")
         g.add_conditional_edges("resolve", lambda s: "verify" if s["verdict"] == "APPROVE" else "review" if not s["verdict"]

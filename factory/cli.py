@@ -129,7 +129,7 @@ def cmd_run_one(a) -> int:
     import os
 
     from .agents import LangChainRoles, missing_keys, role_models
-    from .pipeline import Options, Pipeline, PipelineError, create_worktree, git
+    from .pipeline import KINDS, Options, Pipeline, PipelineError, create_worktree, git
 
     root = repo_root()
     home = factory_home()
@@ -162,7 +162,7 @@ def cmd_run_one(a) -> int:
     old_wt = home / "worktrees" / task.id
     if old_wt.exists() and not (row["status"] in ACTIVE and pid_alive(row["pid"])):
         git(root, "worktree", "remove", "--force", str(old_wt))      # a finished run's leftovers
-    resolution = ci_fix = None
+    resolution = rework = None
     try:
         if row["status"] == "conflict" and not a.force:    # resolve the open PR's conflicts; --force rebuilds it
             wt, base_sha, pr_base, trunk, stacked, resolution = _replay(db, root, home, row)
@@ -178,7 +178,7 @@ def cmd_run_one(a) -> int:
                 db.update(task.id, status="pr_open", note=None)
                 print(f"{task.id}: CI no longer fails on {row['pr_url']}; nothing to fix")
                 return 0
-            wt, ci_fix = fix
+            wt, rework = fix
             base_sha, pr_base = row["base_sha"], row["base_ref"]
             stacked = [d for d in (row["stacked_on"] or "").split(",") if d and db.task(d)["status"] != "merged"]
         else:
@@ -198,7 +198,7 @@ def cmd_run_one(a) -> int:
         deps = [db.task(d) for d in stacked]
         db.update(task.id, status="queued", base_ref=pr_base, base_sha=base_sha, trunk=trunk,
                   stacked_on=",".join(stacked) or None, attempts=0, note=None, progress=None)
-    elif ci_fix:        # likewise; the PR keeps its base and stack, only its head moves
+    elif rework:        # likewise; the PR keeps its base and stack, only its head moves
         deps = [db.task(d) for d in stacked]
         db.update(task.id, status="queued", attempts=0, note=None, progress=None)
     else:
@@ -210,13 +210,13 @@ def cmd_run_one(a) -> int:
     opts = Options(base_ref=pr_base, max_attempts=a.max_attempts, open_pr=not a.no_pr,
                    skip_gates=tuple(x for x in a.skip_gates.split(",") if x), full_e2e=a.full_e2e,
                    max_cost=a.max_cost, config=cfg, stacked_on=tuple(f"{d['id']} ({d['pr_url']})" for d in deps),
-                   resolution=resolution, ci_fix=ci_fix)
+                   resolution=resolution, rework=rework)
     log = RunLog(log_path(home, task.id), echo=not a.quiet)
     log("run", f"=== {task.id}: worktree {wt} on factory/{task.id} from {pr_base} ({base_sha[:12]})"
                + (f", stacked on {', '.join(stacked)}" if stacked else "")
                + (f", resolving conflicts in {', '.join(resolution.conflicts) or 'nothing (replays cleanly)'}"
                   if resolution else "")
-               + (f", fixing CI ({', '.join(ci_fix.checks)}) on {ci_fix.old_candidate[:12]}" if ci_fix else "")
+               + (f", {KINDS[rework.kind].log(rework)}" if rework else "")
                + f"; models {', '.join(f'{r}={m}' for r, m in models.items())}")
     print(f"log: {log.path}  (follow elsewhere: factory logs {task.id} -f)", flush=True)
     try:
@@ -229,9 +229,8 @@ def cmd_run_one(a) -> int:
         db.update(task.id, note=f"{row['note']}\n\nThe PR still holds {resolution.old_candidate[:12]}, which conflicts "
                                 f"with {resolution.onto}. Running the task again rebuilds it from scratch.")
         row = db.task(task.id)
-    if ci_fix and row["status"] == "failed":
-        db.update(task.id, note=f"{row['note']}\n\nThe PR still holds {ci_fix.old_candidate[:12]}, whose CI fails "
-                                f"({', '.join(ci_fix.checks)}). Running the task again rebuilds it from scratch.")
+    if rework and row["status"] == "failed":
+        db.update(task.id, note=f"{row['note']}\n\n" + KINDS[rework.kind].failure_note(rework))
         row = db.task(task.id)
     summary = (f"{task.id}: {row['status']} after {row['attempts']} build(s)"
                + (f" — {row['pr_url']}" if row["pr_url"] else "")
@@ -273,10 +272,10 @@ def _replay(db, root: Path, home: Path, row):
 
 
 def _ci_fix(root: Path, home: Path, row):
-    """The open PR's branch at the candidate its CI failed on, and what failed: (worktree, CiFix). None when CI
+    """The open PR's branch at the candidate its CI failed on, and what failed: (worktree, Rework). None when CI
     no longer fails there (a job was re-run, or is running again)."""
     from . import ci
-    from .pipeline import CiFix, PipelineError, branch_name, create_worktree, git
+    from .pipeline import PipelineError, Rework, branch_name, create_worktree, git
     pr = _pr_state(row["pr_url"])
     if not pr:
         raise PipelineError(f"can't read the checks of {row['pr_url']} from GitHub")
@@ -288,7 +287,7 @@ def _ci_fix(root: Path, home: Path, row):
         return None
     git(root, "fetch", "-q", "origin", branch_name(row["id"]), check=False)   # a PR taken up from another board
     wt, _ = create_worktree(root, home, row["id"], row["candidate_sha"])
-    return wt, CiFix(old_candidate=row["candidate_sha"], checks=tuple(c.name for c in red),
+    return wt, Rework(kind="ci", old_candidate=row["candidate_sha"], what=tuple(c.name for c in red),
                      brief=ci.brief(root, row["pr_url"], row["candidate_sha"], red))
 
 
