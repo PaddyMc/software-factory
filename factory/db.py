@@ -13,8 +13,8 @@ from pathlib import Path
 
 from .contracts import Task
 
-STATUSES = ("queued", "planning", "building", "reviewing", "verifying", "pr_open", "conflict", "ci_failed", "merged",
-            "failed", "abandoned")
+STATUSES = ("queued", "planning", "building", "reviewing", "verifying", "pr_open", "conflict", "ci_failed",
+            "changes_requested", "merged", "failed", "abandoned")
 ROLES = ("plan", "build", "resolve", "ci", "review", "verify", "pr")
 ACTIVE = ("planning", "building", "reviewing", "verifying")
 
@@ -54,7 +54,8 @@ CREATE INDEX IF NOT EXISTS runs_task ON runs(task_id, id);
 # Columns added after the first release; ALTERed into older databases on open.
 MIGRATIONS = {
     "tasks": [("progress", "TEXT"), ("pid", "INTEGER"), ("started_at", "TEXT"), ("heartbeat_at", "TEXT"),
-              ("activity", "TEXT"), ("cost_usd", "REAL"), ("trunk", "TEXT"), ("stacked_on", "TEXT")],
+              ("activity", "TEXT"), ("cost_usd", "REAL"), ("trunk", "TEXT"), ("stacked_on", "TEXT"),
+              ("reviews_addressed", "INTEGER")],
     "runs": [("steps", "INTEGER NOT NULL DEFAULT 0"), ("tokens_in", "INTEGER NOT NULL DEFAULT 0"),
              ("tokens_out", "INTEGER NOT NULL DEFAULT 0"), ("cost_usd", "REAL"),
              ("refused", "INTEGER NOT NULL DEFAULT 0"), ("transcript", "TEXT")],

@@ -111,7 +111,7 @@ def summary(db: DB, plan: Plan) -> str:
             what = f"manual: {plan.manual[r['id']]}"
         elif st == "pr_open":
             what = r["pr_url"] + (f"  stacked on {r['stacked_on']}" if r["stacked_on"] else "")
-        elif st in ("conflict", "ci_failed"):
+        elif st in ("conflict", "ci_failed", "changes_requested"):
             what = f"{r['pr_url']}  {(r['note'] or '').splitlines()[0][:140] if r['note'] else ''}"
         elif st in ("queued", "failed"):
             what = db.readiness(r["id"]) if st == "queued" else (r["note"] or "").splitlines()[0][:140] if r["note"] else ""

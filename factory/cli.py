@@ -368,14 +368,16 @@ def _adopt(db, root: Path, remote: str = "origin") -> None:
 
 def _refresh(db) -> None:
     from . import ci
+    from . import reviews
     _adopt(db, repo_root())
     for row in db.tasks():
         if row["status"] in ACTIVE and row["pid"] and not pid_alive(row["pid"]):
             db.update(row["id"], status="failed", progress=None,
                       note=f"process {row['pid']} exited mid-run (killed or crashed); `factory clean` then rerun")
-        if row["status"] in ("pr_open", "conflict", "ci_failed") and row["pr_url"]:
+        if row["status"] in ("pr_open", "conflict", "ci_failed", "changes_requested") and row["pr_url"]:
             pr = _pr_state(row["pr_url"])
-            is_open = row["status"] in ("pr_open", "ci_failed")
+            is_open = row["status"] in ("pr_open", "ci_failed", "changes_requested")
+            status_now = row["status"]
             if pr.get("state") == "MERGED":
                 db.update(row["id"], status="merged")
             elif pr.get("state") == "CLOSED":
@@ -387,23 +389,46 @@ def _refresh(db) -> None:
                 print(f"{row['id']}: conflicts with {row['base_ref']} (`factory run {row['id']}` resolves them)",
                       file=sys.stderr)
             elif is_open and pr.get("headRefOid"):
-                red = ci.red(pr, row["candidate_sha"])
-                if red and row["status"] == "pr_open":
-                    db.update(row["id"], status="ci_failed",
-                              note=f"CI fails on its head: {ci.names(red)}: `factory run {row['id']}` fixes it")
-                    print(f"{row['id']}: CI fails ({ci.names(red)}) (`factory run {row['id']}` fixes it)",
-                          file=sys.stderr)
-                elif red == [] and row["status"] == "ci_failed":     # re-run and passing, or running again
-                    db.update(row["id"], status="pr_open", note=None)
-                    print(f"{row['id']}: CI no longer fails", file=sys.stderr)
-                elif red is None and row["status"] == "ci_failed":   # someone else pushed to it: not ours to fix
-                    db.update(row["id"], status="pr_open",
-                              note=f"its head {pr['headRefOid'][:12]} isn't the factory's candidate; its CI is left "
-                                   f"to whoever pushed it")
-                    print(f"{row['id']}: someone pushed to its PR; its CI is theirs now", file=sys.stderr)
+                if pr["headRefOid"] != row["candidate_sha"]:
+                    # Someone else pushed to the branch: not ours to fix or review.
+                    if row["status"] == "ci_failed":
+                        db.update(row["id"], status="pr_open",
+                                  note=f"its head {pr['headRefOid'][:12]} isn't the factory's candidate; its CI is left "
+                                       f"to whoever pushed it")
+                        print(f"{row['id']}: someone pushed to its PR; its CI is theirs now", file=sys.stderr)
+                        status_now = "pr_open"
+                    if row["status"] == "changes_requested":
+                        db.update(row["id"], status="pr_open",
+                                  note=f"its head {pr['headRefOid'][:12]} isn't the factory's candidate; its reviews "
+                                       f"are left to whoever pushed it")
+                        print(f"{row['id']}: someone pushed to its PR; its reviews are theirs now", file=sys.stderr)
+                        status_now = "pr_open"
+                else:
+                    snap = reviews.fetch(repo_root(), row["pr_url"])
+                    reqs = reviews.requests(snap, row["reviews_addressed"]) if snap else None
+                    logins = ", ".join("@" + l for l in dict.fromkeys(r["user"]["login"] for r in reqs))
+                    if reqs and status_now != "changes_requested":
+                        db.update(row["id"], status="changes_requested",
+                                  note=f"a review requests changes ({logins}): `factory run {row['id']}` addresses them")
+                        print(f"{row['id']}: changes requested by {logins} (`factory run {row['id']}` addresses them)",
+                              file=sys.stderr)
+                        status_now = "changes_requested"
+                    elif reqs == [] and status_now == "changes_requested":
+                        db.update(row["id"], status="pr_open", note=None)
+                        print(f"{row['id']}: no review requests changes now", file=sys.stderr)
+                        status_now = "pr_open"
+                    red = ci.red(pr, row["candidate_sha"])
+                    if red and status_now == "pr_open":
+                        db.update(row["id"], status="ci_failed",
+                                  note=f"CI fails on its head: {ci.names(red)}: `factory run {row['id']}` fixes it")
+                        print(f"{row['id']}: CI fails ({ci.names(red)}) (`factory run {row['id']}` fixes it)",
+                              file=sys.stderr)
+                    elif red == [] and status_now == "ci_failed":
+                        db.update(row["id"], status="pr_open", note=None)
+                        print(f"{row['id']}: CI no longer fails", file=sys.stderr)
     from .stack import restack
     for row in db.tasks():          # by id, so a plan's stack moves bottom-up
-        if row["status"] in ("pr_open", "ci_failed") and row["stacked_on"]:
+        if row["status"] in ("pr_open", "ci_failed", "changes_requested") and row["stacked_on"]:
             msg = restack(db, repo_root(), factory_home(), row["id"])
             if msg:
                 print(msg, file=sys.stderr)
