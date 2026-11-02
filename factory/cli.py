@@ -151,7 +151,7 @@ def cmd_run_one(a) -> int:
     db = _db()
     db.upsert_task(task)
     row = db.task(task.id)
-    if row["status"] in ACTIVE + ("pr_open", "merged") and not a.force:
+    if row["status"] in ACTIVE + ("pr_open", "changes_requested", "merged") and not a.force:
         print(f"{task.id} is {row['status']}; use --force to run again", file=sys.stderr)
         return 1
     stacked, unmet = db.deps(task)
@@ -335,6 +335,7 @@ def _adopt(db, root: Path, remote: str = "origin") -> None:
     """Take up factory PRs this board didn't open: another maintainer's runs, or this board's before a reset.
     A queued or failed task with an open or merged PR on factory/<task> becomes pr_open or merged, so everyone
     working from the same GitHub repo sees the same board. Holds (abandoned) and running tasks are left alone."""
+    from . import reviews
     from .pipeline import PipelineError, branch_name, git
     waiting = [r for r in db.tasks() if r["status"] in ("queued", "failed") and not r["pr_url"]]
     prs = _factory_prs(root) if waiting else {}
@@ -359,9 +360,13 @@ def _adopt(db, root: Path, remote: str = "origin") -> None:
         trunk, hops = base, 0
         while trunk.startswith("factory/") and (up := prs.get(trunk.removeprefix("factory/"))) and hops < 20:
             trunk, hops = up["baseRefName"], hops + 1       # a stack ends on the trunk
+        addressed = {}
+        snap = reviews.fetch(root, pr["url"])
+        if snap is not None:
+            addressed["reviews_addressed"] = max((r.get("id") or 0 for r in snap.reviews), default=0)
         db.update(row["id"], status="pr_open", branch=branch, pr_url=pr["url"], base_ref=base, base_sha=base_sha,
                   candidate_sha=candidate, trunk=None if trunk.startswith("factory/") else trunk, stacked_on=dep,
-                  note="PR opened outside this board; taken up from GitHub", progress=None)
+                  note="PR opened outside this board; taken up from GitHub", progress=None, **addressed)
         print(f"{row['id']}: PR open at {pr['url']}" + (f", stacked on {dep}" if dep else "")
               + " (taken up from GitHub)", file=sys.stderr)
 
@@ -406,17 +411,21 @@ def _refresh(db) -> None:
                 else:
                     snap = reviews.fetch(repo_root(), row["pr_url"])
                     reqs = reviews.requests(snap, row["reviews_addressed"]) if snap else None
-                    logins = ", ".join("@" + l for l in dict.fromkeys(r["user"]["login"] for r in reqs))
-                    if reqs and status_now != "changes_requested":
-                        db.update(row["id"], status="changes_requested",
-                                  note=f"a review requests changes ({logins}): `factory run {row['id']}` addresses them")
-                        print(f"{row['id']}: changes requested by {logins} (`factory run {row['id']}` addresses them)",
-                              file=sys.stderr)
-                        status_now = "changes_requested"
-                    elif reqs == [] and status_now == "changes_requested":
-                        db.update(row["id"], status="pr_open", note=None)
-                        print(f"{row['id']}: no review requests changes now", file=sys.stderr)
-                        status_now = "pr_open"
+                    if reqs is not None:
+                        logins = ", ".join("@" + l for l in dict.fromkeys(reviews._login(r) for r in reqs))
+                        if reqs and status_now != "changes_requested":
+                            db.update(row["id"], status="changes_requested",
+                                      note=f"a review requests changes ({logins}): `factory run {row['id']}` addresses them")
+                            print(f"{row['id']}: changes requested by {logins} (`factory run {row['id']}` addresses them)",
+                                  file=sys.stderr)
+                            status_now = "changes_requested"
+                        elif reqs and status_now == "changes_requested":
+                            db.update(row["id"],
+                                      note=f"a review requests changes ({logins}): `factory run {row['id']}` addresses them")
+                        elif reqs == [] and status_now == "changes_requested":
+                            db.update(row["id"], status="pr_open", note=None)
+                            print(f"{row['id']}: no review requests changes now", file=sys.stderr)
+                            status_now = "pr_open"
                     red = ci.red(pr, row["candidate_sha"])
                     if red and status_now == "pr_open":
                         db.update(row["id"], status="ci_failed",
@@ -656,7 +665,7 @@ def cmd_requeue(a) -> int:
         elif row["status"] in ACTIVE and pid_alive(row["pid"]):
             print(f"{tid}: running ({row['status']}, pid {row['pid']}); leaving it")
             rc = 1
-        elif row["status"] in ("pr_open", "conflict", "ci_failed", "merged"):
+        elif row["status"] in ("pr_open", "conflict", "ci_failed", "changes_requested", "merged"):
             print(f"{tid}: {row['status']}; nothing to requeue")
             rc = 1
         elif row["status"] == "queued":

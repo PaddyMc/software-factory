@@ -78,9 +78,11 @@ def counts(db: DB, rows) -> str:
     for r in rows:
         st = r["status"]
         c["running" if st in ACTIVE else "PR open" if st == "pr_open" else "CI failing" if st == "ci_failed"
+          else "changes requested" if st == "changes_requested"
           else "held" if st == "abandoned" else ("ready" if db.ready(r["id"]) else "waiting") if st == "queued"
           else st] += 1
-    rest = [f"{c[k]} {k}" for k in ("PR open", "conflict", "CI failing", "running", "failed", "ready", "waiting", "held")
+    rest = [f"{c[k]} {k}" for k in ("PR open", "conflict", "CI failing", "changes requested",
+                                    "running", "failed", "ready", "waiting", "held")
             if c[k]]
     return " · ".join([f"{c['merged']}/{len(rows)} merged"] + rest)
 
@@ -300,6 +302,4 @@ def render_trace(path: Path, width: int | None = None) -> str:
             + "; ".join(f"step {r['step']}: {r['result_chars']:,} chars {r['calls'][0]}" for r in heavy if r["result_chars"]),
             "  slowest tools  " + "; ".join(f"step {r['step']}: {human_secs(r['tools_s'])} {r['calls'][0]}"
                                            for r in slow if r["tools_s"])]
-    return "\n".join(fit(l, width) if l.startswith("  ") else l for l in out)
-ow if r["tools_s"])]
     return "\n".join(fit(l, width) if l.startswith("  ") else l for l in out)

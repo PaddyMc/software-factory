@@ -549,6 +549,20 @@ def _ci_says(fake_gh, branch, head, *checks, logs=None):
     fake_gh.write_text(json.dumps(state))
 
 
+def _review(id, login, state, body=""):
+    return {"id": id, "user": {"login": login}, "state": state, "body": body, "commit_id": "a" * 40}
+
+
+def _reviews_say(fake_gh, branch, head, *reviews, permissions=None):
+    """GitHub's reviews on the PR at `head`, checks green."""
+    state = json.loads(fake_gh.read_text())
+    state["prs"][branch].update(commits=[{"oid": "0" * 40}, {"oid": head}],
+                                 statusCheckRollup=[], reviews=list(reviews))
+    if permissions is not None:
+        state["permissions"] = permissions
+    fake_gh.write_text(json.dumps(state))
+
+
 def test_failing_ci_is_fixed_on_the_pr_branch_then_reviewed_and_gated(factory_repo, home, fake_gh, monkeypatch, capsys):
     _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
     assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
@@ -685,3 +699,202 @@ def test_ci_failure_of_a_stacked_pr_whose_dependency_merged_is_restacked_not_fix
         capsys.readouterr().out
     row = open_db(home).task("demo-t02")
     assert calls == [] and row["status"] == "pr_open" and row["base_ref"] == "main" and row["candidate_sha"] != old
+
+
+def test_a_review_requesting_changes_marks_the_task_on_refresh(factory_repo, home, fake_gh, monkeypatch, capsys):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    db = open_db(home)
+    head = db.task("demo-t01")["candidate_sha"]
+
+    capsys.readouterr()
+    _reviews_say(fake_gh, "factory/demo-t01", head, _review(1, "alice", "CHANGES_REQUESTED"))
+    assert main(["status", "--refresh"]) == 0
+    captured = capsys.readouterr()
+    assert "demo-t01: changes requested by @alice (`factory run demo-t01` addresses them)" in captured.err
+    assert "↺" in captured.out and "1 changes requested" in captured.out
+    row = db.task("demo-t01")
+    assert row["status"] == "changes_requested"
+    assert "@alice" in row["note"] and "`factory run demo-t01`" in row["note"]
+
+    # top shows the glyph, counter, URL and note.
+    assert main(["top", "--once"]) == 0
+    top = capsys.readouterr().out
+    assert "↺" in top and "1 changes requested" in top and "https://github.test/pr/1" in top and "@alice" in top
+
+    # run refuses without --force.
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 1
+    assert "demo-t01 is changes_requested; use --force to run again" in capsys.readouterr().err
+
+    # a read-only reviewer's request does not count.
+    _reviews_say(fake_gh, "factory/demo-t01", head, _review(1, "alice", "CHANGES_REQUESTED"),
+                 _review(2, "carol", "CHANGES_REQUESTED"), permissions={"carol": "read"})
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    assert db.task("demo-t01")["status"] == "changes_requested"
+
+    # alice approves after her request -> back to pr_open.
+    _reviews_say(fake_gh, "factory/demo-t01", head, _review(1, "alice", "CHANGES_REQUESTED"),
+                 _review(2, "alice", "APPROVED"))
+    assert main(["status", "--refresh"]) == 0
+    assert "demo-t01: no review requests changes now" in capsys.readouterr().err
+    assert db.task("demo-t01")["status"] == "pr_open"
+
+    # the author's own COMMENTED review counts as a request.
+    _reviews_say(fake_gh, "factory/demo-t01", head, _review(1, "you", "COMMENTED"))
+    assert main(["status", "--refresh"]) == 0
+    assert db.task("demo-t01")["status"] == "changes_requested"
+
+    # refresh never GETs conversation comments, and the factory's own comment never changes the status.
+    state = json.loads(fake_gh.read_text())
+    state["calls"] = [c for c in state["calls"] if not (c[0] == "api" and "/issues/" in c[1] and "/comments" in c[1])]
+    fake_gh.write_text(json.dumps(state))
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    calls = json.loads(fake_gh.read_text())["calls"]
+    assert not any(c[0] == "api" and "/issues/1/comments" in c[1] for c in calls)
+    assert db.task("demo-t01")["status"] == "changes_requested"
+
+
+def test_conflicts_come_before_requested_changes_and_requested_changes_before_ci(factory_repo, home, fake_gh,
+                                                                                monkeypatch, capsys):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    db = open_db(home)
+    sha = db.task("demo-t01")["candidate_sha"]
+
+    # (1) request + conflict -> conflict wins, no "changes requested" line.
+    _reviews_say(fake_gh, "factory/demo-t01", sha, _review(1, "alice", "CHANGES_REQUESTED"))
+    _github_says(fake_gh, "factory/demo-t01", mergeable="CONFLICTING")
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    captured = capsys.readouterr()
+    assert db.task("demo-t01")["status"] == "conflict"
+    assert "changes requested" not in captured.err
+
+    # (2) mergeable back to MERGEABLE -> changes_requested.
+    db.update("demo-t01", status="pr_open")
+    _github_says(fake_gh, "factory/demo-t01", mergeable="MERGEABLE")
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    assert "changes requested by @alice" in capsys.readouterr().err
+    assert db.task("demo-t01")["status"] == "changes_requested"
+
+    # (3) alice's approval clears it (green CI) -> pr_open.
+    _reviews_say(fake_gh, "factory/demo-t01", sha, _review(1, "alice", "CHANGES_REQUESTED"),
+                 _review(2, "alice", "APPROVED"))
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    assert db.task("demo-t01")["status"] == "pr_open"
+
+    # (4) red CI -> ci_failed.
+    _ci_says(fake_gh, "factory/demo-t01", sha, FMT)
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    assert db.task("demo-t01")["status"] == "ci_failed"
+
+    # (5) a requesting review outranks red CI -> changes_requested.
+    _reviews_say(fake_gh, "factory/demo-t01", sha, _review(1, "bob", "CHANGES_REQUESTED"))
+    _ci_says(fake_gh, "factory/demo-t01", sha, FMT)
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    assert "changes requested by @bob" in capsys.readouterr().err
+    assert db.task("demo-t01")["status"] == "changes_requested"
+
+
+def test_reviews_on_a_head_someone_else_pushed_are_left_to_them(factory_repo, home, fake_gh, monkeypatch, capsys):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    db = open_db(home)
+    db.update("demo-t01", status="changes_requested",
+              note="a review requests changes (@alice): `factory run demo-t01` addresses them")
+
+    _ci_says(fake_gh, "factory/demo-t01", "f" * 40, FMT)      # head != candidate
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    captured = capsys.readouterr()
+    assert db.task("demo-t01")["status"] == "pr_open"
+    assert "isn't the factory's candidate; its reviews are left to whoever pushed" in db.task("demo-t01")["note"]
+    assert "its reviews are theirs now" in captured.err
+
+    # re-mark and break the reviews endpoint: gh failure changes nothing.
+    db.update("demo-t01", status="changes_requested",
+              note="a review requests changes (@alice): `factory run demo-t01` addresses them")
+    _reviews_say(fake_gh, "factory/demo-t01", db.task("demo-t01")["candidate_sha"],
+                 _review(1, "alice", "CHANGES_REQUESTED"))   # head is the candidate again
+    state = json.loads(fake_gh.read_text())
+    state["broken"] = ["pulls/1/reviews"]
+    fake_gh.write_text(json.dumps(state))
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    assert db.task("demo-t01")["status"] == "changes_requested"
+
+
+def test_a_stacked_pr_keeps_its_requested_changes_when_restacked(factory_repo, home, fake_gh, monkeypatch, capsys):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    plays = scripts(review_verdicts=["APPROVE"])
+    plays["BUILDER"] = [call("write_file", path="crates/e2e/tests/second.rs", content=SECOND),
+                        call("write_file", path="docs/sessions/2026-10-09.md",
+                             content="## [12:00] demo-t01\n## [12:05] demo-t02\n"),
+                        AIMessage("Second thing.\nRESULT: DONE")]
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t02", "--skip-gates", SKIP, *SANDBOX]) == 0
+    db = open_db(home)
+    t02 = db.task("demo-t02")["candidate_sha"]
+
+    _reviews_say(fake_gh, "factory/demo-t02", t02, _review(1, "alice", "CHANGES_REQUESTED"))
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    assert db.task("demo-t02")["status"] == "changes_requested"
+    note = db.task("demo-t02")["note"]
+
+    # demo-t01 merges: the refresh moves demo-t02 onto main and keeps the changes_requested status.
+    t01 = db.task("demo-t01")["candidate_sha"]
+    git(factory_repo, "merge", "-q", "--squash", t01)
+    git(factory_repo, "commit", "-q", "-m", "demo-t01 (#1)")
+    git(factory_repo, "push", "-q", "origin", "main")
+    _github_says(fake_gh, "factory/demo-t01", state="MERGED")
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    assert "demo-t02: rebased onto main, PR retargeted" in capsys.readouterr().err
+    row = db.task("demo-t02")
+    assert row["status"] == "changes_requested"
+    assert note == row["note"] and "@alice" in row["note"]
+    assert row["base_ref"] == "main"
+    assert json.loads(fake_gh.read_text())["prs"]["factory/demo-t02"]["base"] == "main"
+    assert row["candidate_sha"] != t02
+
+    # sync the head to the new candidate and refresh again: idempotent, still changes_requested.
+    _reviews_say(fake_gh, "factory/demo-t02", row["candidate_sha"], _review(1, "alice", "CHANGES_REQUESTED"))
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    assert db.task("demo-t02")["status"] == "changes_requested"
+
+
+def test_a_taken_up_pr_treats_earlier_reviews_as_addressed(factory_repo, home, fake_gh, monkeypatch, capsys, tmp_path):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    a = open_db(home).task("demo-t01")["candidate_sha"]
+    _reviews_say(fake_gh, "factory/demo-t01", a,
+                 _review(5, "alice", "CHANGES_REQUESTED"), _review(6, "bob", "CHANGES_REQUESTED"),
+                 _review(7, "alice", "APPROVED"))
+
+    # Board B takes the PR up; the watermark is the latest review id (7), so bob's request no longer counts.
+    board_b = tmp_path / "board-b"
+    monkeypatch.setenv("FACTORY_HOME", str(board_b))
+    assert main(["sync"]) == 0
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    row = open_db(board_b).task("demo-t01")
+    assert row["status"] == "pr_open"
+    assert row["reviews_addressed"] == 7
+    assert "changes requested" not in capsys.readouterr().err
+
+    # a review after the watermark requests changes again.
+    _reviews_say(fake_gh, "factory/demo-t01", a,
+                 _review(5, "alice", "CHANGES_REQUESTED"), _review(6, "bob", "CHANGES_REQUESTED"),
+                 _review(7, "alice", "APPROVED"), _review(9, "bob", "CHANGES_REQUESTED"))
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    assert open_db(board_b).task("demo-t01")["status"] == "changes_requested"
