@@ -7,8 +7,8 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | ✓ | Read CI on open PRs and fix failures. Done: [CI failures](docs/architecture.md#ci-failures) | — | — |
 | ✓ | Act on human PR review comments. Done: [Review comments](docs/architecture.md#review-comments) | — | — |
 | 2 | The builder writes the test that judges it | small | — |
-| 3 | Nothing measures the factory itself | medium | — |
-| 4 | Learn from feedback | medium | 1, 3 |
+| 3 | Nothing measures the factory itself. `factory stats` planned: [measure](docs/plans/measure.md); `factory bench` not yet | medium | — |
+| 4 | Learn from feedback. Planned as a knowledge crew: [wiki](docs/plans/wiki.md) | medium | 1, 3 |
 | 5 | Steer a running agent | small | — |
 | 6 | Runs need this machine | large | a shared board |
 
@@ -60,6 +60,12 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
   Break it down by role model. The one thing missing is whether the human changed a PR before merging it; record that at refresh by comparing the merged tree with the candidate.
 - **`factory bench`**: replay a fixed set of merged tasks from their original bases with `--no-pr`, in a throwaway `FACTORY_HOME`, with a given `--model`, `models:` setting or prompt override. Compare gate results, attempts and cost against a stored baseline. Run it before merging changes to role prompts.
 
+**Plan.** [docs/plans/measure.md](docs/plans/measure.md) (planned 2026-11-02, tasks `measure-t01`…`t04`, after [agent-flows](docs/plans/agent-flows.md)) covers `factory stats`. It goes beyond this sketch:
+- Every agent run records a prompt version: a hash of its system prompt without the contract and the date. Stats breaks runs down by flow step, model and version, so a change to a prompt, AGENTS.md or the wiki can be compared before and after on real runs.
+- Refresh records whether the human changed a PR before merging it as a `merge` run: the commits pushed after the candidate, ignoring merges from the base. It does not compare trees.
+
+`factory bench` is not planned yet. It is the controlled comparison stats can't give.
+
 ## 4. Learn from feedback
 
 **Gap.** Reviewer findings, gate failures and human comments repeat across tasks, but nothing feeds them back into the role prompts.
@@ -67,6 +73,13 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 **Seen in.** [oz-for-oss](https://github.com/warpdotdev/oz-for-oss) proposes skill updates from maintainer feedback.
 
 **Sketch.** `factory learn` collects the last N runs' reviewer `CHANGES` findings, gate failures and (with item 1) human review comments. An agent proposes a diff to the role prompts, which goes out as a PR and is never applied directly. `factory bench` (item 3) shows whether it helps. Without item 3 this is guesswork, so build that first.
+
+**Plan.** [docs/plans/wiki.md](docs/plans/wiki.md) (planned 2026-11-02, tasks `wiki-t01`…`t07`, after [measure](docs/plans/measure.md)). It follows Karpathy's [LLM wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) pattern instead of this sketch:
+- A **knowledge crew**, separate from the task crew (an ingester, a linter and a wiki reviewer), keeps a wiki of the repository in `docs/wiki/`. Its pages cover modules, concepts and decisions, plus a guidance page per task role, which is where the lessons go. The role prompts are never edited.
+- Sources are merged tasks (contract, change, reviewer findings, failed gates, human reviews and edits, with human signals first), code paths and docs.
+- Every crew change passes a deterministic wiki check and the wiki reviewer, then lands as a commit on one standing PR that you merge. A `wiki_untouched` gate keeps tasks out of the wiki.
+- Task agents get `index.md` and their role page from the base commit, and read other pages on demand.
+- `factory wiki ingest` and `factory wiki lint` are run by hand. Measure's prompt versions show the effect in `factory stats`.
 
 ## 5. Steer a running agent
 
