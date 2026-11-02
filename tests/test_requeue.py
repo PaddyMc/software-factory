@@ -30,3 +30,14 @@ def test_requeue_moves_only_failed_and_abandoned_tasks(repo, home, monkeypatch, 
     assert main(["requeue", "demo-t01"]) == 1
     assert "demo-t01: ci_failed; nothing to requeue" in capsys.readouterr().out
     assert db.task("demo-t01")["status"] == "ci_failed"
+
+
+def test_requeue_leaves_a_pr_with_requested_changes_alone(repo, home, monkeypatch, capsys):
+    monkeypatch.chdir(repo)
+    assert main(["sync"]) == 0
+    db = open_db(home)
+    db.update("demo-t01", status="changes_requested", pr_url="https://github.test/pr/1",
+              note="a review requests changes (@alice): `factory run demo-t01` addresses them")
+    assert main(["requeue", "demo-t01"]) == 1
+    assert "demo-t01: changes_requested; nothing to requeue" in capsys.readouterr().out
+    assert db.task("demo-t01")["status"] == "changes_requested"
