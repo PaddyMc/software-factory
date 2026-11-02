@@ -156,14 +156,14 @@ Use `factory init --no-skills` to skip the skills, and `factory init --force` to
 | `factory prompt ROLE` | Print a role's prompt as the agents get it (the repository's override, else the shipped one), with its model |
 | `factory validate-plan [PLAN…]` | Check contracts |
 | `factory sync` | Load every contract from the plans into the db (statuses kept) |
-| `factory status [PLAN] [--refresh] [--json]` | The board, grouped by plan with a task counter. `--refresh` picks up merged or closed PRs, takes up open or merged PRs opened from another board, moves stacked PRs whose dependencies merged, marks PRs that conflict with their base `conflict` and PRs whose CI fails `ci_failed`, and fails dead runs |
-| `factory run PLAN [--parallel N] [--network-for T1,T2] [flags]` | Every task of the plan without a PR, one PR each, dependents stacked on open dependency PRs; PRs in `conflict` get their conflicts resolved, and PRs in `ci_failed` get their CI fixed |
-| `factory run TASK [flags]` | Run one task in the foreground (stacked the same way). On a `conflict` task it resolves the conflicts, and on a `ci_failed` task it fixes CI; `--force` rebuilds it instead |
+| `factory status [PLAN] [--refresh] [--json]` | The board, grouped by plan with a task counter. `--refresh` picks up merged or closed PRs, takes up open or merged PRs opened from another board, moves stacked PRs whose dependencies merged, marks PRs that conflict with their base `conflict`, marks PRs a review requests changes on `changes_requested` and clears them when the request is approved or dismissed, and marks PRs whose CI fails `ci_failed`, and fails dead runs. Conflicts come first, then requested changes, then CI |
+| `factory run PLAN [--parallel N] [--network-for T1,T2] [flags]` | Every task of the plan without a PR, one PR each, dependents stacked on open dependency PRs; PRs in `conflict` get their conflicts resolved, PRs in `ci_failed` get their CI fixed, and PRs in `changes_requested` get the review addressed |
+| `factory run TASK [flags]` | Run one task in the foreground (stacked the same way). On a `conflict` task it resolves the conflicts, on a `ci_failed` task it fixes CI, and on a `changes_requested` task it addresses the review; `--force` rebuilds any of them from scratch instead |
 | `factory top [PLAN] [--once]` | Live dashboard: each active plan with its glyph strip (✓ merged ◆ PR open ≠ PR conflicts ! CI fails ▶ running ✗ failed · queued ⊘ held) and counter, then its tasks' progress, current action, elapsed and quiet time, cost; recent events |
 | `factory logs TASK [-f] [-n N]` / `factory logs --all -f` | One task's log, or every task's log merged |
 | `factory trace TASK [--role R] [--attempt N] [--all]` | Per-step model time, tool time, context size, cached tokens, output, cost, calls, largest results |
 | `factory transcript TASK [--role R] [--attempt N] [--all] [--full]` | Exactly what the model saw and did |
-| `factory show TASK [--role R]` | Every step's report and stats |
+| `factory show TASK [--role R]` | Every step's report and stats. `--role human_review` shows the review brief a `changes_requested` rework gave the builder |
 | `factory gates TASK [--ref R] [--base B] [--skip …]` | Deterministic gates only, in a throwaway worktree. The base defaults to the PR a stacked task is built on, else the default branch |
 | `factory requeue TASK…` | Put `failed` or `abandoned` tasks back to `queued` so the next plan run picks them up (refuses running, open-PR and merged tasks) |
 | `factory clean TASK` | Remove a task's worktree |
@@ -205,6 +205,9 @@ Each keeps their own board; GitHub is what they share. `factory sync && factory 
 | Status `conflict` | The PR no longer applies to its base. `factory run TASK` (or its plan) resolves it; see [Merge conflicts](architecture.md#merge-conflicts) |
 | A conflict resolution `failed` | The PR still holds its old head. Run the task again to rebuild it from scratch on the trunk |
 | Status `ci_failed` | CI fails on the PR's head. `factory show TASK --role ci` names the checks and shows the logs; `factory run TASK` (or its plan) fixes them; see [CI failures](architecture.md#ci-failures) |
+| Status `changes_requested` | A review requests changes on the PR's head, which is the factory's candidate. `factory status --refresh` marks it; `factory run TASK` (or its plan) addresses the review, and `factory show TASK --role human_review` shows the brief; see [Review comments](architecture.md#review-comments) |
+| A review rework `failed` | The builder couldn't address the review, or review or gates rejected the result. The PR still holds its old head and the task is `failed` | Run the task again to rebuild it from scratch, or `factory run TASK --force` to do that straight away |
+| A review was answered without a change | The builder found nothing to change; its answer was posted on the PR as a comment, the reviews count as addressed, and the task is back to `pr_open` | Nothing to do |
 | `… not the factory's candidate: someone pushed to it` | A commit the factory didn't make is on the PR branch, so its CI isn't the factory's to fix. Fix it there, or `factory run TASK --force` to rebuild |
 | A CI fix `failed` | The PR still holds the failing head. Run the task again to rebuild it from scratch on the trunk |
 | `⚠ stopped: step limit` in the log | The agent used `max_steps`. Raise it with `max_steps: {ROLE: N}` in `.factory/config.yaml`, or narrow the task |

@@ -563,6 +563,17 @@ def _reviews_say(fake_gh, branch, head, *reviews, permissions=None):
     fake_gh.write_text(json.dumps(state))
 
 
+def _inline(review_id, path, line, body):
+    return {"id": line, "pull_request_review_id": review_id, "path": path, "line": line,
+            "original_line": None, "body": body, "user": {"login": "alice"}, "in_reply_to_id": None}
+
+
+def _inline_comments(fake_gh, branch, *comments):
+    state = json.loads(fake_gh.read_text())
+    state["prs"][branch]["comments"] = list(comments)
+    fake_gh.write_text(json.dumps(state))
+
+
 def test_failing_ci_is_fixed_on_the_pr_branch_then_reviewed_and_gated(factory_repo, home, fake_gh, monkeypatch, capsys):
     _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
     assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
@@ -721,10 +732,6 @@ def test_a_review_requesting_changes_marks_the_task_on_refresh(factory_repo, hom
     assert main(["top", "--once"]) == 0
     top = capsys.readouterr().out
     assert "↺" in top and "1 changes requested" in top and "https://github.test/pr/1" in top and "@alice" in top
-
-    # run refuses without --force.
-    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 1
-    assert "demo-t01 is changes_requested; use --force to run again" in capsys.readouterr().err
 
     # a read-only reviewer's request does not count.
     _reviews_say(fake_gh, "factory/demo-t01", head, _review(1, "alice", "CHANGES_REQUESTED"),
@@ -898,3 +905,207 @@ def test_a_taken_up_pr_treats_earlier_reviews_as_addressed(factory_repo, home, f
     capsys.readouterr()
     assert main(["status", "--refresh"]) == 0
     assert open_db(board_b).task("demo-t01")["status"] == "changes_requested"
+
+
+def test_requested_changes_are_addressed_on_the_pr_branch_then_reviewed_and_gated(factory_repo, home, fake_gh,
+                                                                                 monkeypatch, capsys):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    db = open_db(home)
+    old, base = db.task("demo-t01")["candidate_sha"], db.task("demo-t01")["base_sha"]
+
+    _reviews_say(fake_gh, "factory/demo-t01", old, _review(1, "alice", "CHANGES_REQUESTED", "Please be careful here."))
+    _inline_comments(fake_gh, "factory/demo-t01", _inline(1, "src/greet.txt", 1, "capitalize the greeting and add a note"))
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    assert db.task("demo-t01")["status"] == "changes_requested"
+
+    plays = scripts(review_verdicts=["APPROVE"])
+    plays["BUILDER"] = [call("write_file", path="src/greet.txt", content="hello, world\n"),
+                        AIMessage("Addressed the greeting as requested\nRESULT: DONE")]
+    calls = _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    assert row["status"] == "pr_open" and row["pr_url"] == "https://github.test/pr/1" and row["base_sha"] == base
+    runs = [(r["role"], r["outcome"]) for r in db.runs("demo-t01")]
+    assert runs[runs.index(("pr", "opened")) + 1:] == [("human_review", "changes_requested"), ("build", "committed"),
+                                                       ("review", "APPROVE"), ("verify", "pass"), ("verify", "report"),
+                                                       ("pr", "opened")]
+    assert "PLANNER" not in {r for r, _ in calls}
+    new = row["candidate_sha"]
+    assert git(factory_repo, "rev-parse", f"{new}^") == old
+    assert git(factory_repo, "show", f"{new}:src/greet.txt") == "hello, world"
+    assert git(factory_repo, "ls-remote", "origin", "refs/heads/factory/demo-t01").split()[0] == new
+    assert "(address review, attempt 1)" in git(factory_repo, "log", "-1", "--format=%s", new)
+
+    # The brief and the inline comment reach the builder; the reviewer is told the requests are in scope.
+    build_t = [r for r in db.runs("demo-t01") if r["role"] == "build"][-1]["transcript"]
+    sent = open(build_t).read()
+    assert "# Address review" in sent and "src/greet.txt:1" in sent and "Please be careful here." in sent
+    review_t = [r for r in db.runs("demo-t01") if r["role"] == "review"][-1]["transcript"]
+    assert "in scope" in open(review_t).read() and "# Address review" in open(review_t).read()
+    assert "addressing review by @alice on " + old[:12] in (home / "logs/demo-t01.log").read_text()
+
+    gh = json.loads(fake_gh.read_text())
+    assert sum(c[:2] == ["pr", "create"] for c in gh["calls"]) == 1
+    assert "**Review addressed** by @alice" in gh["prs"]["factory/demo-t01"]["body"]
+    comment = [c for c in gh["calls"] if c[0] == "api" and c[1].endswith("/issues/1/comments")][-1]
+    expected = (f"Addressed review by @alice on {old[:12]}: Addressed the greeting as requested. "
+                f"Candidate {old[:12]} → {new[:12]}; review and gates ran on {new[:12]}.")
+    assert comment[-1] == "body=" + expected
+    assert db.task("demo-t01")["reviews_addressed"] == 1
+
+    # `factory show --role human_review` lists the run; a refresh with the same reviews leaves it pr_open.
+    capsys.readouterr()
+    assert main(["show", "demo-t01", "--role", "human_review"]) == 0
+    assert "changes_requested" in capsys.readouterr().out
+    _reviews_say(fake_gh, "factory/demo-t01", new, _review(1, "alice", "CHANGES_REQUESTED", "Please be careful here."))
+    assert main(["status", "--refresh"]) == 0
+    assert open_db(home).task("demo-t01")["status"] == "pr_open"
+
+
+def test_a_review_that_needs_no_change_is_answered_and_the_pr_left_as_is(factory_repo, home, fake_gh, monkeypatch, capsys):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    db = open_db(home)
+    old = db.task("demo-t01")["candidate_sha"]
+
+    _reviews_say(fake_gh, "factory/demo-t01", old, _review(1, "alice", "CHANGES_REQUESTED", "Is this really needed?"))
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    assert db.task("demo-t01")["status"] == "changes_requested"
+
+    plays = scripts(review_verdicts=["APPROVE"])
+    plays["BUILDER"] = [AIMessage("No change needed: the greeting is already correct as shipped.\nRESULT: DONE")]
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    assert row["status"] == "pr_open" and row["pr_url"] == "https://github.test/pr/1"
+    assert row["reviews_addressed"] == 1
+    runs = [(r["role"], r["outcome"]) for r in db.runs("demo-t01")]
+    assert runs[runs.index(("pr", "opened")) + 1:] == [("human_review", "changes_requested"), ("build", "no-changes")]
+    assert git(factory_repo, "ls-remote", "origin", "refs/heads/factory/demo-t01").split()[0] == old
+
+    # The builder's answer (RESULT line stripped) is the PR comment; nothing was pushed or re-reviewed.
+    gh = json.loads(fake_gh.read_text())
+    comment = [c for c in gh["calls"] if c[0] == "api" and c[1].endswith("/issues/1/comments")][-1]
+    assert comment[-1] == "body=No change needed: the greeting is already correct as shipped."
+    assert sum(c[:2] == ["pr", "create"] for c in gh["calls"]) == 1
+
+    # A refresh with the same (now-addressed) review does not re-mark it.
+    _reviews_say(fake_gh, "factory/demo-t01", old, _review(1, "alice", "CHANGES_REQUESTED", "Is this really needed?"),
+                 _review(2, "alice", "APPROVED"))
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    assert open_db(home).task("demo-t01")["status"] == "pr_open"
+
+
+def test_review_rework_needs_an_outstanding_request_on_the_factorys_candidate(factory_repo, home, fake_gh, monkeypatch, capsys):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    db = open_db(home)
+    head = db.task("demo-t01")["candidate_sha"]
+
+    # (a) the request is approved between refresh and run -> pr_open, no agent runs.
+    _reviews_say(fake_gh, "factory/demo-t01", head, _review(1, "alice", "CHANGES_REQUESTED"))
+    assert main(["status", "--refresh"]) == 0
+    assert db.task("demo-t01")["status"] == "changes_requested"
+    _reviews_say(fake_gh, "factory/demo-t01", head, _review(1, "alice", "CHANGES_REQUESTED"),
+                 _review(2, "alice", "APPROVED"))
+    calls = _use_model(monkeypatch, scripts(review_verdicts=[]))
+    capsys.readouterr()
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    assert "demo-t01: no review requests changes on https://github.test/pr/1; nothing to address" in capsys.readouterr().out
+    assert calls == [] and open_db(home).task("demo-t01")["status"] == "pr_open"
+
+    # (b) head != candidate -> refused with the someone-pushed message, status stays changes_requested.
+    db.update("demo-t01", status="changes_requested",
+              note="a review requests changes (@alice): `factory run demo-t01` addresses them")
+    _ci_says(fake_gh, "factory/demo-t01", "f" * 40, FMT)
+    capsys.readouterr()
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 1
+    assert "someone pushed to it. Address the reviews there, or --force to rebuild" in capsys.readouterr().err
+    assert open_db(home).task("demo-t01")["status"] == "changes_requested"
+
+    # (c) --force rebuilds from scratch: the planner runs, the new head is off the trunk, the same PR is reused.
+    trunk = git(factory_repo, "rev-parse", "origin/main")
+    calls = _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, "--force", *SANDBOX]) == 0
+    row = open_db(home).task("demo-t01")
+    assert "PLANNER" in {r for r, _ in calls}
+    assert git(factory_repo, "rev-parse", f"{row['candidate_sha']}^") == trunk
+    assert row["pr_url"] == "https://github.test/pr/1"
+    assert sum(c[:2] == ["pr", "create"] for c in json.loads(fake_gh.read_text())["calls"]) == 1
+
+
+def test_failed_review_rework_leaves_the_pr_alone(factory_repo, home, fake_gh, monkeypatch):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    db = open_db(home)
+    old = db.task("demo-t01")["candidate_sha"]
+
+    _reviews_say(fake_gh, "factory/demo-t01", old, _review(1, "alice", "CHANGES_REQUESTED"))
+    assert main(["status", "--refresh"]) == 0
+    assert db.task("demo-t01")["status"] == "changes_requested"
+
+    plays = scripts(review_verdicts=["CHANGES"])
+    plays["BUILDER"] = [call("write_file", path="src/greet.txt", content="Hello\n"),
+                        AIMessage("Did what I could.\nRESULT: DONE")]
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, "--max-attempts", "1", *SANDBOX]) == 1
+    row = open_db(home).task("demo-t01")
+    assert row["status"] == "failed" and row["pr_url"] == "https://github.test/pr/1"
+    assert "whose reviews are still unaddressed" in row["note"]
+    assert "Running the task again rebuilds it from scratch" in row["note"]
+    assert git(factory_repo, "ls-remote", "origin", "refs/heads/factory/demo-t01").split()[0] == old
+
+
+def test_requested_changes_on_a_stacked_pr_are_addressed_after_the_restack(factory_repo, home, fake_gh,
+                                                                          monkeypatch, capsys):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    plays = scripts(review_verdicts=["APPROVE"])
+    plays["BUILDER"] = [call("write_file", path="crates/e2e/tests/second.rs", content=SECOND),
+                        call("write_file", path="docs/sessions/2026-10-09.md",
+                             content="## [12:00] demo-t01\n## [12:05] demo-t02\n"),
+                        AIMessage("Second thing.\nRESULT: DONE")]
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t02", "--skip-gates", SKIP, *SANDBOX]) == 0
+    db = open_db(home)
+    t02 = db.task("demo-t02")["candidate_sha"]
+
+    _reviews_say(fake_gh, "factory/demo-t02", t02, _review(1, "alice", "CHANGES_REQUESTED"))
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    assert db.task("demo-t02")["status"] == "changes_requested"
+
+    # demo-t01 merges; the refresh moves demo-t02 onto main and keeps changes_requested.
+    t01 = db.task("demo-t01")["candidate_sha"]
+    git(factory_repo, "merge", "-q", "--squash", t01)
+    git(factory_repo, "commit", "-q", "-m", "demo-t01 (#1)")
+    git(factory_repo, "push", "-q", "origin", "main")
+    _github_says(fake_gh, "factory/demo-t01", state="MERGED")
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    assert "demo-t02: rebased onto main, PR retargeted" in capsys.readouterr().err
+    row = db.task("demo-t02")
+    assert row["status"] == "changes_requested" and row["base_ref"] == "main"
+    restacked = row["candidate_sha"]
+    assert restacked != t02
+
+    # Sync the head to the restacked candidate, then run: the rework builds on the restacked head.
+    _reviews_say(fake_gh, "factory/demo-t02", restacked, _review(1, "alice", "CHANGES_REQUESTED"))
+    plays = scripts(review_verdicts=["APPROVE"])
+    plays["BUILDER"] = [call("write_file", path="docs/sessions/2026-10-09.md",
+                             content="## [12:00] demo-t01\n## [12:05] demo-t02\n## [12:10] addressed review\n"),
+                        AIMessage("Addressed the review.\nRESULT: DONE")]
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t02", "--skip-gates", SKIP, *SANDBOX]) == 0
+    row = open_db(home).task("demo-t02")
+    assert row["status"] == "pr_open" and row["base_ref"] == "main" and row["reviews_addressed"] == 1
+    assert git(factory_repo, "rev-parse", f"{row['candidate_sha']}^") == restacked
+    assert json.loads(fake_gh.read_text())["prs"]["factory/demo-t02"]["base"] == "main"

@@ -42,6 +42,7 @@ class Ctx:
     feedback: str = ""
     gates: str = ""
     resolution: str = ""                    # resolve only: the conflict brief (see pipeline.replay_worktree)
+    review_brief: str = ""                  # review only: the review-rework brief, whose requests are in scope
     log: Callable[[str, str], None] = field(default_factory=NullLog)          # (tag, message)
     # (steps, max_steps, tokens_in, tokens_out, cost_usd | None, refused_tool_calls)
     progress: Callable[..., None] = lambda *a: None
@@ -294,7 +295,15 @@ class LangChainRoles:
 
     def review(self, ctx: Ctx) -> Output:
         tools = read_tools(ctx.worktree, self._guard(ctx)) + diff_tool(ctx.worktree, ctx.base_sha)
-        out = self._run("review", ctx, tools, f"Review the change for task {ctx.task.id}. Start with git_diff(stat=True).")
+        msg = f"Review the change for task {ctx.task.id}. Start with git_diff(stat=True)."
+        if ctx.review_brief:
+            msg += (
+                f"\n\n# Human review to address\n\nThe task's PR was reviewed, and those requests are in scope for "
+                f"this change even where they go beyond the plan, the goal or the non-goals. Judge whether each "
+                f"request was addressed; any request left unaddressed is a reason for VERDICT: CHANGES.\n\n"
+                f"{ctx.review_brief}"
+            )
+        out = self._run("review", ctx, tools, msg)
         out.verdict = parse_verdict(out.text)
         return out
 

@@ -53,7 +53,7 @@ def startable(db: DB, plan: Plan, tid: str, started: set[str]) -> bool:
     merged or with an open PR. A task that failed in an earlier run starts again; one that fails in this run does not."""
     row = db.task(tid)
     return (row is not None and tid not in started and tid not in plan.manual
-            and row["status"] in ("queued", "failed", "conflict", "ci_failed") and db.ready(tid))
+            and row["status"] in ("queued", "failed", "conflict", "ci_failed", "changes_requested") and db.ready(tid))
 
 
 def elsewhere(db: DB, plan: Plan, running: dict) -> list[str]:

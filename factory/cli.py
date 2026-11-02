@@ -151,7 +151,7 @@ def cmd_run_one(a) -> int:
     db = _db()
     db.upsert_task(task)
     row = db.task(task.id)
-    if row["status"] in ACTIVE + ("pr_open", "changes_requested", "merged") and not a.force:
+    if row["status"] in ACTIVE + ("pr_open", "merged") and not a.force:
         print(f"{task.id} is {row['status']}; use --force to run again", file=sys.stderr)
         return 1
     stacked, unmet = db.deps(task)
@@ -177,6 +177,21 @@ def cmd_run_one(a) -> int:
             if fix is None:
                 db.update(task.id, status="pr_open", note=None)
                 print(f"{task.id}: CI no longer fails on {row['pr_url']}; nothing to fix")
+                return 0
+            wt, rework = fix
+            base_sha, pr_base = row["base_sha"], row["base_ref"]
+            stacked = [d for d in (row["stacked_on"] or "").split(",") if d and db.task(d)["status"] != "merged"]
+        elif row["status"] == "changes_requested" and not a.force:  # address the reviews; --force rebuilds it
+            from .stack import restack
+            if (moved := restack(db, root, home, task.id)) and (now := db.task(task.id)["status"]) != "changes_requested":
+                # A dependency merged or moved; if that ended in a conflict, resolve it instead of reworking.
+                print(moved)
+                return 0
+            row = db.task(task.id)                          # a restack may have retargeted the PR
+            fix = _review_fix(root, home, row)
+            if fix is None:
+                db.update(task.id, status="pr_open", note=None)
+                print(f"{task.id}: no review requests changes on {row['pr_url']}; nothing to address")
                 return 0
             wt, rework = fix
             base_sha, pr_base = row["base_sha"], row["base_ref"]
@@ -289,6 +304,32 @@ def _ci_fix(root: Path, home: Path, row):
     wt, _ = create_worktree(root, home, row["id"], row["candidate_sha"])
     return wt, Rework(kind="ci", old_candidate=row["candidate_sha"], what=tuple(c.name for c in red),
                      brief=ci.brief(root, row["pr_url"], row["candidate_sha"], red))
+
+
+def _review_fix(root: Path, home: Path, row):
+    """The open PR's branch at the candidate its reviews request changes on: (worktree, Rework). None when
+    no unaddressed review requests changes there (they were approved or dismissed meanwhile)."""
+    from . import reviews
+    from .pipeline import PipelineError, Rework, create_worktree, branch_name, git
+    pr = _pr_state(row["pr_url"])
+    if not pr:
+        raise PipelineError(f"can't read the reviews of {row['pr_url']} from GitHub")
+    if pr.get("headRefOid") and pr["headRefOid"] != row["candidate_sha"]:
+        raise PipelineError(f"{row['pr_url']} has head {(pr.get('headRefOid') or '?')[:12]}, not the factory's "
+                            f"candidate {row['candidate_sha'][:12]}: someone pushed to it. Address the reviews "
+                            f"there, or --force to rebuild")
+    snap = reviews.fetch(root, row["pr_url"])
+    if snap is None:
+        raise PipelineError(f"can't read the reviews of {row['pr_url']} from GitHub")
+    reqs = reviews.requests(snap, row["reviews_addressed"])
+    if not reqs:
+        return None
+    through = max((r.get("id") or 0 for r in reviews.covered(snap, row["reviews_addressed"])), default=0)
+    what = tuple(dict.fromkeys(reviews._login(r) for r in reqs))
+    git(root, "fetch", "-q", "origin", branch_name(row["id"]), check=False)   # a PR taken up from another board
+    wt, _ = create_worktree(root, home, row["id"], row["candidate_sha"])
+    return wt, Rework(kind="human_review", old_candidate=row["candidate_sha"], what=what,
+                      brief=reviews.brief(root, row["pr_url"], snap, row["reviews_addressed"]), through=through)
 
 
 def _notify(title: str, body: str) -> None:
@@ -831,7 +872,7 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("show", help="a task's runs and reports")
     s.add_argument("task_id")
-    s.add_argument("--role", choices=("plan", "build", "resolve", "ci", "review", "verify", "pr"))
+    s.add_argument("--role", choices=("plan", "build", "resolve", "ci", "human_review", "review", "verify", "pr"))
     s.set_defaults(fn=cmd_show)
 
     s = sub.add_parser("gates", help="run the deterministic gates for a ref (no agents)")
