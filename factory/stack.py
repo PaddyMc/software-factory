@@ -13,7 +13,9 @@ Gates ran on the original candidate; the PR gets a comment saying so whenever it
 runs on the new head (ci.py). When the commits do not rebase cleanly the task becomes `conflict`, and its
 next run has the builder resolve the conflicts (pipeline.replay_worktree), with review and gates run again
 before the PR is updated. A PR whose CI failed (`ci_failed`) is restacked the same way: its new head goes
-back to `pr_open` for CI to judge, since the failure may have come from the dependency.
+back to `pr_open` for CI to judge, since the failure may have come from the dependency. A PR whose
+reviewer requested changes (`changes_requested`) is moved the same way and keeps its status — the
+request still applies to the moved commits.
 """
 
 from __future__ import annotations
@@ -75,7 +77,7 @@ def restack(db: DB, root: Path, home: Path, task_id: str, remote: str = "origin"
     """Bring one open stacked PR up to date with its dependencies. Returns what changed, or None."""
     row = db.task(task_id)
     deps = [d for d in (row["stacked_on"] or "").split(",") if d] if row else []
-    if not deps or row["status"] not in ("pr_open", "ci_failed"):
+    if not deps or row["status"] not in ("pr_open", "ci_failed", "changes_requested"):
         return None
     status = {d: (db.task(d)["status"] if db.task(d) else None) for d in deps}
     still_open = [d for d in deps if status[d] != "merged"]

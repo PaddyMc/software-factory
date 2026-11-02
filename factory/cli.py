@@ -129,7 +129,7 @@ def cmd_run_one(a) -> int:
     import os
 
     from .agents import LangChainRoles, missing_keys, role_models
-    from .pipeline import Options, Pipeline, PipelineError, create_worktree, git
+    from .pipeline import KINDS, Options, Pipeline, PipelineError, create_worktree, git
 
     root = repo_root()
     home = factory_home()
@@ -162,7 +162,7 @@ def cmd_run_one(a) -> int:
     old_wt = home / "worktrees" / task.id
     if old_wt.exists() and not (row["status"] in ACTIVE and pid_alive(row["pid"])):
         git(root, "worktree", "remove", "--force", str(old_wt))      # a finished run's leftovers
-    resolution = ci_fix = None
+    resolution = rework = None
     try:
         if row["status"] == "conflict" and not a.force:    # resolve the open PR's conflicts; --force rebuilds it
             wt, base_sha, pr_base, trunk, stacked, resolution = _replay(db, root, home, row)
@@ -178,7 +178,22 @@ def cmd_run_one(a) -> int:
                 db.update(task.id, status="pr_open", note=None)
                 print(f"{task.id}: CI no longer fails on {row['pr_url']}; nothing to fix")
                 return 0
-            wt, ci_fix = fix
+            wt, rework = fix
+            base_sha, pr_base = row["base_sha"], row["base_ref"]
+            stacked = [d for d in (row["stacked_on"] or "").split(",") if d and db.task(d)["status"] != "merged"]
+        elif row["status"] == "changes_requested" and not a.force:  # address the reviews; --force rebuilds it
+            from .stack import restack
+            if (moved := restack(db, root, home, task.id)) and (now := db.task(task.id)["status"]) != "changes_requested":
+                # A dependency merged or moved; if that ended in a conflict, resolve it instead of reworking.
+                print(moved)
+                return 0
+            row = db.task(task.id)                          # a restack may have retargeted the PR
+            fix = _review_fix(root, home, row)
+            if fix is None:
+                db.update(task.id, status="pr_open", note=None)
+                print(f"{task.id}: no review requests changes on {row['pr_url']}; nothing to address")
+                return 0
+            wt, rework = fix
             base_sha, pr_base = row["base_sha"], row["base_ref"]
             stacked = [d for d in (row["stacked_on"] or "").split(",") if d and db.task(d)["status"] != "merged"]
         else:
@@ -198,7 +213,7 @@ def cmd_run_one(a) -> int:
         deps = [db.task(d) for d in stacked]
         db.update(task.id, status="queued", base_ref=pr_base, base_sha=base_sha, trunk=trunk,
                   stacked_on=",".join(stacked) or None, attempts=0, note=None, progress=None)
-    elif ci_fix:        # likewise; the PR keeps its base and stack, only its head moves
+    elif rework:        # likewise; the PR keeps its base and stack, only its head moves
         deps = [db.task(d) for d in stacked]
         db.update(task.id, status="queued", attempts=0, note=None, progress=None)
     else:
@@ -210,13 +225,13 @@ def cmd_run_one(a) -> int:
     opts = Options(base_ref=pr_base, max_attempts=a.max_attempts, open_pr=not a.no_pr,
                    skip_gates=tuple(x for x in a.skip_gates.split(",") if x), full_e2e=a.full_e2e,
                    max_cost=a.max_cost, config=cfg, stacked_on=tuple(f"{d['id']} ({d['pr_url']})" for d in deps),
-                   resolution=resolution, ci_fix=ci_fix)
+                   resolution=resolution, rework=rework)
     log = RunLog(log_path(home, task.id), echo=not a.quiet)
     log("run", f"=== {task.id}: worktree {wt} on factory/{task.id} from {pr_base} ({base_sha[:12]})"
                + (f", stacked on {', '.join(stacked)}" if stacked else "")
                + (f", resolving conflicts in {', '.join(resolution.conflicts) or 'nothing (replays cleanly)'}"
                   if resolution else "")
-               + (f", fixing CI ({', '.join(ci_fix.checks)}) on {ci_fix.old_candidate[:12]}" if ci_fix else "")
+               + (f", {KINDS[rework.kind].log(rework)}" if rework else "")
                + f"; models {', '.join(f'{r}={m}' for r, m in models.items())}")
     print(f"log: {log.path}  (follow elsewhere: factory logs {task.id} -f)", flush=True)
     try:
@@ -229,9 +244,8 @@ def cmd_run_one(a) -> int:
         db.update(task.id, note=f"{row['note']}\n\nThe PR still holds {resolution.old_candidate[:12]}, which conflicts "
                                 f"with {resolution.onto}. Running the task again rebuilds it from scratch.")
         row = db.task(task.id)
-    if ci_fix and row["status"] == "failed":
-        db.update(task.id, note=f"{row['note']}\n\nThe PR still holds {ci_fix.old_candidate[:12]}, whose CI fails "
-                                f"({', '.join(ci_fix.checks)}). Running the task again rebuilds it from scratch.")
+    if rework and row["status"] == "failed":
+        db.update(task.id, note=f"{row['note']}\n\n" + KINDS[rework.kind].failure_note(rework))
         row = db.task(task.id)
     summary = (f"{task.id}: {row['status']} after {row['attempts']} build(s)"
                + (f" — {row['pr_url']}" if row["pr_url"] else "")
@@ -273,10 +287,10 @@ def _replay(db, root: Path, home: Path, row):
 
 
 def _ci_fix(root: Path, home: Path, row):
-    """The open PR's branch at the candidate its CI failed on, and what failed: (worktree, CiFix). None when CI
+    """The open PR's branch at the candidate its CI failed on, and what failed: (worktree, Rework). None when CI
     no longer fails there (a job was re-run, or is running again)."""
     from . import ci
-    from .pipeline import CiFix, PipelineError, branch_name, create_worktree, git
+    from .pipeline import PipelineError, Rework, branch_name, create_worktree, git
     pr = _pr_state(row["pr_url"])
     if not pr:
         raise PipelineError(f"can't read the checks of {row['pr_url']} from GitHub")
@@ -288,8 +302,34 @@ def _ci_fix(root: Path, home: Path, row):
         return None
     git(root, "fetch", "-q", "origin", branch_name(row["id"]), check=False)   # a PR taken up from another board
     wt, _ = create_worktree(root, home, row["id"], row["candidate_sha"])
-    return wt, CiFix(old_candidate=row["candidate_sha"], checks=tuple(c.name for c in red),
+    return wt, Rework(kind="ci", old_candidate=row["candidate_sha"], what=tuple(c.name for c in red),
                      brief=ci.brief(root, row["pr_url"], row["candidate_sha"], red))
+
+
+def _review_fix(root: Path, home: Path, row):
+    """The open PR's branch at the candidate its reviews request changes on: (worktree, Rework). None when
+    no unaddressed review requests changes there (they were approved or dismissed meanwhile)."""
+    from . import reviews
+    from .pipeline import PipelineError, Rework, create_worktree, branch_name, git
+    pr = _pr_state(row["pr_url"])
+    if not pr:
+        raise PipelineError(f"can't read the reviews of {row['pr_url']} from GitHub")
+    if pr.get("headRefOid") and pr["headRefOid"] != row["candidate_sha"]:
+        raise PipelineError(f"{row['pr_url']} has head {(pr.get('headRefOid') or '?')[:12]}, not the factory's "
+                            f"candidate {row['candidate_sha'][:12]}: someone pushed to it. Address the reviews "
+                            f"there, or --force to rebuild")
+    snap = reviews.fetch(root, row["pr_url"])
+    if snap is None:
+        raise PipelineError(f"can't read the reviews of {row['pr_url']} from GitHub")
+    reqs = reviews.requests(snap, row["reviews_addressed"])
+    if not reqs:
+        return None
+    through = max((r.get("id") or 0 for r in reviews.covered(snap, row["reviews_addressed"])), default=0)
+    what = tuple(dict.fromkeys(reviews._login(r) for r in reqs))
+    git(root, "fetch", "-q", "origin", branch_name(row["id"]), check=False)   # a PR taken up from another board
+    wt, _ = create_worktree(root, home, row["id"], row["candidate_sha"])
+    return wt, Rework(kind="human_review", old_candidate=row["candidate_sha"], what=what,
+                      brief=reviews.brief(root, row["pr_url"], snap, row["reviews_addressed"]), through=through)
 
 
 def _notify(title: str, body: str) -> None:
@@ -336,6 +376,7 @@ def _adopt(db, root: Path, remote: str = "origin") -> None:
     """Take up factory PRs this board didn't open: another maintainer's runs, or this board's before a reset.
     A queued or failed task with an open or merged PR on factory/<task> becomes pr_open or merged, so everyone
     working from the same GitHub repo sees the same board. Holds (abandoned) and running tasks are left alone."""
+    from . import reviews
     from .pipeline import PipelineError, branch_name, git
     waiting = [r for r in db.tasks() if r["status"] in ("queued", "failed") and not r["pr_url"]]
     prs = _factory_prs(root) if waiting else {}
@@ -360,23 +401,29 @@ def _adopt(db, root: Path, remote: str = "origin") -> None:
         trunk, hops = base, 0
         while trunk.startswith("factory/") and (up := prs.get(trunk.removeprefix("factory/"))) and hops < 20:
             trunk, hops = up["baseRefName"], hops + 1       # a stack ends on the trunk
+        addressed = {}
+        snap = reviews.fetch(root, pr["url"])
+        if snap is not None:
+            addressed["reviews_addressed"] = max((r.get("id") or 0 for r in snap.reviews), default=0)
         db.update(row["id"], status="pr_open", branch=branch, pr_url=pr["url"], base_ref=base, base_sha=base_sha,
                   candidate_sha=candidate, trunk=None if trunk.startswith("factory/") else trunk, stacked_on=dep,
-                  note="PR opened outside this board; taken up from GitHub", progress=None)
+                  note="PR opened outside this board; taken up from GitHub", progress=None, **addressed)
         print(f"{row['id']}: PR open at {pr['url']}" + (f", stacked on {dep}" if dep else "")
               + " (taken up from GitHub)", file=sys.stderr)
 
 
 def _refresh(db) -> None:
     from . import ci
+    from . import reviews
     _adopt(db, repo_root())
     for row in db.tasks():
         if row["status"] in ACTIVE and row["pid"] and not pid_alive(row["pid"]):
             db.update(row["id"], status="failed", progress=None,
                       note=f"process {row['pid']} exited mid-run (killed or crashed); `factory clean` then rerun")
-        if row["status"] in ("pr_open", "conflict", "ci_failed") and row["pr_url"]:
+        if row["status"] in ("pr_open", "conflict", "ci_failed", "changes_requested") and row["pr_url"]:
             pr = _pr_state(row["pr_url"])
-            is_open = row["status"] in ("pr_open", "ci_failed")
+            is_open = row["status"] in ("pr_open", "ci_failed", "changes_requested")
+            status_now = row["status"]
             if pr.get("state") == "MERGED":
                 db.update(row["id"], status="merged")
             elif pr.get("state") == "CLOSED":
@@ -388,23 +435,50 @@ def _refresh(db) -> None:
                 print(f"{row['id']}: conflicts with {row['base_ref']} (`factory run {row['id']}` resolves them)",
                       file=sys.stderr)
             elif is_open and pr.get("headRefOid"):
-                red = ci.red(pr, row["candidate_sha"])
-                if red and row["status"] == "pr_open":
-                    db.update(row["id"], status="ci_failed",
-                              note=f"CI fails on its head: {ci.names(red)}: `factory run {row['id']}` fixes it")
-                    print(f"{row['id']}: CI fails ({ci.names(red)}) (`factory run {row['id']}` fixes it)",
-                          file=sys.stderr)
-                elif red == [] and row["status"] == "ci_failed":     # re-run and passing, or running again
-                    db.update(row["id"], status="pr_open", note=None)
-                    print(f"{row['id']}: CI no longer fails", file=sys.stderr)
-                elif red is None and row["status"] == "ci_failed":   # someone else pushed to it: not ours to fix
-                    db.update(row["id"], status="pr_open",
-                              note=f"its head {pr['headRefOid'][:12]} isn't the factory's candidate; its CI is left "
-                                   f"to whoever pushed it")
-                    print(f"{row['id']}: someone pushed to its PR; its CI is theirs now", file=sys.stderr)
+                if pr["headRefOid"] != row["candidate_sha"]:
+                    # Someone else pushed to the branch: not ours to fix or review.
+                    if row["status"] == "ci_failed":
+                        db.update(row["id"], status="pr_open",
+                                  note=f"its head {pr['headRefOid'][:12]} isn't the factory's candidate; its CI is left "
+                                       f"to whoever pushed it")
+                        print(f"{row['id']}: someone pushed to its PR; its CI is theirs now", file=sys.stderr)
+                        status_now = "pr_open"
+                    if row["status"] == "changes_requested":
+                        db.update(row["id"], status="pr_open",
+                                  note=f"its head {pr['headRefOid'][:12]} isn't the factory's candidate; its reviews "
+                                       f"are left to whoever pushed it")
+                        print(f"{row['id']}: someone pushed to its PR; its reviews are theirs now", file=sys.stderr)
+                        status_now = "pr_open"
+                else:
+                    snap = reviews.fetch(repo_root(), row["pr_url"])
+                    reqs = reviews.requests(snap, row["reviews_addressed"]) if snap else None
+                    if reqs is not None:
+                        logins = ", ".join("@" + l for l in dict.fromkeys(reviews._login(r) for r in reqs))
+                        if reqs and status_now != "changes_requested":
+                            db.update(row["id"], status="changes_requested",
+                                      note=f"a review requests changes ({logins}): `factory run {row['id']}` addresses them")
+                            print(f"{row['id']}: changes requested by {logins} (`factory run {row['id']}` addresses them)",
+                                  file=sys.stderr)
+                            status_now = "changes_requested"
+                        elif reqs and status_now == "changes_requested":
+                            db.update(row["id"],
+                                      note=f"a review requests changes ({logins}): `factory run {row['id']}` addresses them")
+                        elif reqs == [] and status_now == "changes_requested":
+                            db.update(row["id"], status="pr_open", note=None)
+                            print(f"{row['id']}: no review requests changes now", file=sys.stderr)
+                            status_now = "pr_open"
+                    red = ci.red(pr, row["candidate_sha"])
+                    if red and status_now == "pr_open":
+                        db.update(row["id"], status="ci_failed",
+                                  note=f"CI fails on its head: {ci.names(red)}: `factory run {row['id']}` fixes it")
+                        print(f"{row['id']}: CI fails ({ci.names(red)}) (`factory run {row['id']}` fixes it)",
+                              file=sys.stderr)
+                    elif red == [] and status_now == "ci_failed":
+                        db.update(row["id"], status="pr_open", note=None)
+                        print(f"{row['id']}: CI no longer fails", file=sys.stderr)
     from .stack import restack
     for row in db.tasks():          # by id, so a plan's stack moves bottom-up
-        if row["status"] in ("pr_open", "ci_failed") and row["stacked_on"]:
+        if row["status"] in ("pr_open", "ci_failed", "changes_requested") and row["stacked_on"]:
             msg = restack(db, repo_root(), factory_home(), row["id"])
             if msg:
                 print(msg, file=sys.stderr)
@@ -632,7 +706,7 @@ def cmd_requeue(a) -> int:
         elif row["status"] in ACTIVE and pid_alive(row["pid"]):
             print(f"{tid}: running ({row['status']}, pid {row['pid']}); leaving it")
             rc = 1
-        elif row["status"] in ("pr_open", "conflict", "ci_failed", "merged"):
+        elif row["status"] in ("pr_open", "conflict", "ci_failed", "changes_requested", "merged"):
             print(f"{tid}: {row['status']}; nothing to requeue")
             rc = 1
         elif row["status"] == "queued":
@@ -798,7 +872,7 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("show", help="a task's runs and reports")
     s.add_argument("task_id")
-    s.add_argument("--role", choices=("plan", "build", "resolve", "ci", "review", "verify", "pr"))
+    s.add_argument("--role", choices=("plan", "build", "resolve", "ci", "human_review", "review", "verify", "pr"))
     s.set_defaults(fn=cmd_show)
 
     s = sub.add_parser("gates", help="run the deterministic gates for a ref (no agents)")
