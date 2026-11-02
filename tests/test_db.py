@@ -75,3 +75,6 @@ def test_old_database_is_migrated(tmp_path):
     db.progress("demo-t01", run, "build#1 step 3/120", 3, 1000, 200)
     assert db.task("demo-t01")["progress"] == "build#1 step 3/120"
     assert db.runs("demo-t01")[0]["tokens_in"] == 1000
+    assert db.task("demo-t01")["reviews_addressed"] is None
+    db.update("demo-t01", status="changes_requested", reviews_addressed=7)
+    assert db.task("demo-t01")["reviews_addressed"] == 7

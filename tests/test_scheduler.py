@@ -146,3 +146,21 @@ def test_a_pr_whose_ci_fails_runs_again_to_fix_it_and_its_dependents_wait(db):
     assert db.readiness("demo-t02") == "waits for demo-t01 (ci_failed)"     # nothing stacks on a red PR
     results, launched, _ = _run(db, scheduler.Plan(name="demo", tasks=IDS))
     assert [t for t, _ in launched] == ["demo-t01", "demo-t02"] and results["demo-t01"] == "pr_open"
+
+
+def test_dependents_wait_while_changes_are_requested(db):
+    db.update("demo-t01", status="changes_requested", candidate_sha="y", pr_url="v",
+              note="a review requests changes (@alice): `factory run demo-t01` addresses them")
+    db.update("demo-t03", status="pr_open", candidate_sha="x", pr_url="u")
+    assert db.readiness("demo-t02") == "waits for demo-t01 (changes_requested)"
+    summary = scheduler.summary(db, scheduler.Plan(name="demo", tasks=IDS))
+    assert "v" in summary and "@alice" in summary
+
+
+def test_a_pr_with_requested_changes_runs_again_to_address_them(db):
+    db.update("demo-t01", status="changes_requested", candidate_sha="y", pr_url="v",
+              note="a review requests changes (@alice): `factory run demo-t01` addresses them")
+    db.update("demo-t03", status="pr_open", candidate_sha="x", pr_url="u")
+    assert db.readiness("demo-t02") == "waits for demo-t01 (changes_requested)"
+    results, launched, _ = _run(db, scheduler.Plan(name="demo", tasks=IDS))
+    assert [t for t, _ in launched] == ["demo-t01", "demo-t02"] and results["demo-t01"] == "pr_open"
