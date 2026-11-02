@@ -128,7 +128,7 @@ def cmd_run_plan(a, plan: Path, tasks: dict) -> int:
 def cmd_run_one(a) -> int:
     import os
 
-    from .agents import LangChainRoles, missing_keys, role_models
+    from .agents import LangChainRoles, flow_models, missing_keys
     from .pipeline import KINDS, Options, Pipeline, PipelineError, create_worktree, git
 
     root = repo_root()
@@ -142,7 +142,8 @@ def cmd_run_one(a) -> int:
     if (why := G.manual_reason(task, cfg)) and "verification" not in a.skip_gates:
         print(f"{task.id}: {why}", file=sys.stderr)
         return 1
-    models = role_models(root, a.model, cfg)
+    flow = cfg.flows[cfg.flow]
+    models = flow_models(root, flow, cfg, a.model)
     missing = missing_keys(models, os.environ)
     if missing:
         print(f"set {', '.join(missing)} first (models: {', '.join(f'{r}={m}' for r, m in models.items())})",
@@ -225,7 +226,7 @@ def cmd_run_one(a) -> int:
     opts = Options(base_ref=pr_base, max_attempts=a.max_attempts, open_pr=not a.no_pr,
                    skip_gates=tuple(x for x in a.skip_gates.split(",") if x), full_e2e=a.full_e2e,
                    max_cost=a.max_cost, config=cfg, stacked_on=tuple(f"{d['id']} ({d['pr_url']})" for d in deps),
-                   resolution=resolution, rework=rework)
+                   resolution=resolution, rework=rework, flow=flow)
     log = RunLog(log_path(home, task.id), echo=not a.quiet)
     log("run", f"=== {task.id}: worktree {wt} on factory/{task.id} from {pr_base} ({base_sha[:12]})"
                + (f", stacked on {', '.join(stacked)}" if stacked else "")
