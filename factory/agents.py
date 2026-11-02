@@ -126,8 +126,9 @@ def project_rules(cfg: Config) -> str:
     """What the gates will check beyond the contract, generated from .factory/config.yaml."""
     rules = []
     if cfg.session_log:
-        rules.append(f"Add a session log entry to `{cfg.session_log.rstrip('/')}/<today>.md` (what changed, files, "
-                     "commands run). The session_log gate fails without it.")
+        rules.append(f"Add a session log entry as a NEW file `{cfg.session_log.rstrip('/')}/<today>-<task id>.md` "
+                     "(what changed, files, commands run). Don't edit other log files: one file per task keeps "
+                     "parallel tasks from conflicting. The session_log gate fails without it.")
     if cfg.e2e:
         kind = "a `#[test]` (or `#[tokio::test]`) function" if cfg.e2e.language == "rust" else "a `def test_*` function"
         rules.append(f"Every task adds at least one NEW end-to-end test: {kind} in a file directly under "

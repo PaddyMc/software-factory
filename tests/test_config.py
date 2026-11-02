@@ -72,5 +72,5 @@ def test_project_rules_describe_the_configured_gates():
     assert "session log" not in bare and "end-to-end" not in bare and "verification commands" in bare
     rules = project_rules(C.parse({"session_log": "docs/sessions", "unit_tests": ["make test"],
                                    "e2e": {"dir": "tests/e2e", "language": "python"}}))
-    assert "`docs/sessions/<today>.md`" in rules and "`def test_*`" in rules and "`tests/e2e/`" in rules
+    assert "`docs/sessions/<today>-<task id>.md`" in rules and "`def test_*`" in rules and "`tests/e2e/`" in rules
     assert "`make test`" in rules

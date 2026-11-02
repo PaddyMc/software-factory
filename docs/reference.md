@@ -34,7 +34,7 @@ Codex links are also added when re-running `factory init` in a repository initia
 | `plans` | `["docs/plans/**/*.md"]` | Markdown files holding task contracts |
 | `exclude` | `[]` | Globs never read as backlog (e.g. `docs/ideas/**`) |
 | `guidance` | `["AGENTS.md", "CLAUDE.md"]` | Repository guidance: the first file that exists is appended to every agent's prompt |
-| `session_log` | — | Directory: every task must add `<dir>/<today>.md` (`session_log` gate) |
+| `session_log` | — | Directory: every task must add its own `<dir>/<today>-<task id>.md` (`session_log` gate) |
 | `e2e.dir` | — | Every task must add a new test directly under this directory (`e2e_written` gate) |
 | `e2e.language` | `rust` | How new tests are found: `rust` (`#[test]`, `#[tokio::test]` fns) or `python` (`def test_*`) |
 | `e2e.run_new` | — | Command run per new test; `{target}` = file stem, `{name}` = function, `{path}` = repo-relative file |

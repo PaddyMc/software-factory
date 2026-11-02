@@ -135,7 +135,7 @@ def run_gates(task: Task, worktree: Path, base: str, sha: str, sandbox, cfg: Con
         log_dir = cfg.session_log.rstrip("/") + "/"
         sessions = [f for f in files if f.startswith(log_dir)]
         add(Gate("session_log", bool(sessions), ", ".join(sessions) if sessions else
-                 f"no {log_dir}*.md in diff (expected {log_dir}{today}.md)"))
+                 f"no {log_dir}*.md in diff (expected {log_dir}{today}-{task.id}.md)"))
 
     new = new_e2e_tests(git(worktree, "diff", f"{base}..{sha}", "--", cfg.e2e.dir), cfg.e2e) if cfg.e2e else []
     if cfg.e2e:
