@@ -130,6 +130,14 @@ stateDiagram-v2
   ci_failed --> building: factory run fixes it
   ci_failed --> pr_open: CI passes again, or a restack moves it
   ci_failed --> merged: you merge
+  pr_open --> changes_requested: refresh finds a review requesting changes
+  changes_requested --> pr_open: approved or dismissed, or someone else pushed
+  changes_requested --> pr_open: factory run: the builder changed nothing (answered)
+  changes_requested --> building: factory run addresses it
+  changes_requested --> conflict: status --refresh finds a conflict (conflicts come first)
+  changes_requested --> failed: the rework failed
+  changes_requested --> merged: you merge
+  ci_failed --> changes_requested: a review requests changes
   planning --> failed
   building --> failed
   reviewing --> failed
@@ -201,6 +209,39 @@ flowchart TD
 - The fix builds on the PR's head, not from scratch, so the planner doesn't run again. The gates measure the whole task diff against the PR's base, as before.
 - A PR whose CI fails blocks its dependents, like a conflicting one: nothing new stacks on it until it's `pr_open` again.
 - If the fix fails, the PR keeps its old head and the task ends `failed`. Running it again rebuilds it from scratch on the trunk and updates the same PR; `factory run TASK --force` does that straight away.
+
+---
+
+## Review comments
+
+A human can review a factory PR on GitHub and ask for changes. `factory status --refresh` reads each open PR's reviews; a request from a reviewer with write or admin access, or any submitted review by the PR's author (on the factory's own candidate), marks the task `changes_requested`. Running the task, or its plan, then addresses the reviews on the PR's branch:
+
+```mermaid
+flowchart TD
+  r(["changes_requested"]) --> restack{"a stacked dependency merged or moved?"}
+  restack -->|"yes"| stack["restack onto it, keeping changes_requested<br/>the request still applies to the moved commits"]
+  stack --> reread["re-read the reviews"]
+  restack -->|"no"| reread
+  reread --> ours{"head still the factory's candidate?"}
+  ours -->|"no"| open(["pr_open; the reviews are left to whoever pushed"])
+  ours -->|"yes"| left{"request still outstanding?"}
+  left -->|"no"| open
+  left -->|"yes"| build["BUILD<br/>builder: plan + the review brief as feedback"]
+  build --> review{"REVIEW"}
+  review -->|"CHANGES"| build
+  review -->|"APPROVE"| verify{"VERIFY: gates"}
+  verify -->|"fail"| build
+  verify -->|"pass"| push["force-push with a lease on the old candidate<br/>update the same PR, comment what was addressed"]
+  push --> open(["pr_open; CI runs on the new head"])
+```
+
+- **The latest review wins,** as on GitHub. Each counted reviewer's latest approval, request or dismissal decides, so an approval or a dismissal after a request clears it and returns the task to `pr_open`. Comment-only reviews from other reviewers neither request nor clear.
+- **Requests are in scope, but the gates still decide.** The human is the approver, so the builder does what each review asks even where it goes beyond the plan, the goal or the non-goals, and the factory reviewer is told so. A request the gates forbid — editing the plan, failing a test — fails the rework and the human does it by hand.
+- **A no-change answer.** When the builder's first attempt changes nothing, its final answer is posted on the PR as a comment, the reviews count as addressed, nothing is pushed, and the task returns to `pr_open`.
+- **A failed rework** leaves the PR's old head and the task `failed`; the note says the reviews are still unaddressed. Running the task again rebuilds it from scratch and updates the same PR; `factory run TASK --force` does that straight away.
+- **Someone else pushed.** A head that isn't the factory's candidate isn't the factory's to fix: the task goes back to `pr_open` and the reviews are left to whoever pushed.
+- **Stacked PRs** keep `changes_requested` through a restack, so the request still applies to the moved commits, and are addressed after it — unlike a `ci_failed` head, whose restacked head goes back to `pr_open` for CI to judge.
+- **Take-up.** A PR taken up from GitHub treats the reviews that existed at take-up as addressed (the watermark `reviews_addressed` starts at the latest review id), so a stale review never triggers a rework; a new one does.
 
 ---
 
@@ -342,6 +383,7 @@ The agent interface is a single seam: a role receives a `Ctx` with `log`, `progr
 - **A CI fix is gated, but the gates can't run CI's own checks.** The builder is told to reproduce each failure with `run`, and CI on the new head decides. A fix that doesn't hold shows up red again on the next refresh.
 - **Two boards can run the same task at once.** Nothing claims a task across boards. Planned: a draft PR as the claim.
 - **A PR stacked on several dependencies is taken up as stacked on the one it targets**, since the others are merged into its branch and the PR doesn't name them.
+- **A PR taken up from GitHub treats the reviews that existed at take-up as addressed**; a watermarked review before the take-up never triggers a rework.
 - **Linux only**: the sandbox is bubblewrap.
 - **Branch protection** on your default branch is a GitHub setting; the factory and CI report, they don't enforce merges.
 
