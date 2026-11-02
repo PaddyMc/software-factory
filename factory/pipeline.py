@@ -9,7 +9,8 @@ its change is replayed onto the new base, the builder resolves the conflicted
 files, and review and gates run again on the result before the PR is updated.
 
 An open PR whose CI fails is reworked: rework -> build -> review -> verify -> PR: the
-builder works on the PR's branch with the failing jobs' logs as feedback (see ci.py).
+builder works on the PR's branch with the failing jobs' logs as feedback (see ci.py). An open PR whose
+reviewer requested changes is reworked with the review's brief, or answered on the PR when nothing changes.
 """
 
 from __future__ import annotations
@@ -73,7 +74,7 @@ KINDS = {
         entry_outcome="failing",
         commit_suffix=lambda attempt: f"(fix CI, attempt {attempt})",
         no_change="The previous attempt produced no changes, so CI still fails. Fix the failures.",
-        comment=lambda r, new_sha: (
+        comment=lambda r, new_sha, msg: (
             f"CI failed on {r.old_candidate[:12]} ({', '.join(f'`{c}`' for c in r.what)}): fixed. Candidate "
             f"{r.old_candidate[:12]} → {new_sha[:12]}; review and gates ran on {new_sha[:12]}, and CI runs on it now."
         ),
@@ -87,7 +88,31 @@ KINDS = {
         ),
         log=lambda r: f"fixing CI ({', '.join(r.what)}) on {r.old_candidate[:12]}",
     ),
+    "human_review": Kind(
+        entry_outcome="changes_requested",
+        commit_suffix=lambda attempt: f"(address review, attempt {attempt})",
+        no_change="The previous attempt produced no changes, so the review's requests are still unanswered. "
+                  "Address them, or answer them in your final message.",
+        comment=lambda r, new_sha, msg: (
+            f"Addressed review by {', '.join('@' + l for l in r.what)} on {r.old_candidate[:12]}: {msg}. Candidate "
+            f"{r.old_candidate[:12]} → {new_sha[:12]}; review and gates ran on {new_sha[:12]}."
+        ),
+        body_line=lambda r: (
+            f"**Review addressed** by {', '.join('@' + l for l in r.what)} on the previous candidate "
+            f"`{r.old_candidate[:12]}`."
+        ),
+        failure_note=lambda r: (
+            f"The PR still holds {r.old_candidate[:12]}, whose reviews are still unaddressed. "
+            f"Running the task again rebuilds it from scratch."
+        ),
+        log=lambda r: f"addressing review by {', '.join('@' + l for l in r.what)} on {r.old_candidate[:12]}",
+    ),
 }
+
+
+def answer_text(text: str) -> str:
+    """The builder's final message for a PR comment: the `RESULT:` line is for the factory, not the human."""
+    return "\n".join(line for line in text.strip().splitlines() if not line.strip().startswith("RESULT:")).strip()
 
 
 class Replayed:
@@ -123,6 +148,7 @@ class State(TypedDict, total=False):
     outcome: str
     failure_sig: str        # identical gate failures on consecutive attempts => stop (no progress)
     stuck: bool
+    answer: str             # a rework the builder changed nothing on: the builder's message, answered on the PR
 
 
 def git(cwd: Path, *args: str, check: bool = True) -> str:
@@ -336,6 +362,9 @@ class Pipeline:
         out = self.role("build", "building", attempt, run)
         sha = git(self.wt, "rev-parse", "HEAD")
         if sha == self.start_sha:
+            if r and r.kind == "human_review" and attempt == 1:
+                # The builder answered a review that needs no code change: it goes to the PR, not to a retry.
+                return {"attempt": attempt, "sha": sha, "answer": out.text}
             return {"attempt": attempt, "sha": sha, "verdict": "CHANGES",
                     "feedback": KINDS[r.kind].no_change
                     if r else "The previous attempt produced no changes. Implement the task."}
@@ -345,8 +374,9 @@ class Pipeline:
     def review(self, s: State) -> State:
         if s["sha"] == self.start_sha:
             return {"verdict": "CHANGES"}
+        extra = {"review_brief": self.opts.rework.brief} if (self.opts.rework and self.opts.rework.kind == "human_review") else {}
         out = self.role("review", "reviewing", s["attempt"],
-                        lambda: (o := self.roles.review(self.ctx(s)), o.verdict, o.text, s["sha"]))
+                        lambda: (o := self.roles.review(self.ctx(s, **extra)), o.verdict, o.text, s["sha"]))
         fb = "" if out.verdict == "APPROVE" else f"Reviewer requested changes:\n\n{out.text}"
         return {"verdict": out.verdict, "review": out.text, "feedback": fb}
 
@@ -412,9 +442,26 @@ class Pipeline:
                                           f"{r.old_candidate[:12]} → {s['sha'][:12]}; review and gates ran on {s['sha'][:12]}.")
         if r := self.opts.rework:
             from .stack import comment
-            comment(self.wt, self.pr_url, KINDS[r.kind].comment(r, s["sha"]))
-        self.db.update(self.task.id, status="pr_open", pr_url=self.pr_url, progress=None)
+            msg = answer_text(self.db.last_report(self.task.id, "build", "committed"))
+            comment(self.wt, self.pr_url, KINDS[r.kind].comment(r, s["sha"], msg))
+        update = {"status": "pr_open", "pr_url": self.pr_url, "progress": None}
+        if (r := self.opts.rework) and r.kind == "human_review" and r.through is not None:
+            update["reviews_addressed"] = r.through
+        self.db.update(self.task.id, **update)
         self._event("stage", f"pr_open: {self.pr_url}")
+        return {"outcome": "pr_open"}
+
+    def answer(self, s: State) -> State:
+        """The builder's first attempt left the PR's head unchanged: nothing to push or re-review. The
+        builder's answer goes on the PR as a comment, the reviews count as addressed, and the task is open."""
+        r = self.opts.rework
+        from .stack import comment
+        url = self.db.task(self.task.id)["pr_url"]
+        comment(self.wt, url, answer_text(s["answer"]))
+        self._event("stage", f"answered on {url}; no change to push")
+        self.db.update(self.task.id, status="pr_open", note=None, progress=None,
+                       reviews_addressed=r.through)
+        self._event("stage", f"pr_open: {url}")
         return {"outcome": "pr_open"}
 
     def fail(self, s: State) -> State:
@@ -448,17 +495,18 @@ class Pipeline:
 
     def graph(self):
         g = StateGraph(State)
-        for name in ("plan", "resolve", "rework", "build", "review", "verify", "pr", "fail"):
+        for name in ("plan", "resolve", "rework", "build", "review", "verify", "pr", "answer", "fail"):
             g.add_node(name, getattr(self, name))
         g.set_entry_point("resolve" if self.opts.resolution else "rework" if self.opts.rework else "plan")
         g.add_edge("plan", "build")
         g.add_edge("rework", "build")
-        g.add_edge("build", "review")
+        g.add_conditional_edges("build", lambda s: "answer" if s.get("answer") is not None else "review")
         more = lambda s: s["attempt"] < self.opts.max_attempts and not s.get("stuck")
         g.add_conditional_edges("resolve", lambda s: "verify" if s["verdict"] == "APPROVE" else "review" if not s["verdict"]
                                 else ("build" if more(s) else "fail"))
         g.add_conditional_edges("review", lambda s: "verify" if s["verdict"] == "APPROVE" else ("build" if more(s) else "fail"))
         g.add_conditional_edges("verify", lambda s: "pr" if s["gates_ok"] else ("build" if more(s) else "fail"))
+        g.add_edge("answer", END)
         g.add_edge("pr", END)
         g.add_edge("fail", END)
         return g.compile()
