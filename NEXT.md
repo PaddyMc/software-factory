@@ -5,7 +5,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | # | Gap | Effort | Depends on |
 |---|---|---|---|
 | ✓ | Read CI on open PRs and fix failures. Done: [CI failures](docs/architecture.md#ci-failures) | — | — |
-| 1 | Act on human PR review comments. Planned: [pr-review-rework](docs/plans/pr-review-rework.md) | medium | — |
+| ✓ | Act on human PR review comments. Done: [Review comments](docs/architecture.md#review-comments) | — | — |
 | 2 | The builder writes the test that judges it | small | — |
 | 3 | Nothing measures the factory itself | medium | — |
 | 4 | Learn from feedback | medium | 1, 3 |
