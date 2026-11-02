@@ -740,17 +740,31 @@ def cmd_init(a) -> int:
 
 
 def cmd_prompt(a) -> int:
-    """A role's prompt as the agents get it: the repository's override, else the one shipped with the factory."""
-    from .agents import ROLE_FILES, prompt_source, role_model
+    """A role's or a flow step's prompt as the agents get it: the repository's override, else the shipped one."""
+    from .agents import ROLE_FILES, load_step, prompt_source, role_model, step_limit, step_model, step_prompt_source
 
     root = repo_root()
+    cfg = C.load(root)
+    flow = cfg.flows.get(a.flow or cfg.flow)
+    if flow is None:
+        print(f"unknown flow {a.flow} (flows: {', '.join(sorted(cfg.flows))})", file=sys.stderr)
+        return 2
     role = next((r for r, f in ROLE_FILES.items() if a.role in (r, f)), None)
-    if role is None:
+    if role is not None:
+        src = prompt_source(root, role)
+        print(f"# {src} · model {role_model(root, role, cfg)}\n")
+        print(src.read_text().rstrip())
+        return 0
+    step = next((s for s in flow.steps if s.name == a.role and s.kind != "gates"), None)
+    if step is None:
         print(f"unknown role {a.role}; one of {', '.join(ROLE_FILES)}", file=sys.stderr)
         return 2
-    src = prompt_source(root, role)
-    print(f"# {src} · model {role_model(root, role, C.load(root))}\n")
+    src = step_prompt_source(root, step)
+    meta, instructions = load_step(root, step)
+    print(f"# {src} · model {step_model(root, step, cfg)} · max {step_limit(step, cfg, meta)} steps\n")
     print(src.read_text().rstrip())
+    if step.kind == "review" and "VERDICT:" not in instructions:
+        print(f"⚠ {step.name}'s prompt has no VERDICT: line; every review will count as CHANGES", file=sys.stderr)
     return 0
 
 
@@ -801,8 +815,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--no-session-log", action="store_true", help="don't require session logs")
     s.set_defaults(fn=cmd_init)
 
-    s = sub.add_parser("prompt", help="print a role's prompt (the repository's override, else the shipped one)")
-    s.add_argument("role", help="plan | build | review | verify (or planner, builder, …)")
+    s = sub.add_parser("prompt", help="print a role's or flow step's prompt (the repository's override, else the shipped one)")
+    s.add_argument("role", help="plan | build | review | verify (or planner, builder, …), or a step of --flow")
+    s.add_argument("--flow", help="the flow a step name belongs to (default: the config's `flow`)")
     s.set_defaults(fn=cmd_prompt)
 
     s = sub.add_parser("config", help="print the effective project settings")
