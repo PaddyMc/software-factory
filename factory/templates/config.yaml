@@ -11,7 +11,7 @@ exclude: []
 # Repository guidance appended to every agent's system prompt: the first file that exists.
 guidance: ["AGENTS.md", "CLAUDE.md"]
 
-# Uncomment to require a session log entry (<dir>/<today>.md) in every task.
+# Uncomment to require a session log entry (<dir>/<today>-<task id>.md) in every task.
 # session_log: docs/sessions
 
 # Uncomment to require every task to add a new end-to-end test, and to run it.

@@ -72,7 +72,7 @@ Use a fenced YAML list whose items contain exactly these keys and no others: `id
   - a filter that selects zero tests is a failure, not a pass.
 - **Gate requirements from `.factory/config.yaml`:**
   - with `e2e`, every task adds a NEW test directly under `e2e.dir`;
-  - with `session_log`, every task adds `<session_log>/<today>.md`.
+  - with `session_log`, every task adds its own `<session_log>/<today>-<task id>.md`.
 - **Work the factory can't run.** For example, a change to the factory itself, or one needing secrets or spending money. Keep it as a contract and state in prose that it's done by hand. A contract whose verification runs a command the factory refuses (`sudo`, `gh`, `terraform apply`, the project's `denied_commands`) is refused by `factory run`, and `factory validate-plan` warns about it.
 
 ### Phase 4: Coordinate

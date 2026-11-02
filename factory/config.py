@@ -62,7 +62,7 @@ class Config:
     plans: tuple[str, ...] = ("docs/plans/**/*.md",)
     exclude: tuple[str, ...] = ()                # globs never read as backlog (e.g. "docs/user/**")
     guidance: tuple[str, ...] = ("AGENTS.md", "CLAUDE.md")   # the first that exists joins every agent's prompt
-    session_log: str | None = None               # e.g. "docs/sessions": every task adds <dir>/<today>.md
+    session_log: str | None = None               # e.g. "docs/sessions": every task adds <dir>/<today>-<task id>.md
     e2e: E2E | None = None
     unit_tests: tuple[str, ...] = ()             # commands for the unit_tests gate
     lockfiles: tuple[str, ...] = ("Cargo.lock", "uv.lock", "package-lock.json", "poetry.lock", "go.sum")

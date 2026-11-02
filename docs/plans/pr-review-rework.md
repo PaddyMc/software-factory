@@ -54,7 +54,7 @@
     - "factory/pipeline.py defines a Rework dataclass holding the rework's kind, the old candidate (where the build starts and what the push is leased on), the names of what triggered it, and the builder's brief. Options has a single `rework` field in place of `ci_fix`, and the string CiFix appears nowhere under factory/ or tests/ (the ci.py docstring included)"
     - "Every place that branched on a CI fix reads the Rework, with the kind-specific wording (commit-message suffix, no-change feedback, PR comment, PR body line, failure note, log fragment) looked up from its kind in one table. A second kind then adds a table entry rather than new branches. Those places are: cli.cmd_run_one and cli._ci_fix; Pipeline.start_sha; the graph's entry node and its run record; the build node's feedback and commit message; the pr node's push lease, comment and body"
     - "tests/test_ci.py and the four CI tests in tests/test_pipeline.py pass without being modified"
-    - "docs/sessions/<today>.md has an entry for this task"
+    - "docs/sessions/<today>-<task id>.md has an entry for this task"
   verification:
     - "uv run pytest -q tests/test_ci.py"
     - "uv run pytest -q tests/test_pipeline.py -k 'failing_ci_is_fixed or ci_is_judged_only or failed_ci_fix or ci_failure_of_a_stacked'"
@@ -80,7 +80,7 @@
     - "requests(...) returns the unaddressed reviews (id above the task's watermark; a NULL watermark counts as 0) that request changes. Any submitted (non-PENDING) review by the PR's author counts. For other reviewers with write or admin permission, a review counts when it is their latest APPROVED, CHANGES_REQUESTED or DISMISSED review and is CHANGES_REQUESTED, so a later approval or dismissal clears an earlier request. COMMENTED reviews from others neither request nor clear, and reviewers with read, triage or no access never count"
     - "brief(...) fetches the inline comments of the reviews it covers (pulls/N/comments, --paginate) and starts with '# Address review'. It says the reviewer approves the merge, so every request is in scope even where it goes beyond the plan, the goal or the non-goals, and that a question needs an answer in the final message, not a code change. It then lists every unaddressed review by a counted reviewer (author or write access): login, state, the commit it was on, and its body. Under each review come its inline comments as `path:line: body`, replies included; an outdated comment shows its original line, marked outdated. The whole is capped like ci.BRIEF_LIMIT"
     - "The fake gh in tests/conftest.py serves the PR, reviews, review comments and permission endpoints from its state file, with no reviews and write permission by default; comment POSTs and every other existing call behave as before, and the full suite passes"
-    - "docs/sessions/<today>.md has an entry for this task"
+    - "docs/sessions/<today>-<task id>.md has an entry for this task"
   verification:
     - "uv run pytest -q tests/test_reviews.py::test_change_requests_count_only_from_reviewers_with_write_access tests/test_reviews.py::test_any_review_by_the_pr_author_requests_changes tests/test_reviews.py::test_each_reviewers_latest_decision_wins tests/test_reviews.py::test_addressed_reviews_no_longer_count tests/test_reviews.py::test_fetch_reads_the_pr_reviews_and_permissions_through_gh_api tests/test_reviews.py::test_brief_lists_review_bodies_and_inline_comments_by_path_and_line"
   risk: low
@@ -105,7 +105,7 @@
     - "Board: `factory status` and `factory top` show changes_requested with its own glyph in the plan strip, a `changes requested` counter, and the PR URL and note in the detail line. Plan summaries list it like ci_failed. Its dependents wait (`waits for TASK (changes_requested)`), `factory requeue` leaves it alone, and `factory run TASK` refuses it without --force"
     - "stack.restack moves a stacked changes_requested PR as it moves a pr_open one, and keeps the changes_requested status: the request still applies to the moved commits"
     - "A PR taken up from GitHub (cli._adopt) records the latest review id at take-up as addressed"
-    - "docs/sessions/<today>.md has an entry for this task"
+    - "docs/sessions/<today>-<task id>.md has an entry for this task"
   verification:
     - "uv run pytest -q tests/test_pipeline.py::test_a_review_requesting_changes_marks_the_task_on_refresh tests/test_pipeline.py::test_conflicts_come_before_requested_changes_and_requested_changes_before_ci tests/test_pipeline.py::test_reviews_on_a_head_someone_else_pushed_are_left_to_them tests/test_pipeline.py::test_a_stacked_pr_keeps_its_requested_changes_when_restacked tests/test_pipeline.py::test_a_taken_up_pr_treats_earlier_reviews_as_addressed"
     - "uv run pytest -q tests/test_scheduler.py::test_dependents_wait_while_changes_are_requested tests/test_requeue.py::test_requeue_leaves_a_pr_with_requested_changes_alone"
@@ -132,7 +132,7 @@
     - "When the builder's first attempt changes nothing, nothing is pushed: its final message goes on the PR as a comment (an answer), the reviews count as addressed, and the task goes back to pr_open"
     - "When the rework fails, the task is failed, the PR keeps its old head, and the note says the reviews are still unaddressed and that running the task again rebuilds it from scratch. --force on a changes_requested task rebuilds from scratch, as on any open PR"
     - "Plan runs start changes_requested tasks as they start ci_failed ones"
-    - "docs/sessions/<today>.md has an entry for this task"
+    - "docs/sessions/<today>-<task id>.md has an entry for this task"
   verification:
     - "uv run pytest -q tests/test_pipeline.py::test_requested_changes_are_addressed_on_the_pr_branch_then_reviewed_and_gated tests/test_pipeline.py::test_a_review_that_needs_no_change_is_answered_and_the_pr_left_as_is tests/test_pipeline.py::test_review_rework_needs_an_outstanding_request_on_the_factorys_candidate tests/test_pipeline.py::test_failed_review_rework_leaves_the_pr_alone tests/test_pipeline.py::test_requested_changes_on_a_stacked_pr_are_addressed_after_the_restack"
     - "uv run pytest -q tests/test_scheduler.py::test_a_pr_with_requested_changes_runs_again_to_address_them"
@@ -154,7 +154,7 @@
     - "docs/reference.md: the `factory run TASK`, `factory status` and `factory show` command rows mention changes_requested and `--role human_review`, and the Troubleshooting table has rows for changes_requested, a rework that failed, and a review answered without a change"
     - "NEXT.md marks item 1 done in its table with a link to docs/architecture.md#review-comments, and leaves the other items as they are"
     - "factory/templates/skills/factory-ops/SKILL.md lists changes_requested among the statuses and in its description, has a review-comments bullet under How it works, and has a row in Requests and answers. references/troubleshooting.md has rows for changes_requested, a rework that failed, and a review answered without a change"
-    - "docs/sessions/<today>.md has an entry for this task"
+    - "docs/sessions/<today>-<task id>.md has an entry for this task"
   verification:
     - "grep -q '^## Review comments' docs/architecture.md"
     - "grep -q 'changes_requested' docs/reference.md"
@@ -324,7 +324,7 @@ Please don't swallow the error here.
 | `tests/test_reviews.py` | New (t02) |
 | `tests/test_pipeline.py`, `tests/test_scheduler.py`, `tests/test_requeue.py` | New tests (t03, t04) |
 | `docs/architecture.md`, `docs/reference.md`, `NEXT.md`, `factory/templates/skills/factory-ops/SKILL.md`, `factory/templates/skills/factory-ops/references/troubleshooting.md` | Docs (t05) |
-| `docs/sessions/<date>.md` | An entry per task (all) |
+| `docs/sessions/<date>-<task id>.md` | An entry per task (all) |
 
 ## Test Plan
 
