@@ -364,7 +364,7 @@ Through the real CLI, LangGraph pipeline, git, bwrap and a bare origin, with the
 ## Cross-Workstream Coordination
 
 - **Depends on:** the CI-failure rework (merged in #3), which t01 generalizes. No other plan exists yet.
-- **Required by:** NEXT.md item 4, "Learn from feedback", which collects human review comments. It also depends on item 3, "Measure the factory". When those are planned, their plans link back here.
+- **Required by:** [agent-flows](agent-flows.md): `agent-flows-t02` waits for `pr-review-rework-t04` (the same `pipeline.py`, `agents.py` and `cli.py` code), and `agent-flows-t05` for `pr-review-rework-t05` (the same docs). Also NEXT.md item 4, "Learn from feedback", which collects human review comments. It also depends on item 3, "Measure the factory". When those are planned, their plans link back here.
 
 ## Notes / Out of Scope
 

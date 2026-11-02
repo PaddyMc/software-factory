@@ -224,7 +224,7 @@ Plan doc: `<path>` — read this first; locked decisions and milestones are in t
 Before emitting a plan, check:
 
 - **Completeness:** every milestone maps to task IDs, and every task belongs to a milestone.
-- **Schema:** `factory validate-plan <plan>` passes. Each item has exactly the 9 keys.
+- **Schema:** `factory validate-plan <plan>` passes. Each item has exactly the 8 keys.
 - **Dependencies:** they resolve, the graph is acyclic, and shared write scopes are serialized.
 - **Gate fit:** every factory-run task can satisfy the configured `e2e` requirement, and its verification commands run offline.
 - **Readiness:** decisions are locked, prerequisites are stated in prose, risks are honest, and there are no placeholders.
