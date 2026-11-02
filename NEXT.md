@@ -11,6 +11,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 4 | Learn from feedback | medium | 1, 3 |
 | 5 | Steer a running agent | small | — |
 | 6 | Runs need this machine | large | a shared board |
+| 7 | Reshape the agent flow. Planned: [agent-flows](docs/plans/agent-flows.md) | medium | 1 |
 
 ## 1. Act on human PR review comments
 
@@ -81,3 +82,13 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 **Gap.** Runs need this machine on. agent-orchestrator and Open SWE run in hosted workspaces.
 
 **Sketch.** First, a shared board: state in a server database (Postgres, say) instead of the local SQLite file, so agents run on a cloud box while you watch from the laptop. Keep the offline bubblewrap sandbox. The box needs dependencies fetched ahead of time, since the sandbox is offline, and its own `gh` login. Lowest priority: local runs are a deliberate trade for the offline sandbox.
+
+## 7. Reshape the agent flow
+
+**Gap.** The agents a task goes through are fixed: plan, build, review, gates, verify. You can retune the four roles' models, step limits and prompts, but you can't drop the planner, add a second reviewer on another model, put the gates before review, or add a test-writing step, so you can't try different agent flows.
+
+**Plan.** [docs/plans/agent-flows.md](docs/plans/agent-flows.md) (planned 2026-11-02, tasks `agent-flows-t01`…`t05`):
+- A flow is a named list of agent steps in `.factory/config.yaml`. Each step has a kind (`plan`, `build`, `review`, `verify`) and its own prompt, model and step limit, and the gates are always in it.
+- `flow:` picks the default, which is today's pipeline when unset, and `factory run --flow NAME` overrides it.
+- Reworks keep their entry and run the flow's steps after it. Every run records its flow and step, for item 3 to compare.
+- External agent CLIs as steps are out of scope.
