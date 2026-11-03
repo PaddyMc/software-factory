@@ -1,5 +1,6 @@
-"""The four role agents (LangChain `create_agent`). Prompts ship in factory/prompts/<role>.md; a repository
-may override one with .factory/agents/<role>.md, and set models and step limits in .factory/config.yaml."""
+"""The agent steps of a flow (LangChain `create_agent`), each of one of the four kinds. Prompts ship in
+factory/prompts/<role>.md; a repository may override one with .factory/agents/<role>.md, give a custom step
+its own .factory/agents/<step>.md, and set models and step limits in .factory/config.yaml."""
 
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ from langgraph.errors import GraphRecursionError
 from . import prices
 from .config import Config
 from .contracts import Task
+from .flows import Flow, Step
 from .log import NullLog, clip
 from .tools import PathGuard, ToolLog, diff_tool, read_tools, run_tool, write_tools
 
@@ -43,6 +45,7 @@ class Ctx:
     gates: str = ""
     resolution: str = ""                    # resolve only: the conflict brief (see pipeline.replay_worktree)
     review_brief: str = ""                  # review only: the review-rework brief, whose requests are in scope
+    earlier: tuple[str, ...] = ()           # build steps after the first: the earlier build steps' final messages
     log: Callable[[str, str], None] = field(default_factory=NullLog)          # (tag, message)
     # (steps, max_steps, tokens_in, tokens_out, cost_usd | None, refused_tool_calls)
     progress: Callable[..., None] = lambda *a: None
@@ -84,10 +87,27 @@ def prompt_source(root: Path, role: str):
     return override if override.is_file() else resources.files("factory") / "prompts" / f"{ROLE_FILES[role]}.md"
 
 
-def load_role(root: Path, role: str) -> tuple[dict, str]:
-    text = prompt_source(root, role).read_text()
+def step_prompt_source(root: Path, step: Step):
+    """A custom step's own prompt (.factory/agents/<name>.md) when it exists, else its kind's prompt."""
+    if step.name != step.kind:
+        own = root / OVERRIDE_DIR / f"{step.name}.md"
+        if own.is_file():
+            return own
+    return prompt_source(root, step.kind)
+
+
+def _load_prompt(path) -> tuple[dict, str]:
+    text = path.read_text()
     m = _FRONTMATTER.match(text)
     return (yaml.safe_load(m.group(1)) or {}, text[m.end():]) if m else ({}, text)
+
+
+def load_role(root: Path, role: str) -> tuple[dict, str]:
+    return _load_prompt(prompt_source(root, role))
+
+
+def load_step(root: Path, step: Step) -> tuple[dict, str]:
+    return _load_prompt(step_prompt_source(root, step))
 
 
 def build_model(spec: str):
@@ -149,6 +169,21 @@ def role_models(root: Path, override: str | None = None, cfg: Config | None = No
     return {role: role_model(root, role, cfg, override) for role in ROLE_FILES}
 
 
+def step_model(root: Path, step: Step, cfg: Config, override: str | None = None) -> str:
+    """`--model` > the step's `model` > the config's `models[kind]` > the prompt's frontmatter > the default."""
+    return override or step.model or cfg.models.get(step.kind) or load_step(root, step)[0].get("model", DEFAULT_MODEL)
+
+
+def step_limit(step: Step, cfg: Config, meta: dict) -> int:
+    """The step's `max_steps` > the config's `max_steps[kind]` > the prompt's frontmatter > 60."""
+    return int(step.max_steps or cfg.max_steps.get(step.kind) or meta.get("max_steps", 60))
+
+
+def flow_models(root: Path, flow: Flow, cfg: Config, override: str | None = None) -> dict[str, str]:
+    """The model each agent step of a flow resolves to, by step name (a gates step has no model)."""
+    return {s.name: step_model(root, s, cfg, override) for s in flow.steps if s.kind != "gates"}
+
+
 def missing_keys(models: dict[str, str], env: dict) -> list[str]:
     """Env vars the configured providers need but that are unset (checked before any work starts)."""
     need = {PROVIDER_KEYS.get(spec.split(":", 1)[0]) for spec in models.values()}
@@ -188,21 +223,27 @@ class LangChainRoles:
         self.model_factory = model_factory
         self.cfg = cfg or Config()
 
-    def _run(self, role: str, ctx: Ctx, tools: list, message: str, tag: str | None = None) -> Output:
-        meta, instructions = load_role(self.root, role)
-        spec = role_model(self.root, role, self.cfg, self.model_override)
-        steps = int(self.cfg.max_steps.get(role) or meta.get("max_steps", 60))
+    def step(self, step: Step, ctx: Ctx, tag: str | None = None, message: str | None = None) -> Output:
+        """Run one flow step: its kind's tools and task message, its own prompt, model and step limit.
+        `tag`/`message` override the defaults (resolve runs a build step under its own tag and message)."""
+        meta, instructions = load_step(self.root, step)
+        spec = step_model(self.root, step, self.cfg, self.model_override)
+        steps = step_limit(step, self.cfg, meta)
         system = "\n\n".join(x for x in [
             instructions.strip(), contract_block(ctx.task), project_rules(self.cfg),
             f"Today: {dt.date.today().isoformat()}. Worktree root is the tools' working directory.",
             _repo_guidance(ctx.worktree, self.cfg.guidance)] if x)
+        tools, default_message, log = self._kit(step, ctx)
+        message = message if message is not None else default_message
         agent = create_agent(
             (self.model_factory or build_model)(spec), tools, system_prompt=system,
             middleware=[ModelCallLimitMiddleware(run_limit=steps, exit_behavior="end"),
                         ModelRetryMiddleware(**MODEL_RETRY, on_failure="error"), tool_errors(ctx.worktree)],
         )
-        tag = tag or (f"{role}#{ctx.attempt}" if role in ("build", "review") else role)
+        tag = tag or (f"{step.name}#{ctx.attempt}" if step.kind in ("build", "review") else step.name)
         ctx.log(tag, f"start ({spec}, max {steps} steps)")
+        if step.kind == "review" and "VERDICT:" not in instructions:
+            ctx.log(tag, f"⚠ {step.name}'s prompt has no VERDICT: line; every review will count as CHANGES")
         ctx.record({"type": "system", "model": spec, "max_steps": steps, "content": system})
         ctx.record({"type": "human", "content": message})
         out = Output(text="", model=spec)
@@ -226,7 +267,45 @@ class LangChainRoles:
         cost = f", ${out.cost_usd:.4f}" if out.cost_usd is not None else ""
         refused = f", {out.refused} tool calls refused" if out.refused else ""
         ctx.log(tag, f"done: {out.steps} steps, {out.tokens_in} tokens in / {out.tokens_out} out{cost}{refused}")
+        if log is not None:
+            out.log = log
+        if step.kind == "review":
+            out.verdict = parse_verdict(out.text)
         return out
+
+    def _kit(self, step: Step, ctx: Ctx) -> tuple[list, str, ToolLog | None]:
+        """A step kind's tools and task message (exactly what its role method builds today), plus the
+        build kind's ToolLog, attached to the Output after the run."""
+        guard = self._guard(ctx)
+        if step.kind == "plan":
+            return read_tools(ctx.worktree, guard), f"Plan task {ctx.task.id}.", None
+        if step.kind == "build":
+            log = ToolLog()
+            tools = (read_tools(ctx.worktree, guard) + write_tools(ctx.worktree, guard, log)
+                     + run_tool(ctx.sandbox, log, self.cfg.denied_commands))
+            msg = f"Implement task {ctx.task.id} (attempt {ctx.attempt}).\n\n# Plan\n\n{ctx.plan}"
+            if ctx.feedback:
+                msg += f"\n\n# Feedback to address first\n\n{ctx.feedback}"
+            if ctx.earlier:
+                seen = "\n\n".join(f"{i}. {m}" for i, m in enumerate(ctx.earlier, 1))
+                msg += f"\n\n# Earlier build steps in this attempt\n\n{seen}"
+            return tools, msg, log
+        if step.kind == "review":
+            tools = read_tools(ctx.worktree, guard) + diff_tool(ctx.worktree, ctx.base_sha)
+            msg = f"Review the change for task {ctx.task.id}. Start with git_diff(stat=True)."
+            if ctx.review_brief:
+                msg += (
+                    f"\n\n# Human review to address\n\nThe task's PR was reviewed, and those requests are in scope for "
+                    f"this change even where they go beyond the plan, the goal or the non-goals. Judge whether each "
+                    f"request was addressed; any request left unaddressed is a reason for VERDICT: CHANGES.\n\n"
+                    f"{ctx.review_brief}"
+                )
+            return tools, msg, None
+        if step.kind == "verify":
+            tools = (read_tools(ctx.worktree, guard) + diff_tool(ctx.worktree, ctx.base_sha)
+                     + run_tool(ctx.sandbox, ToolLog(), self.cfg.denied_commands))
+            return tools, f"All gates passed for task {ctx.task.id}. Write the PR report.\n\n# Gates\n\n{ctx.gates}", None
+        raise ValueError(f"step {step.name}: kind {step.kind!r} has no agent (gates run outside the agents)")
 
     @staticmethod
     def _observe(m, out: Output, tag: str, ctx: Ctx) -> None:
@@ -268,48 +347,18 @@ class LangChainRoles:
         return PathGuard(ctx.worktree, self.cfg.dependency_dirs())
 
     def plan(self, ctx: Ctx) -> Output:
-        tools = read_tools(ctx.worktree, self._guard(ctx))
-        return self._run("plan", ctx, tools, f"Plan task {ctx.task.id}.")
+        return self.step(Step("plan", "plan"), ctx)
 
     def build(self, ctx: Ctx) -> Output:
-        log = ToolLog()
-        guard = self._guard(ctx)
-        tools = (read_tools(ctx.worktree, guard) + write_tools(ctx.worktree, guard, log)
-                 + run_tool(ctx.sandbox, log, self.cfg.denied_commands))
-        msg = f"Implement task {ctx.task.id} (attempt {ctx.attempt}).\n\n# Plan\n\n{ctx.plan}"
-        if ctx.feedback:
-            msg += f"\n\n# Feedback to address first\n\n{ctx.feedback}"
-        out = self._run("build", ctx, tools, msg)
-        out.log = log
-        return out
+        return self.step(Step("build", "build"), ctx)
 
     def resolve(self, ctx: Ctx) -> Output:
         """The builder, resolving a replayed change's conflicts."""
-        log = ToolLog()
-        guard = self._guard(ctx)
-        tools = (read_tools(ctx.worktree, guard) + write_tools(ctx.worktree, guard, log)
-                 + run_tool(ctx.sandbox, log, self.cfg.denied_commands))
         msg = f"Resolve the merge conflicts of task {ctx.task.id}.\n\n{ctx.resolution}\n\n# The task's plan\n\n{ctx.plan}"
-        out = self._run("build", ctx, tools, msg, tag="resolve")
-        out.log = log
-        return out
+        return self.step(Step("build", "build"), ctx, tag="resolve", message=msg)
 
     def review(self, ctx: Ctx) -> Output:
-        tools = read_tools(ctx.worktree, self._guard(ctx)) + diff_tool(ctx.worktree, ctx.base_sha)
-        msg = f"Review the change for task {ctx.task.id}. Start with git_diff(stat=True)."
-        if ctx.review_brief:
-            msg += (
-                f"\n\n# Human review to address\n\nThe task's PR was reviewed, and those requests are in scope for "
-                f"this change even where they go beyond the plan, the goal or the non-goals. Judge whether each "
-                f"request was addressed; any request left unaddressed is a reason for VERDICT: CHANGES.\n\n"
-                f"{ctx.review_brief}"
-            )
-        out = self._run("review", ctx, tools, msg)
-        out.verdict = parse_verdict(out.text)
-        return out
+        return self.step(Step("review", "review"), ctx)
 
     def verify(self, ctx: Ctx) -> Output:
-        tools = (read_tools(ctx.worktree, self._guard(ctx)) + diff_tool(ctx.worktree, ctx.base_sha)
-                 + run_tool(ctx.sandbox, ToolLog(), self.cfg.denied_commands))
-        return self._run("verify", ctx, tools,
-                         f"All gates passed for task {ctx.task.id}. Write the PR report.\n\n# Gates\n\n{ctx.gates}")
+        return self.step(Step("verify", "verify"), ctx)
