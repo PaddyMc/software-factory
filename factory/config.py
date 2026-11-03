@@ -15,8 +15,12 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
+
+if TYPE_CHECKING:
+    from .flows import Flow                       # imported lazily below: flows.py needs ConfigError
 
 CONFIG_PATH = ".factory/config.yaml"
 E2E_LANGUAGES = ("rust", "python")
@@ -25,6 +29,11 @@ ROLES = ("plan", "build", "review", "verify")
 
 class ConfigError(ValueError):
     pass
+
+
+def _default_flows() -> dict[str, Flow]:
+    from .flows import DEFAULT                    # lazy: flows.py imports ConfigError from this module
+    return {"default": DEFAULT}
 
 
 @dataclass(frozen=True)
@@ -71,6 +80,8 @@ class Config:
     dependency_sources: tuple[str, ...] = ("~/.cargo/registry/src", "~/.cargo/git/checkouts", "~/.rustup/toolchains")
     models: dict[str, str] = field(default_factory=dict)      # role -> `provider:model`, over the prompt's own
     max_steps: dict[str, int] = field(default_factory=dict)   # role -> model calls allowed per agent run
+    flow: str = "default"                                     # the flow `factory run` uses; a key of `flows`
+    flows: dict[str, Flow] = field(default_factory=_default_flows)   # name -> flow; `default` is built in
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
 
     def dependency_dirs(self, home: Path | None = None) -> tuple[Path, ...]:
@@ -138,6 +149,12 @@ def parse(data: dict | None, default_name: str = "default") -> Config:
                 raise ConfigError("max_steps values must be positive integers")
             v = {k: int(x) for k, x in v.items()}
         kw[key] = v
+    from . import flows as F                                  # lazy: flows.py imports ConfigError from this module
+    defined = F.parse_flows(d["flows"]) if d.get("flows") is not None else {}
+    kw["flows"] = {**defined, "default": F.DEFAULT}           # the built-in default flow always exists
+    kw["flow"] = str(d.get("flow") or "default")
+    if kw["flow"] not in kw["flows"]:
+        raise ConfigError(f"flow: unknown flow {kw['flow']} (flows: {', '.join(sorted(kw['flows']))})")
     if d.get("e2e") is not None:
         e = d["e2e"]
         if not isinstance(e, dict) or not e.get("dir"):
