@@ -359,7 +359,7 @@ Through the real CLI, pipeline, agents, git, bubblewrap and fake `gh`, with `Scr
 ## Cross-Workstream Coordination
 
 - **Depends on:** [pr-review-rework](pr-review-rework.md). `agent-flows-t02` waits for `pr-review-rework-t04` (the same `pipeline.py`, `agents.py` and `cli.py` code), and `agent-flows-t05` waits for `pr-review-rework-t05` (the same docs).
-- **Required by:** NEXT.md item 3, "Measure the factory", whose `factory stats` and `factory bench` can then group and compare by flow and step. NEXT.md item 2, "The builder writes the test that judges it", can use a test-first flow.
+- **Required by:** [bench](bench.md): `bench-t03` waits for `agent-flows-t04` and runs fixture cases under each flow, and `bench-t06` waits for `agent-flows-t05`. NEXT.md item 3, "Measure the factory", whose `factory stats` can then group by flow and step. NEXT.md item 2, "The builder writes the test that judges it", can use a test-first flow.
 
 ## Notes / Out of Scope
 
@@ -367,4 +367,4 @@ Through the real CLI, pipeline, agents, git, bubblewrap and fake `gh`, with `Scr
 - **A flow per task or per plan.** Only the config default and `--flow` are supported. A plan-glob mapping or a 9th contract key would need decisions of their own.
 - **Rework-specific steps in a flow** (e.g. a different reviewer for CI fixes). Reworks use the flow's steps after their fixed entry.
 - **Reviews between build steps**, more than one plan or verify step, and parallel steps. The order rules can be loosened later without changing what a flow means today.
-- **Comparing flows.** The data is recorded, but the comparison itself is `factory stats` and `factory bench` (NEXT.md item 3).
+- **Comparing flows.** The data is recorded, but the comparison itself is `factory stats` (NEXT.md item 3) and [bench](bench.md) (NEXT.md item 8).

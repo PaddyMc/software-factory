@@ -12,6 +12,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 5 | Steer a running agent | small | — |
 | 6 | Runs need this machine | large | a shared board |
 | 7 | Reshape the agent flow. Planned: [agent-flows](docs/plans/agent-flows.md) | medium | 1 |
+| 8 | Compare flows and setups. Planned: [bench](docs/plans/bench.md) | medium | 7 |
 
 ## 1. Act on human PR review comments
 
@@ -92,3 +93,13 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 - `flow:` picks the default, which is today's pipeline when unset, and `factory run --flow NAME` overrides it.
 - Reworks keep their entry and run the flow's steps after it. Every run records its flow and step, for item 3 to compare.
 - External agent CLIs as steps are out of scope.
+
+## 8. Compare flows and setups
+
+**Gap.** With [agent flows](docs/plans/agent-flows.md) you can reshape the agents, but nothing tells you whether a flow, model or prompt change made them better. Real runs aren't comparable, since every task differs, and the gates grade the builder's own tests (item 2). This is the `factory bench` half of item 3.
+
+**Plan.** [docs/plans/bench.md](docs/plans/bench.md) (planned 2026-11-11, tasks `bench-t01`…`t06`, after agent-flows). It differs from item 3's sketch:
+- It runs a suite of synthetic fixture cases shipped with the factory instead of replaying merged tasks: five small standard-library Python projects, each with a contract, hidden tests and a reference solution. `--cases DIR` runs your own cases.
+- A setup is a flow, optionally with one model on every step. `factory bench run --flow A --flow B --model M --repeat N --max-cost USD` runs each case under each variant in a cell isolated from your board and checkout, with no PR.
+- A cell is solved when the gates pass and then the case's hidden tests, which the agents never see, pass too. `false_pass` counts candidates the gates passed but the hidden tests failed.
+- `factory bench report` and `compare` show solved rate, false passes, attempts, cost and time per variant and case, and flag any prompt, model or case that changed between two runs.
