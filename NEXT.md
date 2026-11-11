@@ -12,6 +12,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 5 | Steer a running agent | small | — |
 | 6 | Runs need this machine | large | a shared board |
 | 7 | Reshape the agent flow. Planned: [agent-flows](docs/plans/agent-flows.md) | medium | 1 |
+| 8 | Watch the board in a browser. Planned: [web-board](docs/plans/web-board.md) | medium | — |
 
 ## 1. Act on human PR review comments
 
@@ -92,3 +93,13 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 - `flow:` picks the default, which is today's pipeline when unset, and `factory run --flow NAME` overrides it.
 - Reworks keep their entry and run the flow's steps after it. Every run records its flow and step, for item 3 to compare.
 - External agent CLIs as steps are out of scope.
+
+## 8. Watch the board in a browser
+
+**Gap.** The board is only visible in a terminal: `factory top` redraws a fixed-width screen, and a task's runs, reports, transcripts and log are separate commands. Long goals are cut off, nothing is clickable, and nothing pulls out what needs a human next.
+
+**Plan.** [docs/plans/web-board.md](docs/plans/web-board.md) (planned 2026-11-03, tasks `web-board-t01`…`t04`):
+- `factory web` serves a live page on `127.0.0.1`, opens the browser, and updates itself every few seconds. It needs no new dependencies and no JavaScript build.
+- The page is read-only: you still act in the terminal.
+- The board lists what needs you, each with its next step, and a card per plan. Each task has a page with its contract, runs, reports and log, and each agent run a readable transcript.
+- It runs independently of other plans. Flow step names and stats come later.
