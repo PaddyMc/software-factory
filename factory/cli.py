@@ -70,6 +70,16 @@ def cmd_run(a) -> int:
     return cmd_run_plan(a, plan, tasks)
 
 
+def cmd_bench_run(a) -> int:
+    from .bench import run as bench_run
+
+    try:
+        return bench_run.bench(a, repo_root(), factory_home())
+    except bench_run.BenchError as e:
+        print(f"FAIL {e}", file=sys.stderr)
+        return 1
+
+
 def _child_args(a) -> list[str]:
     """Flags each task's child `factory run` inherits from the plan run's command line."""
     out = []
@@ -861,6 +871,21 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--notify", action="store_true", help="desktop notification (notify-send) when the run ends")
     s.add_argument("--flow", help="the agent flow to run (a key of `flows`; default: the config's `flow`)")
     s.set_defaults(fn=cmd_run)
+
+    bench = sub.add_parser("bench", help="evaluate agent flows and setups on bench fixture cases")
+    bench_sub = bench.add_subparsers(dest="bench_cmd", required=True)
+    s = bench_sub.add_parser("run", help="run every selected case under every variant")
+    s.add_argument("--case", action="append", metavar="ID", help="only this case (repeatable; default: every case)")
+    s.add_argument("--cases", metavar="DIR", help="load cases from DIR instead of the shipped suite")
+    s.add_argument("--flow", action="append", metavar="NAME",
+                   help="flow to evaluate (repeatable; default: the config's flow)")
+    s.add_argument("--model", action="append", metavar="SPEC", help="override every step's model (repeatable)")
+    s.add_argument("--repeat", type=int, default=1, metavar="N", help="cells per variant and case (default: 1)")
+    s.add_argument("--max-cost", type=float, metavar="USD", help="total run budget; required unless --dry-run")
+    s.add_argument("--max-attempts", type=int, default=3, metavar="N", help="max build attempts per cell (default: 3)")
+    s.add_argument("--dry-run", action="store_true", help="print cells, models and provider keys without running")
+    s.add_argument("--no-sandbox", action="store_true", help="run commands without bubblewrap (unsafe)")
+    s.set_defaults(fn=cmd_bench_run)
 
     s = sub.add_parser("top", help="live dashboard: plans with their task counters, running tasks, recent events")
     s.add_argument("plan", nargs="?", help="only this plan (name or path)")

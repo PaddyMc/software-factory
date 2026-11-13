@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+collect_ignore_glob = ["bench_cases/*"]
+
 TASK = """\
 - id: demo-t01
   goal: "Add the greeting module"

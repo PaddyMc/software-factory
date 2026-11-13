@@ -1,0 +1,20 @@
+title: Add two integers
+kind: feature
+requires: [python3]
+config:
+  unit_tests: ["python3 -m unittest -q"]
+  dependency_sources: []
+  sandbox: {ro_binds: [], rw_binds: [], path: [], hide: []}
+contract:
+  id: adder-t01
+  goal: "Add adder.calc.add(a, b) to return the sum of two integers"
+  spec_refs: ["docs/plans/adder.md"]
+  depends_on: []
+  non_goals: ["Changing double(a) or adding third-party dependencies"]
+  acceptance:
+    - "adder.calc.add(a, b) returns a + b for positive, negative and zero integers"
+    - "Add visible unittest coverage in tests/test_adder.py while preserving double(a) and the existing test suite"
+  verification: ["python3 -m unittest -v tests.test_adder"]
+  risk: low
+hidden:
+  - python3 -m unittest -v bench_hidden.test_adder
