@@ -1,0 +1,22 @@
+title: Round ledger money exactly to cents
+kind: bugfix
+requires: [python3]
+config:
+  unit_tests: ["python3 -m unittest -q"]
+  dependency_sources: []
+  sandbox: {ro_binds: [], rw_binds: [], path: [], hide: []}
+contract:
+  id: money-rounding-t01
+  goal: "Fix ledgerbook.ledger.total(entries) and ledgerbook.ledger.round_cents(amount) so ledger money is exact to the cent"
+  spec_refs: ["docs/plans/money-rounding.md"]
+  depends_on: []
+  non_goals: ["Adding currency formatting, changing the public function names, or adding third-party dependencies"]
+  acceptance:
+    - "ledgerbook.ledger.total(entries) rounds each entry to cents and returns their exact sum as a Decimal without binary floating-point drift"
+    - "ledgerbook.ledger.round_cents(amount) returns a Decimal quantized to two places using half-to-even rounding: 0.125 becomes 0.12, 0.135 becomes 0.14, and 2.675 becomes 2.68"
+    - "Existing behavior is preserved for ordinary amounts, including total(['1.10', '2.20']) returning Decimal('3.30')"
+    - "Add visible unittest coverage in tests/test_rounding.py and keep the existing ledger tests passing"
+  verification: ["python3 -m unittest -v tests.test_rounding"]
+  risk: low
+hidden:
+  - python3 -m unittest -v bench_hidden.test_money

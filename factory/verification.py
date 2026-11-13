@@ -8,6 +8,7 @@ import re
 PASS, FAIL, INCONCLUSIVE = "pass", "fail", "inconclusive"
 
 _CARGO_RESULT = re.compile(r"^test result: \w+\. (\d+) passed; (\d+) failed", re.M)
+_UNITTEST_RAN = re.compile(r"^Ran (\d+) tests? in\b", re.M)
 _PYTEST_COUNTS = re.compile(r"(\d+) (passed|failed|error|errors)\b")
 
 
@@ -16,6 +17,9 @@ def tests_run(output: str) -> int | None:
     cargo = _CARGO_RESULT.findall(output)
     if cargo:
         return sum(int(p) + int(f) for p, f in cargo)
+    unittest = _UNITTEST_RAN.search(output)
+    if unittest:
+        return int(unittest.group(1))
     if "no tests ran" in output or re.search(r"\b\d+ deselected\b", output) and not _PYTEST_COUNTS.search(output):
         return 0
     py = _PYTEST_COUNTS.findall(output)
@@ -27,7 +31,8 @@ def tests_run(output: str) -> int | None:
 
 
 def is_test_command(cmd: str) -> bool:
-    return "pytest" in cmd or re.search(r"\bcargo (\S+ )*test\b", cmd) is not None
+    return ("pytest" in cmd or re.search(r"\bcargo (\S+ )*test\b", cmd) is not None
+            or re.search(r"-m\s+unittest\b", cmd) is not None)
 
 
 def classify(cmd: str, exit_code: int, output: str) -> str:

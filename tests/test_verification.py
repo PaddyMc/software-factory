@@ -29,3 +29,10 @@ def test_nonzero_exit_fails(cmd, code):
 
 def test_non_test_command_passes_on_zero_exit():
     assert classify("git diff --check", 0, "") == PASS
+
+
+def test_unittest_output_counts_tests():
+    assert verification.tests_run("test_slugify ... ok\nRan 3 tests in 0.001s\n\nOK\n") == 3
+    assert classify("python3 -m unittest -v bench_hidden.test_slugify", 0,
+                    "Ran 0 tests in 0.000s\n\nOK") == INCONCLUSIVE
+    assert verification.is_test_command("python3 -m unittest -q")
