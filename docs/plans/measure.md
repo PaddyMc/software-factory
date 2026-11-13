@@ -282,6 +282,7 @@ The repository configures no `e2e` gate. `test_prompt_versions.py` and `test_mer
   - [pr-review-rework](pr-review-rework.md), merged. t02 hooks the refresh precedence its t03 set, and t03 counts the `human_review` runs its t04 records.
 - **Required by:**
   - [wiki](wiki.md). `wiki-t01` depends on `measure-t04`. The knowledge crew ingests t02's `edited` merge runs as human signals, and t01's prompt version covers the wiki pages injected into task prompts, so `factory stats` shows their effect.
+  - [strict-flow](strict-flow.md). `strict-flow-t01` depends on `measure-t03`, the last task here to change `agents.py`, `pipeline.py`, `db.py` and `cli.py`, and `strict-flow-t09` on `measure-t04`, which edits the same docs. Its proof rules join the reviewer's system prompt, so t01's prompt version covers them, and stats sees its `test` run role and its `APPROVE (unproven)` review outcome as new values.
   - `factory bench`, the rest of NEXT.md item 3 (not yet planned). It will replay merged tasks and compare prompt versions.
 
 ## Notes / Out of Scope

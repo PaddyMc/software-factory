@@ -359,7 +359,7 @@ Through the real CLI, pipeline, agents, git, bubblewrap and fake `gh`, with `Scr
 ## Cross-Workstream Coordination
 
 - **Depends on:** [pr-review-rework](pr-review-rework.md). `agent-flows-t02` waits for `pr-review-rework-t04` (the same `pipeline.py`, `agents.py` and `cli.py` code), and `agent-flows-t05` waits for `pr-review-rework-t05` (the same docs).
-- **Required by:** [bench](bench.md): `bench-t03` waits for `agent-flows-t04` and runs fixture cases under each flow, and `bench-t06` waits for `agent-flows-t05`. NEXT.md item 3, "Measure the factory", whose `factory stats` can then group by flow and step. NEXT.md item 2, "The builder writes the test that judges it", can use a test-first flow.
+- **Required by:** [bench](bench.md): `bench-t03` waits for `agent-flows-t04` and runs fixture cases under each flow, and `bench-t06` waits for `agent-flows-t05`. NEXT.md item 3, "Measure the factory", whose `factory stats` can then group by flow and step. NEXT.md item 2, "The builder writes the test that judges it", can use a test-first flow. [strict-flow](strict-flow.md) builds on this plan's `Step`, order rule and built-in flow: it adds step options (`loop`, `prove`), a `test` step kind that runs once and is locked, and a second built-in flow, `strict`, and keeps `default` as today's pipeline.
 
 ## Notes / Out of Scope
 
