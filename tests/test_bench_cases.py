@@ -22,7 +22,8 @@ def _sandbox_factory(case, tmp_path):
 @pytest.mark.parametrize("case", SHIPPED, ids=lambda case: case.id)
 def test_every_shipped_case_loads_with_a_valid_contract_and_config(case):
     assert [c.id for c in SHIPPED] == sorted(c.id for c in SHIPPED)
-    assert case.kind == {"slugify": "feature", "money-rounding": "bugfix"}[case.id]
+    assert case.kind == {"slugify": "feature", "money-rounding": "bugfix", "report-json": "multi-file",
+                         "ini-refactor": "refactor", "rate-limiter": "algorithm"}[case.id]
     assert case.requires == ("python3",)
     assert case.contract.id == f"{case.id}-t01"
     assert case.contract.plan == f"docs/plans/{case.id}.md"
@@ -40,6 +41,16 @@ def test_every_shipped_case_loads_with_a_valid_contract_and_config(case):
     assert all(verification.is_test_command(cmd) for cmd in case.hidden)
     assert any(path.is_file() for path in case.hidden_dir.rglob("*"))
     assert any(path.is_file() for path in case.solution_dir.rglob("*"))
+
+
+def test_the_shipped_suite_has_five_cases_of_five_kinds():
+    assert [(case.id, case.kind) for case in SHIPPED] == [
+        ("ini-refactor", "refactor"),
+        ("money-rounding", "bugfix"),
+        ("rate-limiter", "algorithm"),
+        ("report-json", "multi-file"),
+        ("slugify", "feature"),
+    ]
 
 
 @pytest.mark.parametrize("case", SHIPPED, ids=lambda case: case.id)
