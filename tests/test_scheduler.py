@@ -125,6 +125,19 @@ def test_network_and_flags_pass_through_to_children(db):
     assert args["demo-t03"] == ["--max-attempts", "2", "--max-cost", "3.0", "--network"]
 
 
+def test_a_plan_run_passes_its_flow_to_each_task(db):
+    from argparse import Namespace
+    from factory.cli import _child_args
+
+    args = _child_args(Namespace(base=None, model=None, skip_gates=None, max_cost=None, flow="careful",
+                                 max_attempts=2, network=False, no_sandbox=False, no_pr=False,
+                                 full_e2e=False, notify=False))
+    plan = scheduler.Plan(name="demo", tasks=IDS, parallel=3, child_args=args)
+    _, launched, _ = _run(db, plan)
+    for _, child in launched:
+        assert child == ["--flow", "careful", "--max-attempts", "2"]
+
+
 def test_default_launch_runs_quiet_child_factory(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setattr(scheduler.subprocess, "Popen", lambda argv, **kw: seen.update(argv=argv, kw=kw))

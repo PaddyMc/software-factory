@@ -2,6 +2,7 @@
 
 tasks: one row per contract that has entered the factory.
 runs:  one row per role invocation (plan/build/review/verify/pr, and resolve/ci/human_review), with its report.
+       A run's role stays its kind; `flow` and `step` name the flow and the flow step it ran under.
 """
 
 from __future__ import annotations
@@ -58,7 +59,8 @@ MIGRATIONS = {
               ("reviews_addressed", "INTEGER")],
     "runs": [("steps", "INTEGER NOT NULL DEFAULT 0"), ("tokens_in", "INTEGER NOT NULL DEFAULT 0"),
              ("tokens_out", "INTEGER NOT NULL DEFAULT 0"), ("cost_usd", "REAL"),
-             ("refused", "INTEGER NOT NULL DEFAULT 0"), ("transcript", "TEXT")],
+             ("refused", "INTEGER NOT NULL DEFAULT 0"), ("transcript", "TEXT"),
+             ("flow", "TEXT"), ("step", "TEXT")],
 }
 
 
@@ -132,12 +134,13 @@ class DB:
 
     # ------------------------------------------------------------ runs
 
-    def start_run(self, task_id: str, role: str, attempt: int, model: str | None = None) -> int:
+    def start_run(self, task_id: str, role: str, attempt: int, model: str | None = None,
+                  flow: str | None = None, step: str | None = None) -> int:
         if role not in ROLES:
             raise ValueError(f"unknown role {role!r}")
         cur = self.conn.execute(
-            "INSERT INTO runs (task_id, role, attempt, model, started_at) VALUES (?, ?, ?, ?, ?)",
-            (task_id, role, attempt, model, now()))
+            "INSERT INTO runs (task_id, role, attempt, model, flow, step, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (task_id, role, attempt, model, flow, step, now()))
         self.conn.commit()
         return cur.lastrowid
 

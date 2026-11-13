@@ -74,7 +74,7 @@ def _child_args(a) -> list[str]:
     """Flags each task's child `factory run` inherits from the plan run's command line."""
     out = []
     for flag, value in (("--base", a.base), ("--model", a.model), ("--skip-gates", a.skip_gates or None),
-                        ("--max-cost", a.max_cost)):
+                        ("--max-cost", a.max_cost), ("--flow", a.flow)):
         if value is not None:
             out += [flag, str(value)]
     out += ["--max-attempts", str(a.max_attempts)]
@@ -90,7 +90,7 @@ def cmd_run_plan(a, plan: Path, tasks: dict) -> int:
     import os
 
     from . import scheduler
-    from .agents import missing_keys, role_models
+    from .agents import flow_models, missing_keys
 
     root = repo_root()
     rel = str(plan.relative_to(root))
@@ -107,7 +107,11 @@ def cmd_run_plan(a, plan: Path, tasks: dict) -> int:
         print("contracts invalid:\n  " + "\n  ".join(errs), file=sys.stderr)
         return 1
     cfg = C.load(root)
-    models = role_models(root, a.model, cfg)
+    flow = cfg.flows.get(a.flow or cfg.flow)
+    if flow is None:
+        print(f"unknown flow {a.flow} (flows: {', '.join(sorted(cfg.flows))})", file=sys.stderr)
+        return 1
+    models = flow_models(root, flow, cfg, a.model)
     missing = missing_keys(models, os.environ)
     if missing:
         print(f"set {', '.join(missing)} first", file=sys.stderr)
@@ -128,12 +132,16 @@ def cmd_run_plan(a, plan: Path, tasks: dict) -> int:
 def cmd_run_one(a) -> int:
     import os
 
-    from .agents import LangChainRoles, missing_keys, role_models
+    from .agents import LangChainRoles, flow_models, missing_keys
     from .pipeline import KINDS, Options, Pipeline, PipelineError, create_worktree, git
 
     root = repo_root()
     home = factory_home()
     cfg = C.load(root)
+    flow = cfg.flows.get(a.flow or cfg.flow)
+    if flow is None:
+        print(f"unknown flow {a.flow} (flows: {', '.join(sorted(cfg.flows))})", file=sys.stderr)
+        return 1
     task = contracts.find_task(root, a.task_id)
     errs = contracts.validate_tasks([task], contracts.load_all(root))
     if errs:
@@ -142,7 +150,7 @@ def cmd_run_one(a) -> int:
     if (why := G.manual_reason(task, cfg)) and "verification" not in a.skip_gates:
         print(f"{task.id}: {why}", file=sys.stderr)
         return 1
-    models = role_models(root, a.model, cfg)
+    models = flow_models(root, flow, cfg, a.model)
     missing = missing_keys(models, os.environ)
     if missing:
         print(f"set {', '.join(missing)} first (models: {', '.join(f'{r}={m}' for r, m in models.items())})",
@@ -225,7 +233,7 @@ def cmd_run_one(a) -> int:
     opts = Options(base_ref=pr_base, max_attempts=a.max_attempts, open_pr=not a.no_pr,
                    skip_gates=tuple(x for x in a.skip_gates.split(",") if x), full_e2e=a.full_e2e,
                    max_cost=a.max_cost, config=cfg, stacked_on=tuple(f"{d['id']} ({d['pr_url']})" for d in deps),
-                   resolution=resolution, rework=rework)
+                   resolution=resolution, rework=rework, flow=flow)
     log = RunLog(log_path(home, task.id), echo=not a.quiet)
     log("run", f"=== {task.id}: worktree {wt} on factory/{task.id} from {pr_base} ({base_sha[:12]})"
                + (f", stacked on {', '.join(stacked)}" if stacked else "")
@@ -527,7 +535,8 @@ def cmd_top(a) -> int:
 def cmd_trace(a) -> int:
     db = _db()
     runs = [r for r in db.runs(a.task_id) if r["transcript"]
-            and (not a.role or r["role"] == a.role) and (a.attempt is None or r["attempt"] == a.attempt)]
+            and (not a.role or r["role"] == a.role) and (a.attempt is None or r["attempt"] == a.attempt)
+            and (not a.step or r["step"] == a.step)]
     if not runs:
         print(f"no transcripts for {a.task_id}" + (f" role={a.role}" if a.role else ""), file=sys.stderr)
         return 1
@@ -542,7 +551,8 @@ def cmd_trace(a) -> int:
 def cmd_transcript(a) -> int:
     db = _db()
     runs = [r for r in db.runs(a.task_id) if r["transcript"]
-            and (not a.role or r["role"] == a.role) and (a.attempt is None or r["attempt"] == a.attempt)]
+            and (not a.role or r["role"] == a.role) and (a.attempt is None or r["attempt"] == a.attempt)
+            and (not a.step or r["step"] == a.step)]
     if not runs:
         print(f"no transcripts for {a.task_id}" + (f" role={a.role}" if a.role else ""), file=sys.stderr)
         return 1
@@ -635,10 +645,13 @@ def cmd_show(a) -> int:
     for r in db.runs(a.task_id):
         if a.role and r["role"] != a.role:
             continue
+        if a.step and r["step"] != a.step:
+            continue
         stats = f"{r['steps']} steps, {r['tokens_in']} in / {r['tokens_out']} out"
         stats += f", ${r['cost_usd']:.4f}" if r["cost_usd"] is not None else ""
         stats += f", {r['refused']} tool calls refused" if r["refused"] else ""
-        print(f"\n## {r['role']} #{r['attempt']} — {r['outcome']} ({r['model'] or '-'}, {r['started_at']}; {stats})")
+        print(f"\n## {r['role']} #{r['attempt']} — {r['outcome']} (flow {r['flow']}, step {r['step']}, "
+              f"{r['model'] or '-'}, {r['started_at']}; {stats})")
         if r["transcript"]:
             print(f"transcript: factory transcript {a.task_id} --role {r['role']} --attempt {r['attempt']}")
         print()
@@ -740,17 +753,31 @@ def cmd_init(a) -> int:
 
 
 def cmd_prompt(a) -> int:
-    """A role's prompt as the agents get it: the repository's override, else the one shipped with the factory."""
-    from .agents import ROLE_FILES, prompt_source, role_model
+    """A role's or a flow step's prompt as the agents get it: the repository's override, else the shipped one."""
+    from .agents import ROLE_FILES, load_step, prompt_source, role_model, step_limit, step_model, step_prompt_source
 
     root = repo_root()
+    cfg = C.load(root)
+    flow = cfg.flows.get(a.flow or cfg.flow)
+    if flow is None:
+        print(f"unknown flow {a.flow} (flows: {', '.join(sorted(cfg.flows))})", file=sys.stderr)
+        return 2
     role = next((r for r, f in ROLE_FILES.items() if a.role in (r, f)), None)
-    if role is None:
+    if role is not None:
+        src = prompt_source(root, role)
+        print(f"# {src} · model {role_model(root, role, cfg)}\n")
+        print(src.read_text().rstrip())
+        return 0
+    step = next((s for s in flow.steps if s.name == a.role and s.kind != "gates"), None)
+    if step is None:
         print(f"unknown role {a.role}; one of {', '.join(ROLE_FILES)}", file=sys.stderr)
         return 2
-    src = prompt_source(root, role)
-    print(f"# {src} · model {role_model(root, role, C.load(root))}\n")
+    src = step_prompt_source(root, step)
+    meta, instructions = load_step(root, step)
+    print(f"# {src} · model {step_model(root, step, cfg)} · max {step_limit(step, cfg, meta)} steps\n")
     print(src.read_text().rstrip())
+    if step.kind == "review" and "VERDICT:" not in instructions:
+        print(f"⚠ {step.name}'s prompt has no VERDICT: line; every review will count as CHANGES", file=sys.stderr)
     return 0
 
 
@@ -801,8 +828,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--no-session-log", action="store_true", help="don't require session logs")
     s.set_defaults(fn=cmd_init)
 
-    s = sub.add_parser("prompt", help="print a role's prompt (the repository's override, else the shipped one)")
-    s.add_argument("role", help="plan | build | review | verify (or planner, builder, …)")
+    s = sub.add_parser("prompt", help="print a role's or flow step's prompt (the repository's override, else the shipped one)")
+    s.add_argument("role", help="plan | build | review | verify (or planner, builder, …), or a step of --flow")
+    s.add_argument("--flow", help="the flow a step name belongs to (default: the config's `flow`)")
     s.set_defaults(fn=cmd_prompt)
 
     s = sub.add_parser("config", help="print the effective project settings")
@@ -828,6 +856,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--force", action="store_true", help="run despite its status or dependencies without PRs")
     s.add_argument("--quiet", action="store_true", help="log to file only (no terminal echo)")
     s.add_argument("--notify", action="store_true", help="desktop notification (notify-send) when the run ends")
+    s.add_argument("--flow", help="the agent flow to run (a key of `flows`; default: the config's `flow`)")
     s.set_defaults(fn=cmd_run)
 
     s = sub.add_parser("top", help="live dashboard: plans with their task counters, running tasks, recent events")
@@ -841,6 +870,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("task_id")
     s.add_argument("--role", choices=("plan", "build", "review", "verify"))
     s.add_argument("--attempt", type=int)
+    s.add_argument("--step", help="only runs of this flow step")
     s.add_argument("--all", action="store_true", help="every matching run, not just the latest")
     s.set_defaults(fn=cmd_trace)
 
@@ -848,6 +878,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("task_id")
     s.add_argument("--role", choices=("plan", "build", "review", "verify"))
     s.add_argument("--attempt", type=int)
+    s.add_argument("--step", help="only runs of this flow step")
     s.add_argument("--all", action="store_true", help="every matching run, not just the latest")
     s.add_argument("--full", action="store_true", help="do not truncate long messages / tool output")
     s.set_defaults(fn=cmd_transcript)
@@ -873,6 +904,7 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("show", help="a task's runs and reports")
     s.add_argument("task_id")
     s.add_argument("--role", choices=("plan", "build", "resolve", "ci", "human_review", "review", "verify", "pr"))
+    s.add_argument("--step", help="only runs of this flow step")
     s.set_defaults(fn=cmd_show)
 
     s = sub.add_parser("gates", help="run the deterministic gates for a ref (no agents)")
