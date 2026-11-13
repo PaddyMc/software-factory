@@ -25,6 +25,7 @@ from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
 
+from . import flows
 from . import gates as G
 from . import github
 from .agents import Ctx, Roles
@@ -133,6 +134,7 @@ class Options:
     stacked_on: tuple[str, ...] = ()       # open dependency PRs this task is built on ("task-t01 (url)")
     resolution: Resolution | None = None   # resolve this PR's conflicts instead of building from the plan
     rework: Rework | None = None           # rework this open PR's head (its failing CI) instead of building from the plan
+    flow: flows.Flow = flows.DEFAULT       # the agent flow a fresh build runs (rework entries are fixed)
 
 
 class State(TypedDict, total=False):
@@ -143,7 +145,7 @@ class State(TypedDict, total=False):
     verdict: str
     gates_ok: bool
     gates: str
-    review: str
+    reviews: dict[str, str]  # review step name -> its report (one PR-body block per review step)
     verify: str
     outcome: str
     failure_sig: str        # identical gate failures on consecutive attempts => stop (no progress)
@@ -248,6 +250,13 @@ class Pipeline:
         self.run_id: int | None = None
         # A build that leaves HEAD here changed nothing: the base, or the PR head being reworked.
         self.start_sha = opts.rework.old_candidate if opts.rework else base_sha
+        # The flow's shape: [plan]? build+ (review | gates)* [verify]? (validated in flows.py).
+        steps = opts.flow.steps
+        self.plan_step = steps[0] if steps[0].kind == "plan" else None
+        self.build_steps = tuple(s for s in steps if s.kind == "build")
+        self.verify_step = steps[-1] if steps[-1].kind == "verify" else None
+        first_post = (1 if self.plan_step else 0) + len(self.build_steps)
+        self.post_steps = steps[first_post: len(steps) - (1 if self.verify_step else 0)]
 
     # ------------------------------------------------------------ helpers
 
@@ -270,8 +279,8 @@ class Pipeline:
 
     def _progress(self, steps: int, max_steps: int, tin: int, tout: int, cost: float | None = None,
                   refused: int = 0) -> None:
-        role = self.db.conn.execute("SELECT role, attempt FROM runs WHERE id=?", (self.run_id,)).fetchone()
-        label = f"{role['role']}#{role['attempt']}" if role else "?"
+        run = self.db.conn.execute("SELECT role, step, attempt FROM runs WHERE id=?", (self.run_id,)).fetchone()
+        label = f"{run['step'] or run['role']}#{run['attempt']}" if run else "?"
         text = f"{label} step {steps}/{max_steps} · {tin // 1000}k in / {tout // 1000}k out"
         text += f" · ${cost:.3f}" if cost is not None else ""
         text += f" · {refused} refused" if refused else ""
@@ -281,9 +290,10 @@ class Pipeline:
             if spent > self.opts.max_cost:
                 raise PipelineError(f"cost limit exceeded: ${spent:.2f} > ${self.opts.max_cost:.2f}")
 
-    def role(self, role: str, status: str, attempt: int, fn):
+    def role(self, role: str, status: str, attempt: int, fn, flow: str | None = None, step: str | None = None):
         self.db.update(self.task.id, status=status, progress=f"{role}#{attempt} starting")
-        run_id = self.db.start_run(self.task.id, role, attempt)
+        run_id = self.db.start_run(self.task.id, role, attempt,
+                                   flow=flow or self.opts.flow.name, step=step or role)
         self.run_id = run_id
         if self.transcript_dir is not None:
             self.transcript_dir.mkdir(parents=True, exist_ok=True)
@@ -309,7 +319,9 @@ class Pipeline:
     # ------------------------------------------------------------ nodes
 
     def plan(self, s: State) -> State:
-        out = self.role("plan", "planning", 0, lambda: (o := self.roles.plan(self.ctx(s)), "done", o.text, None))
+        step = self.plan_step
+        out = self.role("plan", "planning", 0,
+                        lambda: (o := self.roles.step(step, self.ctx(s)), "done", o.text, None), step=step.name)
         return {"plan": out.text, "attempt": 0, "feedback": ""}
 
     def _commit(self, out, message: str):
@@ -333,7 +345,8 @@ class Pipeline:
             return {"plan": plan, "attempt": 0, "sha": sha, "verdict": "APPROVE"}
         self.db.update(self.task.id, attempts=1)
         ctx = self.ctx({**s, "plan": plan, "attempt": 1}, resolution=r.brief)
-        self.role("resolve", "building", 1, lambda: self._commit(self.roles.resolve(ctx), message))
+        self.role("resolve", "building", 1,
+                  lambda: self._commit(self.roles.resolve(ctx, self.build_steps[0]), message))
         sha = git(self.wt, "rev-parse", "HEAD")
         if sha == self.base_sha:
             return {"plan": plan, "attempt": 1, "sha": sha, "verdict": "CHANGES",
@@ -347,19 +360,26 @@ class Pipeline:
         self.role(r.kind, "building", 0, lambda: (None, KINDS[r.kind].entry_outcome, r.brief, r.old_candidate))
         return {"plan": self.db.last_report(self.task.id, "plan", "done"), "attempt": 0, "feedback": r.brief}
 
-    def build(self, s: State) -> State:
+    def attempt(self, s: State) -> State:
+        """One attempt: every build step of the flow in order, each committing what it leaves."""
         attempt = s.get("attempt", 0) + 1
         self.db.update(self.task.id, attempts=attempt)
         feedback, r = s.get("feedback", ""), self.opts.rework
         if r and r.brief not in feedback:          # the brief stays in view on every attempt
             feedback = f"{feedback}\n\n{r.brief}".strip()
+        plan = s.get("plan", "")
+        if not plan and self.plan_step is None:
+            plan = "(This flow has no plan step: plan from the contract.)"
+        message = (f"factory({self.task.id}): {self.task.goal[:60]} "
+                   + (KINDS[r.kind].commit_suffix(attempt) if r else f"(attempt {attempt})"))
 
-        def run():
-            out = self.roles.build(self.ctx({**s, "attempt": attempt, "feedback": feedback}))
-            return self._commit(out, f"factory({self.task.id}): {self.task.goal[:60]} "
-                                     + (KINDS[r.kind].commit_suffix(attempt) if r else f"(attempt {attempt})"))
-
-        out = self.role("build", "building", attempt, run)
+        earlier, out = [], None
+        for step in self.build_steps:
+            ctx = self.ctx({**s, "plan": plan, "attempt": attempt, "feedback": feedback}, earlier=tuple(earlier))
+            out = self.role("build", "building", attempt,
+                            lambda step=step, ctx=ctx: self._commit(self.roles.step(step, ctx), message),
+                            step=step.name)
+            earlier.append(out.text)
         sha = git(self.wt, "rev-parse", "HEAD")
         if sha == self.start_sha:
             if r and r.kind == "human_review" and attempt == 1:
@@ -369,24 +389,32 @@ class Pipeline:
                     "feedback": KINDS[r.kind].no_change
                     if r else "The previous attempt produced no changes. Implement the task."}
         self.db.update(self.task.id, candidate_sha=sha)
-        return {"attempt": attempt, "sha": sha}
+        return {"attempt": attempt, "sha": sha, "reviews": {}}
 
-    def review(self, s: State) -> State:
-        if s["sha"] == self.start_sha:
-            return {"verdict": "CHANGES"}
-        extra = {"review_brief": self.opts.rework.brief} if (self.opts.rework and self.opts.rework.kind == "human_review") else {}
-        out = self.role("review", "reviewing", s["attempt"],
-                        lambda: (o := self.roles.review(self.ctx(s, **extra)), o.verdict, o.text, s["sha"]))
-        fb = "" if out.verdict == "APPROVE" else f"Reviewer requested changes:\n\n{out.text}"
-        return {"verdict": out.verdict, "review": out.text, "feedback": fb}
+    def review_step(self, step: flows.Step):
+        """The graph node of one review step: the first CHANGES ends the attempt."""
+        def node(s: State) -> State:
+            if s["sha"] == self.start_sha:
+                return {"verdict": "CHANGES"}
+            extra = {"review_brief": self.opts.rework.brief} \
+                if (self.opts.rework and self.opts.rework.kind == "human_review") else {}
+            out = self.role("review", "reviewing", s["attempt"],
+                            lambda: (o := self.roles.step(step, self.ctx(s, **extra)), o.verdict, o.text, s["sha"]),
+                            step=step.name)
+            who = "Reviewer" if step.name == step.kind else f"Reviewer `{step.name}`"
+            fb = "" if out.verdict == "APPROVE" else f"{who} requested changes:\n\n{out.text}"
+            return {"verdict": out.verdict, "reviews": {**s.get("reviews", {}), step.name: out.text},
+                    "feedback": fb}
+        return node
 
-    def verify(self, s: State) -> State:
+    def gates(self, s: State) -> State:
+        """The gates step (role verify, step gates): any failure ends the attempt."""
         def run():
             gs = G.run_gates(self.task, self.wt, self.base_sha, s["sha"], self.sandbox, self.opts.config,
                              skip=self.opts.skip_gates, full_e2e=self.opts.full_e2e)
             return gs, "pass" if G.passed(gs) else "fail", G.table(gs), s["sha"]
 
-        gs = self.role("verify", "verifying", s["attempt"], run)
+        gs = self.role("verify", "verifying", s["attempt"], run, step="gates")
         table = G.table(gs)
         for g in gs:
             self._event("gate", f"{g.mark:<4} {g.name}: {clip(g.detail, 200)}")
@@ -399,9 +427,14 @@ class Pipeline:
                 self._event("stage", "no progress: the same gates failed with the same output twice in a row")
             return {"gates_ok": False, "gates": table, "failure_sig": sig, "stuck": stuck,
                     "feedback": f"Verification gates failed: {', '.join(g.name for g in bad)}\n\n{failed}"}
+        return {"gates_ok": True, "gates": table}
+
+    def verify(self, s: State) -> State:
+        step = self.verify_step
         out = self.role("verify", "verifying", s["attempt"],
-                        lambda: (o := self.roles.verify(self.ctx(s, gates=table)), "report", o.text, s["sha"]))
-        return {"gates_ok": True, "gates": table, "verify": out.text}
+                        lambda: (o := self.roles.step(step, self.ctx(s, gates=s["gates"])), "report", o.text, s["sha"]),
+                        step=step.name)
+        return {"verify": out.text}
 
     def pr(self, s: State) -> State:
         if not self.opts.open_pr:
@@ -474,10 +507,13 @@ class Pipeline:
 
     def pr_body(self, s: State) -> str:
         t = self.task
+        flow = self.opts.flow
+        reviews = s.get("reviews", {})
         return "\n\n".join([
             f"Factory task **`{t.id}`** from `{t.plan}` — {t.goal}",
             f"Candidate `{s['sha']}` on base `{self.opts.base_ref}` (`{self.base_sha[:12]}`), "
             f"{s['attempt']} build attempt(s). Gates passed; merging is the human gate.",
+            f"**Flow** `{flow.name}`: " + ", ".join(step.name for step in flow.steps),
             *([f"**Stacked** on {', '.join(self.opts.stacked_on)}: merge those first. This PR shows only "
                f"`{t.id}`'s changes; after they merge, `factory status --refresh` moves it onto the trunk."]
               if self.opts.stacked_on else []),
@@ -485,27 +521,58 @@ class Pipeline:
                else "none left") + f". Previous candidate `{r.old_candidate[:12]}`."]
               if (r := self.opts.resolution) else []),
             *([KINDS[r.kind].body_line(r)] if (r := self.opts.rework) else []),
-            "## Verifier report\n\n" + s.get("verify", ""),
+            *(["## Verifier report\n\n" + s.get("verify", "")] if self.verify_step else []),
             "## Gates\n\n" + s.get("gates", ""),
-            "<details><summary>Reviewer report</summary>\n\n" + s.get("review", "") + "\n\n</details>",
-            "<details><summary>Plan</summary>\n\n" + s.get("plan", "") + "\n\n</details>",
+            *[f"<details><summary>Reviewer report ({step.name})</summary>\n\n"
+              + reviews.get(step.name, "") + "\n\n</details>"
+              for step in flow.steps if step.kind == "review"],
+            *(["<details><summary>Plan</summary>\n\n" + s.get("plan", "") + "\n\n</details>"]
+              if self.plan_step else []),
         ])
 
     # ------------------------------------------------------------ graph
 
     def graph(self):
         g = StateGraph(State)
-        for name in ("plan", "resolve", "rework", "build", "review", "verify", "pr", "answer", "fail"):
+        # The post-build steps (review steps and the gates step, in flow order) get one node each;
+        # the review nodes are prefixed so a custom step name can never collide with a fixed one.
+        post = [f"review-{s.name}" if s.kind == "review" else "gates" for s in self.post_steps]
+        after = dict(zip([s.name for s in self.post_steps], post))
+        for name in ("resolve", "rework", "attempt", "gates", "pr", "answer", "fail"):
             g.add_node(name, getattr(self, name))
-        g.set_entry_point("resolve" if self.opts.resolution else "rework" if self.opts.rework else "plan")
-        g.add_edge("plan", "build")
-        g.add_edge("rework", "build")
-        g.add_conditional_edges("build", lambda s: "answer" if s.get("answer") is not None else "review")
+        if self.plan_step:
+            g.add_node("plan", self.plan)
+            g.add_edge("plan", "attempt")
+        for step in self.post_steps:
+            if step.kind == "review":
+                g.add_node(after[step.name], self.review_step(step))
+        if self.verify_step:
+            g.add_node("verify", self.verify)
+            g.add_edge("verify", "pr")
+        g.set_entry_point("resolve" if self.opts.resolution else "rework" if self.opts.rework
+                          else "plan" if self.plan_step else "attempt")
+        g.add_edge("rework", "attempt")
         more = lambda s: s["attempt"] < self.opts.max_attempts and not s.get("stuck")
-        g.add_conditional_edges("resolve", lambda s: "verify" if s["verdict"] == "APPROVE" else "review" if not s["verdict"]
-                                else ("build" if more(s) else "fail"))
-        g.add_conditional_edges("review", lambda s: "verify" if s["verdict"] == "APPROVE" else ("build" if more(s) else "fail"))
-        g.add_conditional_edges("verify", lambda s: "pr" if s["gates_ok"] else ("build" if more(s) else "fail"))
+        g.add_conditional_edges("attempt", lambda s: "answer" if s.get("answer") is not None
+                                else ("attempt" if more(s) else "fail") if s["sha"] == self.start_sha
+                                else post[0])
+        g.add_conditional_edges("resolve", lambda s: "gates" if s["verdict"] == "APPROVE"
+                                else post[0] if not s["verdict"]
+                                else ("attempt" if more(s) else "fail"))
+        # A flow may put the gates step before some review steps; on pass the gates node routes on
+        # to the next post step (or verify/pr when it is last), never past the remaining reviewers.
+        gates_at = next(i for i, s in enumerate(self.post_steps) if s.kind == "gates")
+        next_after_gates = post[gates_at + 1] if gates_at + 1 < len(post) else (
+            "verify" if self.verify_step else "pr")
+        g.add_conditional_edges("gates", lambda s, nxt=next_after_gates: nxt if s["gates_ok"]
+                                else ("attempt" if more(s) else "fail"))
+        for i, step in enumerate(self.post_steps):
+            if step.kind != "review":
+                continue
+            nxt = post[i + 1] if i + 1 < len(post) else ("verify" if self.verify_step else "pr")
+            g.add_conditional_edges(after[step.name],
+                                    lambda s, nxt=nxt: nxt if s["verdict"] == "APPROVE"
+                                    else ("attempt" if more(s) else "fail"))
         g.add_edge("answer", END)
         g.add_edge("pr", END)
         g.add_edge("fail", END)
@@ -513,7 +580,8 @@ class Pipeline:
 
     def run(self) -> State:
         try:
-            return self.graph().invoke({}, config={"recursion_limit": 8 * self.opts.max_attempts + 10})
+            return self.graph().invoke(
+                {}, config={"recursion_limit": (8 + len(self.opts.flow.steps)) * self.opts.max_attempts + 10})
         except Exception as e:
             self.db.update(self.task.id, status="failed", progress=None, note=f"error: {type(e).__name__}: {e}"[:2000])
             self._event("stage", f"failed: {clip(f'{type(e).__name__}: {e}', 300)}")
