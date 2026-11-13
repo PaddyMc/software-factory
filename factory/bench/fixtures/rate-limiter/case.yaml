@@ -1,0 +1,22 @@
+title: Implement the token-bucket rate limiter
+kind: algorithm
+requires: [python3]
+config:
+  unit_tests: ["python3 -m unittest -q"]
+  dependency_sources: []
+  sandbox: {ro_binds: [], rw_binds: [], path: [], hide: []}
+contract:
+  id: rate-limiter-t01
+  goal: "Implement ratelimit.limiter.RateLimiter as a token bucket with capacity, refill rate and an injectable clock"
+  spec_refs: ["docs/plans/rate-limiter.md"]
+  depends_on: []
+  non_goals: ["Renaming the public class or methods, thread safety or locking, persistence across processes, or adding third-party dependencies"]
+  acceptance:
+    - "ratelimit.limiter.RateLimiter(capacity, refill_rate, clock=time.monotonic) starts with a full bucket; clock() takes no arguments and returns seconds as a float"
+    - "try_acquire(n=1) first refills to min(capacity, tokens + elapsed * refill_rate), then grants and consumes n tokens when n <= capacity and n <= tokens, and otherwise returns False consuming nothing"
+    - "Requests larger than capacity never succeed and the bucket never refills beyond capacity"
+    - "tests/test_bucket.py adds visible unittest coverage with a fake clock for bursts, fractional refills and oversized requests"
+  verification: ["python3 -m unittest -v tests.test_bucket"]
+  risk: low
+hidden:
+  - python3 -m unittest -v bench_hidden.test_rate
