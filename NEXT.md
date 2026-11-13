@@ -11,7 +11,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 4 | Learn from feedback. Planned as a knowledge crew: [wiki](docs/plans/wiki.md) | medium | 1, 3 |
 | 5 | Steer a running agent | small | — |
 | 6 | Runs need this machine | large | a shared board |
-| 7 | Reshape the agent flow. Planned: [agent-flows](docs/plans/agent-flows.md) | medium | 1 |
+| ✓ | Reshape the agent flow. Done: [Agent flows](docs/architecture.md#agent-flows) | — | — |
 | 8 | Compare flows and setups. Planned: [bench](docs/plans/bench.md) | medium | 7 |
 
 ## 1. Act on human PR review comments
