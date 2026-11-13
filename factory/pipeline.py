@@ -559,14 +559,20 @@ class Pipeline:
         g.add_conditional_edges("resolve", lambda s: "gates" if s["verdict"] == "APPROVE"
                                 else post[0] if not s["verdict"]
                                 else ("attempt" if more(s) else "fail"))
+        # A flow may put the gates step before some review steps; on pass the gates node routes on
+        # to the next post step (or verify/pr when it is last), never past the remaining reviewers.
+        gates_at = next(i for i, s in enumerate(self.post_steps) if s.kind == "gates")
+        next_after_gates = post[gates_at + 1] if gates_at + 1 < len(post) else (
+            "verify" if self.verify_step else "pr")
+        g.add_conditional_edges("gates", lambda s, nxt=next_after_gates: nxt if s["gates_ok"]
+                                else ("attempt" if more(s) else "fail"))
         for i, step in enumerate(self.post_steps):
             if step.kind != "review":
                 continue
+            nxt = post[i + 1] if i + 1 < len(post) else ("verify" if self.verify_step else "pr")
             g.add_conditional_edges(after[step.name],
-                                    lambda s, i=i: post[i + 1] if s["verdict"] == "APPROVE"
+                                    lambda s, nxt=nxt: nxt if s["verdict"] == "APPROVE"
                                     else ("attempt" if more(s) else "fail"))
-        g.add_conditional_edges("gates", lambda s: ("verify" if self.verify_step else "pr") if s["gates_ok"]
-                                else ("attempt" if more(s) else "fail"))
         g.add_edge("answer", END)
         g.add_edge("pr", END)
         g.add_edge("fail", END)
@@ -574,7 +580,8 @@ class Pipeline:
 
     def run(self) -> State:
         try:
-            return self.graph().invoke({}, config={"recursion_limit": 8 * self.opts.max_attempts + 10})
+            return self.graph().invoke(
+                {}, config={"recursion_limit": (8 + len(self.opts.flow.steps)) * self.opts.max_attempts + 10})
         except Exception as e:
             self.db.update(self.task.id, status="failed", progress=None, note=f"error: {type(e).__name__}: {e}"[:2000])
             self._event("stage", f"failed: {clip(f'{type(e).__name__}: {e}', 300)}")

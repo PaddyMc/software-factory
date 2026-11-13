@@ -1193,6 +1193,27 @@ def test_gates_before_review_skip_the_reviewers_when_gates_fail(factory_repo, ho
     assert "REVIEWER" not in {r for r, _ in calls}                   # a gates failure skips the reviewers
 
 
+def test_gates_first_flow_reviews_on_a_passing_build(factory_repo, home, fake_gh, monkeypatch):
+    _flow_config(factory_repo, "flow: gates-first\nflows:\n  gates-first:\n    - plan\n    - build\n"
+                               "    - gates\n    - review\n    - verify\n")
+    calls = _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    assert row["status"] == "pr_open" and row["attempts"] == 1
+    runs = [(r["role"], r["step"], r["attempt"], r["outcome"]) for r in db.runs("demo-t01")]
+    assert runs == [("plan", "plan", 0, "done"),
+                    ("build", "build", 1, "committed"),
+                    ("verify", "gates", 1, "pass"),
+                    ("review", "review", 1, "APPROVE"),       # reviewers still run after the gates pass
+                    ("verify", "verify", 1, "report"),
+                    ("pr", "pr", 1, "opened")]
+    assert calls.count(("REVIEWER", 0)) == 1
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    assert "Reviewer report (review)" in body and "VERDICT: APPROVE" in body
+
+
 def test_two_build_steps_both_run_each_attempt(factory_repo, home, fake_gh, monkeypatch):
     _flow_config(factory_repo, "flow: test-first\nflows:\n  test-first:\n    - plan\n"
                                "    - {name: tests, kind: build, model: fake:tests}\n    - build\n"
