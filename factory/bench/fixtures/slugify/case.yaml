@@ -1,0 +1,22 @@
+title: Slugify titles for URLs
+kind: feature
+requires: [python3]
+config:
+  unit_tests: ["python3 -m unittest -q"]
+  dependency_sources: []
+  sandbox: {ro_binds: [], rw_binds: [], path: [], hide: []}
+contract:
+  id: slugify-t01
+  goal: "Add textkit.slug.slugify(title, max_length=64) to turn a title into a URL slug"
+  spec_refs: ["docs/plans/slugify.md"]
+  depends_on: []
+  non_goals: ["Changing normalize(text) or adding third-party dependencies"]
+  acceptance:
+    - "textkit.slug.slugify(title, max_length=64) lowercases titles, folds accents to ASCII, collapses runs of other characters to one hyphen, and trims leading and trailing hyphens"
+    - "Empty and all-symbol titles return an empty string; for example, 'Café au Beurre' becomes 'cafe-au-beurre' and 'Hello, World!!!' becomes 'hello-world'"
+    - "A slug longer than max_length keeps only complete hyphen-separated words that fit; if its first word is too long, that word is cut to max_length"
+    - "Add visible unittest coverage in tests/test_slugify.py while preserving normalize(text) and the existing test suite"
+  verification: ["python3 -m unittest -v tests.test_slugify"]
+  risk: low
+hidden:
+  - python3 -m unittest -v bench_hidden.test_slugify
