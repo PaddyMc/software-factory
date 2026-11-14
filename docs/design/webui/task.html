@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bench-t04 · software-factory</title>
+<link rel="stylesheet" href="../../../factory/web/static/app.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="board.html">factory <span>/ software-factory</span></a>
+    <nav class="nav" aria-label="Pages">
+      <a href="board.html">Board</a>
+      <a href="activity.html">Activity</a>
+    </nav>
+    <div class="top-end">
+      <span class="live-dot" data-state="live">Live, updated 21:40:12</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" data-refresh="2">
+
+  <div class="page-head">
+    <ol class="crumbs">
+      <li><a href="board.html">Board</a></li>
+      <li><a href="board.html#plan-bench">bench</a></li>
+      <li>bench-t04</li>
+    </ol>
+    <div class="task-id">
+      <span>bench-t04</span>
+      <span class="status s-failed"><i class="mark"></i>Failed</span>
+    </div>
+    <h1 class="task-goal">`factory bench report`, `compare`, `list` and `cases` read bench results: one run's scores per variant and case, two runs side by side, past runs, and the available cases.</h1>
+    <dl class="facts">
+      <div><dt>risk</dt><dd>low</dd></div>
+      <div><dt>builds</dt><dd>3</dd></div>
+      <div><dt>cost</dt><dd>$0.42</dd></div>
+      <div><dt>branch</dt><dd>factory/bench-t04</dd></div>
+      <div><dt>built on</dt><dd>factory/bench-t03 at 55d7f91</dd></div>
+    </dl>
+  </div>
+
+  <section class="next-step" aria-labelledby="h-next">
+    <div>
+      <h2 id="h-next">Read why it failed, then run it again.</h2>
+      <p>The gates failed three builds in a row, so the factory stopped. Running it again starts a fresh build; putting it on hold keeps plan runs from picking it up.</p>
+    </div>
+    <div class="acts">
+      <a class="btn btn-primary" href="run.html">Run again</a>
+      <form class="inline" method="post" action="#"><button class="btn" title="factory abandon bench-t04">Put on hold</button></form>
+      <form class="inline" method="post" action="#"><button class="btn btn-quiet" title="factory clean bench-t04">Remove worktree</button></form>
+    </div>
+    <pre>gates failed: unit_tests
+
+FAIL unit_tests: uv run pytest -q
+  tests/test_bench.py::test_compare_flags_changed_cases_models_and_prompts
+    AssertionError: 'prompt_sha differs: build' not in header
+  tests/test_bench.py::test_report_of_an_interrupted_run_counts_cells_not_run
+    KeyError: 'outcome'
+  2 failed, 341 passed in 48.21s</pre>
+  </section>
+
+  <div class="cols">
+
+    <section class="block contract" aria-labelledby="h-contract">
+      <h2 id="h-contract">Contract</h2>
+
+      <h3>Done when</h3>
+      <ul class="points">
+        <li>`factory bench report [RUN]` prints the table a run prints at its end, under a header naming the run, its cases, variants and repeats.</li>
+        <li>`factory bench compare RUN_A RUN_B` prints solved, false passes, mean cost and mean attempts as A to B for each variant in both runs.</li>
+        <li>`factory bench list` prints past runs newest first.</li>
+        <li>An unknown run id is refused with the known ids.</li>
+      </ul>
+
+      <h3>Not part of it</h3>
+      <ul class="points">
+        <li>Changing how a bench run runs or scores cells.</li>
+        <li>Editing documentation.</li>
+      </ul>
+
+      <h3>Checked with</h3>
+      <div class="cmd"><code>uv run pytest -q tests/test_bench.py::test_report_shows_solved_rates_per_variant_and_case</code><button class="copy" type="button">Copy</button></div>
+
+      <h3>Waits for</h3>
+      <ul class="deps">
+        <li><span class="status s-attn"><i class="mark"></i>CI failing</span><a class="mono" href="task.html">bench-t03</a></li>
+      </ul>
+
+      <h3>Needed by</h3>
+      <ul class="deps">
+        <li><span class="status s-waiting"><i class="mark"></i>Waiting</span><a class="mono" href="task.html">bench-t05</a></li>
+      </ul>
+
+      <h3>Reads</h3>
+      <ul class="points">
+        <li class="mono">docs/plans/bench.md#reading-results</li>
+        <li class="mono">docs/plans/bench.md#results</li>
+      </ul>
+    </section>
+
+    <section class="block" aria-labelledby="h-runs">
+      <h2 id="h-runs">Runs <span class="count">6</span> <span class="aside">Newest first</span></h2>
+      <p class="runs-head">Each line is one agent, or one pass of the gates.</p>
+      <ol class="runs">
+        <li class="run">
+          <div class="run-head"><span class="run-name">gates, build 3</span><span class="outcome o-bad">fail</span><span class="quiet">4 minutes ago, took 1m 02s</span></div>
+          <details open id="run-71-report">
+            <summary>Report</summary>
+            <pre class="report">FAIL unit_tests: uv run pytest -q (2 failed, 341 passed)
+PASS session_log: docs/sessions/2026-11-13-bench-t04.md
+PASS plan_untouched
+PASS conflict_markers</pre>
+          </details>
+        </li>
+        <li class="run">
+          <div class="run-head"><span class="run-name">review, build 3</span><span class="outcome o-good">APPROVE</span><span class="quiet">6 minutes ago, took 2m 14s</span></div>
+          <div class="run-facts">deepseek-v4-pro, 16 steps, 402k in, 6k out, $0.04</div>
+          <details id="run-70-report"><summary>Report</summary></details>
+          <a class="run-link" href="transcript.html">Read the transcript</a>
+        </li>
+        <li class="run">
+          <div class="run-head"><span class="run-name">build 3</span><span class="outcome o-good">committed</span><span class="quiet">9 minutes ago, took 3m 40s</span></div>
+          <div class="run-facts">kimi-k3.1-pro, 31 steps, 1,204k in, 14k out, $0.11</div>
+          <details id="run-69-report"><summary>Report</summary></details>
+          <a class="run-link" href="transcript.html">Read the transcript</a>
+        </li>
+        <li class="run">
+          <div class="run-head"><span class="run-name">gates, build 2</span><span class="outcome o-bad">fail</span><span class="quiet">13 minutes ago, took 58s</span></div>
+          <details id="run-68-report"><summary>Report</summary></details>
+        </li>
+        <li class="run">
+          <div class="run-head"><span class="run-name">build 2</span><span class="outcome o-good">committed</span><span class="quiet">18 minutes ago, took 4m 51s</span></div>
+          <div class="run-facts">kimi-k3.1-pro, 44 steps, 1,810k in, 19k out, $0.16</div>
+          <details id="run-67-report"><summary>Report</summary></details>
+          <a class="run-link" href="transcript.html">Read the transcript</a>
+        </li>
+        <li class="run">
+          <div class="run-head"><span class="run-name">plan</span><span class="outcome o-good">done</span><span class="quiet">31 minutes ago, took 1m 56s</span></div>
+          <div class="run-facts">glm-5.3, 14 steps, 211k in, 3k out, $0.02</div>
+          <details id="run-62-report"><summary>Report</summary></details>
+          <a class="run-link" href="transcript.html">Read the transcript</a>
+        </li>
+      </ol>
+    </section>
+  </div>
+
+  <section class="block" aria-labelledby="h-log">
+    <h2 id="h-log">Log <span class="aside">Last 200 lines, follows the run</span></h2>
+    <pre class="log" data-follow><span class="t">21:31:07</span> <span class="tag">[build#3]</span> says: The compare header needs the prompt_sha line per step. Fixing report.py.
+<span class="t">21:31:09</span> <span class="tag">[build#3]</span> → edit_file(path=factory/bench/report.py)
+<span class="t">21:31:09</span> <span class="tag">[build#3]</span> ← edit_file: ok
+<span class="t">21:31:12</span> <span class="tag">[build#3]</span> → run(command=uv run pytest -q tests/test_bench.py)
+<span class="t">21:32:01</span> <span class="tag">[build#3]</span> ← run: exit 0 22 passed in 41.02s
+<span class="t">21:32:04</span> <span class="tag">[build#3]</span> done: 31 steps, 1204113 tokens in / 14020 out, $0.1102
+<span class="t">21:32:04</span> <span class="tag">[stage]</span> build #3 → committed @ 7c1e0a4d2b91
+<span class="t">21:32:04</span> <span class="tag">[stage]</span> reviewing (review #3)
+<span class="t">21:34:18</span> <span class="tag">[stage]</span> review #3 → APPROVE @ 7c1e0a4d2b91
+<span class="t">21:34:18</span> <span class="tag">[stage]</span> verifying (verify #3)
+<span class="t">21:35:20</span> <span class="tag">[gate]</span> FAIL unit_tests: uv run pytest -q (2 failed, 341 passed)
+<span class="t">21:35:20</span> <span class="tag">[gate]</span> PASS session_log: docs/sessions/2026-11-13-bench-t04.md
+<span class="t">21:35:20</span> <span class="tag">[stage]</span> failed — gates failed: unit_tests</pre>
+  </section>
+
+  <footer class="foot">
+    <span>factory web 0.1.0</span>
+    <span>127.0.0.1:8765, this machine only</span>
+    <span>state in ~/.local/share/factory/software-factory</span>
+  </footer>
+</main>
+
+<div class="banner" hidden>Can't reach factory web. Retrying.</div>
+</body>
+</html>

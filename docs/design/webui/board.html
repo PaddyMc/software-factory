@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Board · software-factory</title>
+<link rel="stylesheet" href="../../../factory/web/static/app.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="board.html">factory <span>/ software-factory</span></a>
+    <nav class="nav" aria-label="Pages">
+      <a href="board.html" aria-current="page">Board</a>
+      <a href="activity.html">Activity</a>
+    </nav>
+    <div class="top-end">
+      <span class="live-dot" data-state="live">Live, updated 21:40:12</span>
+      <form class="inline" method="post" action="#"><button class="btn" title="factory sync">Load plans</button></form>
+      <form class="inline" method="post" action="#"><button class="btn" title="factory status --refresh">Check GitHub</button></form>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" data-refresh="2">
+
+  <div class="page-head">
+    <h1 class="lede">3 tasks need you. 1 is running.</h1>
+    <dl class="tally">
+      <div><dt>running</dt><dd>1</dd></div>
+      <div><dt>need you</dt><dd>3</dd></div>
+      <div><dt>ready</dt><dd>2</dd></div>
+      <div><dt>waiting</dt><dd>21</dd></div>
+      <div><dt>merged</dt><dd>12</dd></div>
+      <div><dt>spent</dt><dd>$18.42</dd></div>
+    </dl>
+  </div>
+
+  <section class="block" aria-labelledby="h-you">
+    <h2 id="h-you">Needs you <span class="count">3</span></h2>
+    <ul class="rows">
+      <li class="row">
+        <span class="status s-failed"><i class="mark"></i>Failed</span>
+        <a class="id" href="task.html">bench-t04</a>
+        <div class="what">
+          <div class="next">Read why it failed, then run it again.</div>
+          <div class="why">gates failed: unit_tests, 2 failed in tests/test_bench.py</div>
+        </div>
+        <div class="end"><div class="acts">
+          <a class="btn btn-primary" href="run.html">Run again</a>
+          <form class="inline" method="post" action="#"><button class="btn" title="factory abandon bench-t04">Put on hold</button></form>
+        </div></div>
+      </li>
+      <li class="row">
+        <span class="status s-attn"><i class="mark"></i>CI failing</span>
+        <a class="id" href="task.html">bench-t03</a>
+        <div class="what">
+          <div class="next">Run it again to fix the failing checks on its pull request.</div>
+          <div class="why">tests (incl. end-to-end pipeline with a scripted model) failed on 55d7f91</div>
+        </div>
+        <div class="end"><div class="acts">
+          <a class="btn btn-primary" href="run.html">Run again</a>
+          <a class="btn" href="https://github.com/PaddyMc/software-factory/pull/28">Open pull request</a>
+        </div></div>
+      </li>
+      <li class="row">
+        <span class="status s-pr"><i class="mark"></i>PR open</span>
+        <a class="id" href="task.html">agent-flows-t05</a>
+        <div class="what">
+          <div class="next">Review and merge pull request #26.</div>
+          <div class="why">Every gate passed. Merging is your approval.</div>
+        </div>
+        <div class="end"><div class="acts">
+          <a class="btn btn-primary" href="https://github.com/PaddyMc/software-factory/pull/26">Open pull request</a>
+        </div></div>
+      </li>
+    </ul>
+  </section>
+
+  <section class="block" aria-labelledby="h-run">
+    <h2 id="h-run">Running <span class="count">1</span></h2>
+    <ul class="rows">
+      <li class="row">
+        <span class="status s-live"><i class="mark"></i>Building</span>
+        <a class="id" href="task.html">measure-t01</a>
+        <div class="what">
+          <div class="goal">Every agent run records a prompt version: a hash of its system prompt without the contract and the date</div>
+        </div>
+        <div class="end">
+          <span class="num quiet">12m 04s</span>
+          <span class="num cost">$0.57</span>
+          <div class="acts"><form class="inline" method="post" action="#"><button class="btn btn-danger" title="factory stop measure-t01">Stop</button></form></div>
+        </div>
+        <div class="now">
+          <span>build 1, step 14 of 120</span>
+          <progress class="meter" value="14" max="120" aria-label="14 of 120 steps"></progress>
+          <span class="doing">run(command=uv run pytest -q tests/test_stats.py)</span>
+          <span>quiet 8s</span>
+        </div>
+      </li>
+    </ul>
+  </section>
+
+  <section class="block" aria-labelledby="h-plans">
+    <h2 id="h-plans">Plans <span class="count">7</span> <span class="aside">One square per task, in the order they run.</span></h2>
+
+    <details class="plan" id="plan-bench" open>
+      <summary>
+        <span class="plan-name">bench</span>
+        <span class="strip" role="img" aria-label="2 merged, 1 CI failing, 1 failed, 2 waiting">
+          <i class="s-merged"></i><i class="s-merged"></i><i class="s-attn"></i><i class="s-failed"></i><i class="s-waiting"></i><i class="s-waiting"></i>
+        </span>
+        <span class="plan-counts">2 of 6 merged, 1 CI failing, 1 failed, 2 waiting</span>
+        <span class="plan-end"><span class="num">$4.31</span><a class="btn" href="run.html">Run plan</a></span>
+      </summary>
+      <ul class="rows">
+        <li class="row">
+          <span class="status s-merged"><i class="mark"></i>Merged</span>
+          <a class="id" href="task.html">bench-t01</a>
+          <div class="what"><div class="goal">factory/bench/ ships a fixture case format with its first two cases (slugify, money-rounding)</div></div>
+          <div class="end"><span class="num quiet builds">1 build</span><span class="num cost">$1.30</span></div>
+        </li>
+        <li class="row">
+          <span class="status s-merged"><i class="mark"></i>Merged</span>
+          <a class="id" href="task.html">bench-t02</a>
+          <div class="what"><div class="goal">Three more shipped cases, report-json, ini-refactor and rate-limiter, complete the five-case suite</div></div>
+          <div class="end"><span class="num quiet builds">1 build</span><span class="num cost">$0.75</span></div>
+        </li>
+        <li class="row">
+          <span class="status s-attn"><i class="mark"></i>CI failing</span>
+          <a class="id" href="task.html">bench-t03</a>
+          <div class="what"><div class="goal">`factory bench run` runs every selected case under every variant in an isolated cell</div></div>
+          <div class="end"><span class="num quiet builds">1 build</span><span class="num cost">$1.84</span></div>
+        </li>
+        <li class="row">
+          <span class="status s-failed"><i class="mark"></i>Failed</span>
+          <a class="id" href="task.html">bench-t04</a>
+          <div class="what"><div class="goal">`factory bench report`, `compare`, `list` and `cases` read bench results</div></div>
+          <div class="end"><span class="num quiet builds">3 builds</span><span class="num cost">$0.42</span></div>
+        </li>
+        <li class="row">
+          <span class="status s-waiting"><i class="mark"></i>Waiting</span>
+          <a class="id" href="task.html">bench-t05</a>
+          <div class="what"><div class="goal">`factory bench run --parallel N` runs up to N cells at once</div><div class="why">waits for bench-t04</div></div>
+          <div class="end"><span class="num quiet builds"></span><span class="num cost"></span></div>
+        </li>
+        <li class="row">
+          <span class="status s-waiting"><i class="mark"></i>Waiting</span>
+          <a class="id" href="task.html">bench-t06</a>
+          <div class="what"><div class="goal">The docs describe `factory bench`: the case format, what a run does and how it scores</div><div class="why">waits for bench-t05</div></div>
+          <div class="end"><span class="num quiet builds"></span><span class="num cost"></span></div>
+        </li>
+      </ul>
+    </details>
+
+    <details class="plan" id="plan-measure" open>
+      <summary>
+        <span class="plan-name">measure</span>
+        <span class="strip" role="img" aria-label="1 running, 3 waiting">
+          <i class="s-live"></i><i class="s-waiting"></i><i class="s-waiting"></i><i class="s-waiting"></i>
+        </span>
+        <span class="plan-counts">0 of 4 merged, 1 running, 3 waiting</span>
+        <span class="plan-end"><span class="num">$0.57</span><a class="btn" href="run.html">Run plan</a></span>
+      </summary>
+      <ul class="rows">
+        <li class="row">
+          <span class="status s-live"><i class="mark"></i>Building</span>
+          <a class="id" href="task.html">measure-t01</a>
+          <div class="what"><div class="goal">Every agent run records a prompt version: a hash of its system prompt without the contract and the date</div></div>
+          <div class="end"><span class="num quiet builds">1 build</span><span class="num cost">$0.57</span></div>
+        </li>
+        <li class="row">
+          <span class="status s-waiting"><i class="mark"></i>Waiting</span>
+          <a class="id" href="task.html">measure-t02</a>
+          <div class="what"><div class="goal">Refresh records whether you changed a pull request before merging it</div><div class="why">waits for measure-t01</div></div>
+          <div class="end"><span class="num quiet builds"></span><span class="num cost"></span></div>
+        </li>
+      </ul>
+    </details>
+
+    <details class="plan" id="plan-agent-flows">
+      <summary>
+        <span class="plan-name">agent-flows</span>
+        <span class="strip" role="img" aria-label="4 merged, 1 PR open">
+          <i class="s-merged"></i><i class="s-merged"></i><i class="s-merged"></i><i class="s-merged"></i><i class="s-pr"></i>
+        </span>
+        <span class="plan-counts">4 of 5 merged, 1 PR open</span>
+        <span class="plan-end"><span class="num">$10.78</span></span>
+      </summary>
+    </details>
+
+    <details class="plan" id="plan-example">
+      <summary>
+        <span class="plan-name">example</span>
+        <span class="strip" role="img" aria-label="1 ready"><i class="s-ready"></i></span>
+        <span class="plan-counts">0 of 1 merged, 1 ready</span>
+        <span class="plan-end"><span class="num"></span><a class="btn" href="run.html">Run plan</a></span>
+      </summary>
+    </details>
+
+    <details class="plan" id="plan-strict-flow">
+      <summary>
+        <span class="plan-name">strict-flow</span>
+        <span class="strip" role="img" aria-label="9 waiting">
+          <i class="s-waiting"></i><i class="s-waiting"></i><i class="s-waiting"></i><i class="s-waiting"></i><i class="s-waiting"></i><i class="s-waiting"></i><i class="s-waiting"></i><i class="s-waiting"></i><i class="s-waiting"></i>
+        </span>
+        <span class="plan-counts">0 of 9 merged, 9 waiting</span>
+        <span class="plan-end"><span class="num"></span></span>
+      </summary>
+    </details>
+
+    <details class="plan" id="plan-wiki">
+      <summary>
+        <span class="plan-name">wiki</span>
+        <span class="strip" role="img" aria-label="1 on hold, 6 waiting">
+          <i class="s-held"></i><i class="s-waiting"></i><i class="s-waiting"></i><i class="s-waiting"></i><i class="s-waiting"></i><i class="s-waiting"></i><i class="s-waiting"></i>
+        </span>
+        <span class="plan-counts">0 of 7 merged, 1 on hold, 6 waiting</span>
+        <span class="plan-end"><span class="num"></span></span>
+      </summary>
+    </details>
+
+    <details class="finished" id="finished">
+      <summary>1 finished plan</summary>
+      <details class="plan" id="plan-pr-review-rework">
+        <summary>
+          <span class="plan-name">pr-review-rework</span>
+          <span class="strip" role="img" aria-label="5 merged">
+            <i class="s-merged"></i><i class="s-merged"></i><i class="s-merged"></i><i class="s-merged"></i><i class="s-merged"></i>
+          </span>
+          <span class="plan-counts">5 of 5 merged</span>
+          <span class="plan-end"><span class="num">$2.59</span></span>
+        </summary>
+      </details>
+    </details>
+  </section>
+
+  <footer class="foot">
+    <span>factory web 0.1.0</span>
+    <span>127.0.0.1:8765, this machine only</span>
+    <span>state in ~/.local/share/factory/software-factory</span>
+  </footer>
+</main>
+
+<div class="banner" hidden>Can't reach factory web. Retrying.</div>
+</body>
+</html>

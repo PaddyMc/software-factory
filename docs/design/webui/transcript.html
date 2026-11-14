@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bench-t04, build 3 · software-factory</title>
+<link rel="stylesheet" href="../../../factory/web/static/app.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="board.html">factory <span>/ software-factory</span></a>
+    <nav class="nav" aria-label="Pages">
+      <a href="board.html">Board</a>
+      <a href="activity.html">Activity</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <div class="page-head">
+    <ol class="crumbs">
+      <li><a href="board.html">Board</a></li>
+      <li><a href="board.html#plan-bench">bench</a></li>
+      <li><a href="task.html">bench-t04</a></li>
+      <li>build 3</li>
+    </ol>
+    <div class="task-id">
+      <span>build 3</span>
+      <span class="outcome o-good">committed</span>
+    </div>
+    <h1 class="task-goal">What the builder did, step by step.</h1>
+    <dl class="facts">
+      <div><dt>model</dt><dd>openrouter:moonshotai/kimi-k3.1-pro</dd></div>
+      <div><dt>steps</dt><dd>31</dd></div>
+      <div><dt>tokens</dt><dd>1,204k in, 14k out</dd></div>
+      <div><dt>cost</dt><dd>$0.11</dd></div>
+      <div><dt>time</dt><dd>2m 40s thinking, 58s in tools</dd></div>
+      <div><dt>tools</dt><dd>run 9, read_file 12, edit_file 7</dd></div>
+    </dl>
+  </div>
+
+  <section class="block" aria-labelledby="h-steps">
+    <h2 id="h-steps">Steps <span class="count">31</span></h2>
+
+    <details class="fold" id="t-system"><summary>What the agent was told (14,212 characters)</summary></details>
+    <details class="fold" id="t-task"><summary>The task it was given (6,031 characters)</summary></details>
+
+    <div class="step">
+      <div>
+        <div class="step-n">Step 1</div>
+        <div class="step-facts">4.1s thinking<br>18k in, 210 out<br>$0.004</div>
+      </div>
+      <div>
+        <p class="says">The compare header is missing the per-step prompt_sha line. I'll read the report module first.</p>
+        <div class="call">
+          <div class="call-name"><b>read_file</b>(path=factory/bench/report.py)</div>
+          <details class="fold" id="t-1-0"><summary>Result, 21,904 characters</summary></details>
+        </div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div>
+        <div class="step-n">Step 2</div>
+        <div class="step-facts">6.8s thinking, 41s in tools<br>24k in, 96 out<br>$0.005</div>
+      </div>
+      <div>
+        <div class="call">
+          <div class="call-name"><b>run</b>(command=uv run pytest -q tests/test_bench.py)</div>
+          <pre class="result">exit 1
+FAILED tests/test_bench.py::test_compare_flags_changed_cases_models_and_prompts
+1 failed, 21 passed in 40.77s</pre>
+        </div>
+        <div class="call">
+          <div class="call-name"><b>run</b>(command=git commit -am wip)</div>
+          <pre class="result refused">refused: command matches denied pattern '\bgit\s+(push|commit|reset|checkout|switch|rebase|merge|tag|worktree|remote)\b'</pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div>
+        <div class="step-n">Step 3</div>
+        <div class="step-facts">3.2s thinking<br>25k in, 388 out<br>$0.005</div>
+      </div>
+      <div>
+        <p class="says">Understood, the factory commits for me. Adding the prompt_sha comparison to the header.</p>
+        <div class="call">
+          <div class="call-name"><b>edit_file</b>(path=factory/bench/report.py)</div>
+          <pre class="result">ok</pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <span>factory web 0.1.0</span>
+    <span>127.0.0.1:8765, this machine only</span>
+    <span>state in ~/.local/share/factory/software-factory</span>
+  </footer>
+</main>
+</body>
+</html>

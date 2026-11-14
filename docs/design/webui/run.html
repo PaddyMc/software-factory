@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Run bench · software-factory</title>
+<link rel="stylesheet" href="../../../factory/web/static/app.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="board.html">factory <span>/ software-factory</span></a>
+    <nav class="nav" aria-label="Pages">
+      <a href="board.html">Board</a>
+      <a href="activity.html">Activity</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <div class="page-head">
+    <ol class="crumbs">
+      <li><a href="board.html">Board</a></li>
+      <li><a href="board.html#plan-bench">bench</a></li>
+      <li>Run</li>
+    </ol>
+    <h1 class="lede">Run the bench plan.</h1>
+  </div>
+
+  <form method="post" action="#">
+
+    <section class="block" aria-labelledby="h-what">
+      <h2 id="h-what">What will run <span class="count">2 now, 2 later</span></h2>
+      <ul class="rows">
+        <li class="row">
+          <span class="status s-attn"><i class="mark"></i>CI failing</span>
+          <a class="id" href="task.html">bench-t03</a>
+          <div class="what"><div class="next">Starts now, to fix the failing checks on its pull request.</div></div>
+          <div class="end"></div>
+        </li>
+        <li class="row">
+          <span class="status s-failed"><i class="mark"></i>Failed</span>
+          <a class="id" href="task.html">bench-t04</a>
+          <div class="what"><div class="next">Starts now, with a fresh build.</div></div>
+          <div class="end"></div>
+        </li>
+        <li class="row">
+          <span class="status s-waiting"><i class="mark"></i>Waiting</span>
+          <a class="id" href="task.html">bench-t05</a>
+          <div class="what"><div class="next">Starts when bench-t04 has a pull request.</div></div>
+          <div class="end"></div>
+        </li>
+        <li class="row">
+          <span class="status s-waiting"><i class="mark"></i>Waiting</span>
+          <a class="id" href="task.html">bench-t06</a>
+          <div class="what"><div class="next">Starts when bench-t05 has a pull request.</div></div>
+          <div class="end"></div>
+        </li>
+      </ul>
+    </section>
+
+    <section class="block" aria-labelledby="h-limits">
+      <h2 id="h-limits">Limits</h2>
+      <div class="fields">
+        <div class="field">
+          <label for="max-cost">Cost cap per task, in USD</label>
+          <input id="max-cost" name="max_cost" inputmode="decimal" value="5.00" required>
+          <span class="hint">A task stops once it has spent this much.</span>
+        </div>
+        <div class="field">
+          <label for="parallel">Tasks at once</label>
+          <input id="parallel" name="parallel" inputmode="numeric" value="3">
+          <span class="hint">Independent tasks run side by side.</span>
+        </div>
+        <div class="field">
+          <label for="attempts">Builds per task</label>
+          <input id="attempts" name="max_attempts" inputmode="numeric" value="3">
+          <span class="hint">How often review or the gates may send it back.</span>
+        </div>
+        <div class="field">
+          <label for="flow">Agent flow</label>
+          <select id="flow" name="flow"><option>default</option><option>strict</option></select>
+          <span class="hint">From .factory/config.yaml.</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="block" aria-labelledby="h-cmd">
+      <h2 id="h-cmd">This runs</h2>
+      <div class="cmd" data-preview><code>factory run bench --max-cost 5.00 --parallel 3 --max-attempts 3</code><button class="copy" type="button">Copy</button></div>
+      <p class="fine">Agents call your model provider, which costs money: at most $5.00 for each of 4 tasks, $20.00 in all. The run keeps going if you close this page. Stop it from the board.</p>
+      <button class="btn btn-primary">Start run</button>
+      <a class="btn btn-quiet" href="board.html">Cancel</a>
+    </section>
+
+  </form>
+
+  <footer class="foot">
+    <span>factory web 0.1.0</span>
+    <span>127.0.0.1:8765, this machine only</span>
+    <span>state in ~/.local/share/factory/software-factory</span>
+  </footer>
+</main>
+</body>
+</html>

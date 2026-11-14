@@ -14,6 +14,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | ✓ | Reshape the agent flow. Done: [Agent flows](docs/architecture.md#agent-flows) | — | — |
 | 8 | Compare flows and setups. Planned: [bench](docs/plans/bench.md) | medium | 7 |
 | 9 | The steps of a flow are still the first version's. Planned: [strict-flow](docs/plans/strict-flow.md) | large | 3, 7, 8 |
+| 10 | Managing the factory takes many terminal commands. Planned as a web page: [webui](docs/plans/webui.md) | medium | — |
 
 ## 1. Act on human PR review comments
 
@@ -137,3 +138,15 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 - A `test` step kind (item 2).
 - A built-in flow, `strict`, turns them all on: test, build, gates, a proving review, verify. `default` stays today's pipeline, and [bench](docs/plans/bench.md) compares the two.
 - Parallel build candidates and a flow chosen by the contract's `risk` are out of scope.
+
+## 10. Manage the factory from a browser
+
+**Gap.** Watching and steering the factory takes a dozen terminal commands. `factory top` cuts long text at the terminal width, nothing says which tasks need you next, and nothing is clickable. Acting means remembering each command's flags, and a single running task can't be stopped at all. With a few runs in parallel the board also fails with `database is locked`.
+
+**Seen in.** [agent-orchestrator](https://github.com/ComposioHQ/agent-orchestrator) and [Open SWE](https://blog.langchain.com/introducing-open-swe-an-open-source-asynchronous-coding-agent) both put a web dashboard over their agents.
+
+**Plan.** [docs/plans/webui.md](docs/plans/webui.md) (planned 2026-11-14, tasks `webui-t01`…`t08`, independent of the other plans):
+- `factory web` serves a local page on 127.0.0.1. It shows the board, each task with its contract, runs and live log, and each agent run's transcript.
+- Its buttons run the `factory` commands you'd type: load plans, check GitHub, hold, remove a worktree, stop, and start a plan or task run through a form with a cost cap. A new `factory stop` stops one task or a whole plan run.
+- It needs no new dependencies, and its look is fixed by mockups committed with the plan, in fractal-dev.xyz's palette and typefaces.
+- Its first task opens the board in WAL mode with a 30-second busy timeout, which fixes `database is locked`.
