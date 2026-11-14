@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Activity · software-factory</title>
+<link rel="stylesheet" href="../../../factory/web/static/app.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="board.html">factory <span>/ software-factory</span></a>
+    <nav class="nav" aria-label="Pages">
+      <a href="board.html">Board</a>
+      <a href="activity.html" aria-current="page">Activity</a>
+    </nav>
+    <div class="top-end">
+      <span class="live-dot" data-state="live">Live, updated 21:40:12</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" data-refresh="2">
+
+  <div class="page-head">
+    <h1 class="lede">1 command is running.</h1>
+  </div>
+
+  <div class="notice notice-ok" role="status">
+    <span>Started the bench plan.</span>
+    <span class="mono">factory run bench --max-cost 5.00 --parallel 3 --max-attempts 3</span>
+    <a href="board.html">Back to the board</a>
+  </div>
+
+  <section class="block" aria-labelledby="h-cmds">
+    <h2 id="h-cmds">Commands from this page <span class="count">4</span> <span class="aside">Newest first</span></h2>
+    <ol class="runs">
+      <li class="run is-live">
+        <div class="run-head"><span class="run-name">factory run bench --max-cost 5.00 --parallel 3 --max-attempts 3</span><span class="outcome o-live">running</span><span class="quiet">started 40 seconds ago</span></div>
+        <details open id="job-0004">
+          <summary>Output</summary>
+          <pre class="report">21:39:32 plan bench: 6 tasks, up to 3 at once — follow with `factory top`
+21:39:32 start  bench-t03                        (1/3 running)
+21:39:32 start  bench-t04                        (2/3 running)</pre>
+        </details>
+        <form class="inline" method="post" action="#"><button class="btn btn-danger" title="factory stop bench">Stop this run</button></form>
+      </li>
+      <li class="run">
+        <div class="run-head"><span class="run-name">factory status --refresh</span><span class="outcome o-good">done</span><span class="quiet">6 minutes ago, took 9s</span></div>
+        <details id="job-0003">
+          <summary>Output</summary>
+        </details>
+      </li>
+      <li class="run">
+        <div class="run-head"><span class="run-name">factory requeue wiki-t01</span><span class="outcome o-bad">exit 1</span><span class="quiet">18 minutes ago, took 0s</span></div>
+        <details open id="job-0002">
+          <summary>Output</summary>
+          <pre class="report">wiki-t01: already queued</pre>
+        </details>
+      </li>
+      <li class="run">
+        <div class="run-head"><span class="run-name">factory sync</span><span class="outcome o-good">done</span><span class="quiet">2 hours ago, took 0s</span></div>
+        <details id="job-0001">
+          <summary>Output</summary>
+        </details>
+      </li>
+    </ol>
+  </section>
+
+  <section class="block" aria-labelledby="h-events">
+    <h2 id="h-events">Latest from every task <span class="aside">Last 200 lines</span></h2>
+    <pre class="log" data-follow><span class="t">21:39:33</span> <span class="tag">bench-t03</span>   [run] === bench-t03: worktree on factory/bench-t03, fixing CI (tests) on 55d7f91
+<span class="t">21:39:33</span> <span class="tag">bench-t04</span>   [stage] planning (plan #0)
+<span class="t">21:39:41</span> <span class="tag">measure-t01</span> [build#1] → run(command=uv run pytest -q tests/test_stats.py)
+<span class="t">21:39:58</span> <span class="tag">bench-t04</span>   [plan] → read_file(path=factory/bench/report.py)
+<span class="t">21:40:04</span> <span class="tag">measure-t01</span> [build#1] ← run: exit 0 9 passed in 2.14s</pre>
+  </section>
+
+  <footer class="foot">
+    <span>factory web 0.1.0</span>
+    <span>127.0.0.1:8765, this machine only</span>
+    <span>state in ~/.local/share/factory/software-factory</span>
+  </footer>
+</main>
+</body>
+</html>
