@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+import webbrowser
 from pathlib import Path
 
 from . import config as C
@@ -547,6 +548,34 @@ def cmd_top(a) -> int:
         return 0
 
 
+def cmd_web(a) -> int:
+    from .web.server import App, make_server
+
+    home = factory_home()
+    root = repo_root()
+    open_db(home).close()       # migrate once; requests use their own read-only connections
+    app = App(home, root)
+    explicit_port = a.port is not None
+    try:
+        srv = make_server(app, a.port if explicit_port else 8765)
+    except OSError:
+        if explicit_port:
+            print(f"port {a.port} is in use; pick another with --port", file=sys.stderr)
+            return 1
+        srv = make_server(app, 0)
+    url = f"http://127.0.0.1:{srv.server_address[1]}/"
+    print(f"factory web: {url} (Ctrl-C to stop)", flush=True)
+    if not a.no_open:
+        webbrowser.open(url)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        srv.server_close()
+    return 0
+
+
 def cmd_trace(a) -> int:
     db = _db()
     runs = [r for r in db.runs(a.task_id) if r["transcript"]
@@ -975,6 +1004,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--events", type=int, default=12, help="recent log lines to show (0 = none)")
     s.add_argument("--once", action="store_true", help="print one frame and exit")
     s.set_defaults(fn=cmd_top)
+
+    s = sub.add_parser("web", help="serve the live board on this machine and open it in a browser")
+    s.add_argument("--port", type=int, default=None, metavar="N", help="loopback port (default: 8765, or a free port)")
+    s.add_argument("--no-open", action="store_true", help="don't open the board in a browser")
+    s.set_defaults(fn=cmd_web)
 
     s = sub.add_parser("trace", help="per-step timing, context size, tokens, cost and tool calls of an agent loop")
     s.add_argument("task_id")

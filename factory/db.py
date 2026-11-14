@@ -69,9 +69,13 @@ def now() -> str:
 
 
 class DB:
-    def __init__(self, path: Path, timeout: float = 30.0):
-        path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, path: Path, timeout: float = 30.0, readonly: bool = False):
         self.path = path
+        if readonly:
+            self.conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=timeout)
+            self.conn.row_factory = sqlite3.Row
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(path, timeout=timeout)
         self.conn.row_factory = sqlite3.Row
         # Readers never block writers in WAL; a locked switch is retried on the next open.
@@ -226,8 +230,8 @@ class DB:
         return (row["report"] or "") if row else ""
 
 
-def open_db(home: Path) -> DB:
-    return DB(home / "factory.db")
+def open_db(home: Path, readonly: bool = False) -> DB:
+    return DB(home / "factory.db", readonly=readonly)
 
 
 def pid_alive(pid: int | None) -> bool:
