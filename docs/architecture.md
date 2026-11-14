@@ -265,6 +265,8 @@ main ── t01 ◆ PR #10 (base main)
 
 Review and merge from the bottom of each stack up. After each merge, run `factory status --refresh`. It picks up the merge and moves every PR stacked on the merged one: the PR's own commits are rebased onto the trunk (or onto its moved dependency) and the PR is retargeted, with a comment saying which commit the gates ran on. GitHub doesn't retarget stacked PRs on its own unless the repository deletes head branches on merge, so refresh before merging the next PR in a stack.
 
+A stacked PR merged before a refresh moved it lands in its dependency's branch, not the trunk. Refresh counts the task as merged only once the PR's changes reached the trunk. If the dependency's PR merges after it, that merge carries its changes along. While the dependency's PR is still open, the task stays `pr_open` with a note saying it waits for that PR. If the dependency's PR had already merged or closed, nothing will carry its changes, so the task becomes `conflict`: running it replays its own commits onto the trunk in a new PR. Changes that reached the trunk some other way, such as a commit landed by hand, also count as merged.
+
 The run ends when nothing more can start, and prints each task's outcome and the PRs in merge order. Run the plan again to continue: tasks with PRs are kept, failed tasks run again, and tasks that waited on them start once they have PRs. `abandoned` tasks (holds) are skipped. Tasks whose verification the factory refuses are reported as manual.
 
 ---

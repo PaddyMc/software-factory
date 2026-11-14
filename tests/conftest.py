@@ -110,8 +110,8 @@ FAKE_GH = textwrap.dedent(f"""\
         print(json.dumps({{f: pr.get(f, "MERGEABLE" if f == "mergeable" else None) for f in fields}})); sys.exit(0)
     if a[:2] == ["pr", "list"] and "--head" not in a:
         save()
-        print(json.dumps([{{"headRefName": h, "url": p["url"], "state": p["state"], "baseRefName": p["base"]}}
-                          for h, p in s["prs"].items()]))
+        print(json.dumps([{{"headRefName": h, "url": p["url"], "state": p["state"], "baseRefName": p["base"],
+                           "mergedAt": p.get("mergedAt")}} for h, p in s["prs"].items()]))
         sys.exit(0)
     if a[:2] == ["pr", "list"]:
         pr = s["prs"].get(a[a.index("--head") + 1])
