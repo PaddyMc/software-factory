@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.resources
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
@@ -78,6 +79,17 @@ class App:
             db = open_db(self.home, readonly=True)
             try:
                 page = views.board(db, self.home, self.project, self.port).encode()
+            finally:
+                db.close()
+            return self._response(200, "text/html; charset=utf-8", page)
+        task_match = re.fullmatch(r"/tasks/([^/]+)", path)
+        if task_match:
+            task_id = task_match.group(1)
+            db = open_db(self.home, readonly=True)
+            try:
+                if db.task(task_id) is None:
+                    return self._error(404, "Page not found.", f"{task_id} isn't on this board")
+                page = views.task(db, self.home, self.project, self.port, task_id).encode()
             finally:
                 db.close()
             return self._response(200, "text/html; charset=utf-8", page)

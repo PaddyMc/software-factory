@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import html
 import importlib.metadata
 import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 from .. import observe
 from ..db import ACTIVE, DB, seconds_since
+from ..log import log_path
 
 DONE = ("merged", "abandoned")
 ATTENTION = ("pr_open", "conflict", "ci_failed", "changes_requested")
@@ -55,6 +58,9 @@ COUNT_WORDS = {
 }
 NEEDS_ORDER = {"gone": 0, "failed": 1, "conflict": 2, "ci_failed": 3, "changes_requested": 4, "pr_open": 5}
 STEP = re.compile(r"(\S+)#(\d+) step (\d+)/(\d+)")
+LOG_LINE = re.compile(r"(\d\d:\d\d:\d\d) (\[[^]]*\])? ?(.*)")
+GOOD_OUTCOMES = {"done", "committed", "APPROVE", "pass", "verified", "opened"}
+BAD_OUTCOMES = {"error", "fail", "CHANGES", "stopped"}
 
 
 def esc(value) -> str:
@@ -128,7 +134,7 @@ def _needs_row(db: DB, row, info: Status) -> str:
         action = f'<a class="btn" href="{esc(url)}">Open pull request</a>'
     return f"""<li class="row">
   {status_html(info)}
-  <span class="id">{esc(row['id'])}</span>
+  <a class="id" href="/tasks/{quote(row['id'], safe='')}">{esc(row['id'])}</a>
   <div class="what">
     <div class="next">{esc(next_step)}</div>
     <div class="why">{esc(why)}</div>
@@ -153,7 +159,7 @@ def _running_row(db: DB, row, info: Status) -> str:
     quiet = observe.human_secs(seconds_since(row["heartbeat_at"]))
     return f"""<li class="row">
   {status_html(info)}
-  <span class="id">{esc(row['id'])}</span>
+  <a class="id" href="/tasks/{quote(row['id'], safe='')}">{esc(row['id'])}</a>
   <div class="what"><div class="goal" title="{esc(goal)}">{esc(goal)}</div></div>
   <div class="end">
     <span class="num quiet">{esc(elapsed)}</span>
@@ -177,7 +183,7 @@ def _plan_task_row(db: DB, row, info: Status) -> str:
     builds = f"{attempts} build" if attempts == 1 else f"{attempts} builds" if attempts else ""
     return f"""<li class="row">
   {status_html(info)}
-  <span class="id">{esc(row['id'])}</span>
+  <a class="id" href="/tasks/{quote(row['id'], safe='')}">{esc(row['id'])}</a>
   <div class="what"><div class="goal" title="{esc(goal)}">{esc(goal)}</div>{why}</div>
   <div class="end"><span class="num quiet builds">{esc(builds)}</span><span class="num cost">{esc(_cost(row))}</span></div>
 </li>"""
@@ -343,6 +349,231 @@ def board(db: DB, home: Path, project: str, port: int | None) -> str:
 </section>
 """
     return _page("Board", project, home, port, content, refresh=2)
+
+
+def _next_step(db: DB, row, info: Status, contract) -> str:
+    kind = info.kind
+    note = ""
+    if kind in NEEDS_ORDER:
+        heading, detail = _needs_next(db, row, info)
+        explanations = {
+            "failed": ("Running it again starts a fresh build; putting it on hold keeps plan runs from picking it up."),
+            "conflict": "Running it again starts a fresh build that resolves the conflict with its base.",
+            "ci_failed": "Running it again starts a fresh build to fix the failing checks.",
+            "changes_requested": "Running it again starts a fresh build to address the review.",
+        }
+        paragraph = esc(explanations.get(kind, detail))
+        if kind in ("failed", "conflict", "ci_failed", "changes_requested"):
+            note = f"<pre>{esc(row['note'] or '')}</pre>"
+    elif kind == "running":
+        progress = row["progress"] or ""
+        match = STEP.search(progress)
+        if match:
+            label, attempt, used, limit = match.groups()
+            heading = f"Running: {label} {attempt}, step {used} of {limit}."
+        else:
+            heading = f"Running: {progress}" if progress else "Running."
+        activity = row["activity"] or ""
+        quiet = observe.human_secs(seconds_since(row["heartbeat_at"]))
+        paragraph = esc(f"{activity} · quiet {quiet}" if activity else f"quiet {quiet}")
+    elif kind == "ready":
+        heading = "Ready."
+        paragraph = "The next run of its plan starts it."
+    elif kind == "waiting":
+        _, unmet = db.deps(contract)
+        heading = f"Waits for {', '.join(unmet)}."
+        paragraph = esc("A plan run starts it once those dependencies have merged or have open pull requests.")
+    elif kind == "merged":
+        heading = "Merged."
+        url = safe_url(row["pr_url"])
+        paragraph = (f'<a href="{esc(url)}">Open pull request</a>' if url else
+                     "Its changes are merged.")
+    elif kind == "abandoned":
+        heading = "On hold."
+        paragraph = "Plan runs skip it until you take it off hold."
+    else:
+        heading = info.word
+        paragraph = esc(observe.detail(db, row))
+    return f"""<section class="next-step" aria-labelledby="h-next">
+  <div>
+    <h2 id="h-next">{esc(heading)}</h2>
+    <p>{paragraph}</p>
+  </div>
+  {note}
+</section>"""
+
+
+def _points(items, mono: bool = False) -> str:
+    class_ = ' class="mono"' if mono else ""
+    points = "".join(f"<li{class_}>{esc(item)}</li>" for item in items)
+    return f'<ul class="points">{points}</ul>'
+
+
+def _dependency(db: DB, task_id: str) -> str:
+    row = db.task(task_id)
+    if row is None:
+        return f'<li><span class="mono">{esc(task_id)}</span></li>'
+    href = quote(task_id, safe="")
+    return (f'<li>{status_html(status(db, row))}<a class="mono" href="/tasks/{href}">'
+            f'{esc(task_id)}</a></li>')
+
+
+def _contract_block(db: DB, contract, needed_by: list[str]) -> str:
+    commands = "".join(
+        f'<div class="cmd"><code>{esc(command)}</code>'
+        '<button class="copy" type="button" hidden>Copy</button></div>'
+        for command in contract.verification)
+    waits_for = "".join(_dependency(db, task_id) for task_id in contract.depends_on)
+    dependents = "".join(_dependency(db, task_id) for task_id in needed_by)
+    return f"""<section class="block contract" aria-labelledby="h-contract">
+  <h2 id="h-contract">Contract</h2>
+  <h3>Done when</h3>
+  {_points(contract.acceptance)}
+  <h3>Not part of it</h3>
+  {_points(contract.non_goals)}
+  <h3>Checked with</h3>
+  {commands}
+  <h3>Waits for</h3>
+  <ul class="deps">{waits_for}</ul>
+  <h3>Needed by</h3>
+  <ul class="deps">{dependents}</ul>
+  <h3>Reads</h3>
+  {_points(contract.spec_refs, mono=True)}
+</section>"""
+
+
+def _relative(seconds: float | None) -> str:
+    seconds = max(0, int(seconds or 0))
+    if seconds < 60:
+        count, unit = seconds, "second"
+    elif seconds < 3600:
+        count, unit = seconds // 60, "minute"
+    elif seconds < 86400:
+        count, unit = seconds // 3600, "hour"
+    else:
+        count, unit = seconds // 86400, "day"
+    return f"{count} {unit}{'' if count == 1 else 's'}"
+
+
+def _run_name(run) -> str:
+    if run["role"] == "build":
+        return f"build {run['attempt']}"
+    name = run["step"] or run["role"]
+    return f"{name}, build {run['attempt']}" if run["attempt"] else name
+
+
+def _run_facts(run) -> str:
+    facts = []
+    if run["model"]:
+        model = str(run["model"])
+        facts.append(f'<span title="{esc(model)}">{esc(model.rsplit("/", 1)[-1])}</span>')
+    if run["steps"]:
+        facts.append(f"{run['steps']} steps")
+    if run["tokens_in"]:
+        facts.append(f"{run['tokens_in'] / 1000:,.0f}k in")
+    if run["tokens_out"]:
+        facts.append(f"{run['tokens_out'] / 1000:,.0f}k out")
+    if run["cost_usd"] is not None:
+        facts.append(_cost(run))
+    return f'<div class="run-facts">{", ".join(facts)}</div>' if facts else ""
+
+
+def _run_html(run, newest: bool) -> str:
+    ended_at = run["ended_at"]
+    outcome = run["outcome"] or ("running" if not ended_at else "finished")
+    first = outcome.split(maxsplit=1)[0] if outcome else ""
+    outcome_class = ("o-live" if not ended_at else "o-good" if first in GOOD_OUTCOMES else
+                     "o-bad" if first in BAD_OUTCOMES else "")
+    class_ = f" {outcome_class}" if outcome_class else ""
+    started = dt.datetime.fromisoformat(run["started_at"])
+    ended = dt.datetime.fromisoformat(ended_at) if ended_at else None
+    duration = (ended - started).total_seconds() if ended else seconds_since(run["started_at"])
+    relative = _relative(seconds_since(run["started_at"]))
+    live = " is-live" if not ended_at else ""
+    open_attr = " open" if newest else ""
+    report = f'<pre class="report">{esc(run["report"])}</pre>' if run["report"] else ""
+    return f"""<li class="run{live}">
+  <div class="run-head"><span class="run-name">{esc(_run_name(run))}</span><span class="outcome{class_}">{esc(outcome)}</span><span class="quiet"><time datetime="{esc(run['started_at'])}" title="{esc(run['started_at'])}">{esc(relative)}</time> ago, took {esc(observe.human_secs(duration))}</span></div>
+  {_run_facts(run)}
+  <details id="run-{run['id']}-report"{open_attr}><summary>Report</summary>{report}</details>
+</li>"""
+
+
+def _runs_block(runs) -> str:
+    items = "".join(_run_html(run, index == 0) for index, run in enumerate(runs))
+    return f"""<section class="block" aria-labelledby="h-runs">
+  <h2 id="h-runs">Runs <span class="count">{esc(len(runs))}</span> <span class="aside">Newest first</span></h2>
+  <p class="runs-head">Each line is one agent, or one pass of the gates.</p>
+  <ol class="runs">{items}</ol>
+</section>"""
+
+
+def _log_block(home: Path, task_id: str) -> str:
+    try:
+        lines = log_path(home, task_id).read_text(errors="replace").splitlines()[-200:]
+    except FileNotFoundError:
+        lines = []
+    rendered = []
+    for line in lines:
+        match = LOG_LINE.match(line)
+        if not match:
+            rendered.append(esc(line))
+            continue
+        time, tag, text = match.groups()
+        parts = [f'<span class="t">{esc(time)}</span>']
+        if tag:
+            parts.append(f'<span class="tag">{esc(tag)}</span>')
+        parts.append(esc(text))
+        rendered.append(" ".join(parts))
+    log = "\n".join(rendered) if rendered else "No log yet."
+    return f"""<section class="block" aria-labelledby="h-log">
+  <h2 id="h-log">Log <span class="aside">Last 200 lines, follows the run</span></h2>
+  <pre class="log" data-follow>{log}</pre>
+</section>"""
+
+
+def task(db: DB, home: Path, project: str, port: int | None, task_id: str) -> str:
+    row = db.task(task_id)
+    info = status(db, row)
+    contract = db.contract(task_id)
+    plan_name = observe.plan_name(row["plan"])
+    runs = list(reversed(db.runs(task_id)))
+    needed_by = [r["id"] for r in db.tasks() if task_id in db.contract(r["id"]).depends_on]
+
+    facts = []
+    if contract.risk:
+        facts.append(("risk", esc(contract.risk)))
+    if row["attempts"]:
+        facts.append(("builds", esc(row["attempts"])))
+    if _cost(row):
+        facts.append(("cost", esc(_cost(row))))
+    if row["branch"]:
+        facts.append(("branch", esc(row["branch"])))
+    if row["base_ref"] and row["base_sha"]:
+        facts.append(("built on", esc(f"{row['base_ref']} at {row['base_sha'][:7]}")))
+    url = safe_url(row["pr_url"])
+    if url:
+        facts.append(("pull request", f'<a href="{esc(url)}">pull request</a>'))
+    facts_html = "".join(f"<div><dt>{esc(label)}</dt><dd>{value}</dd></div>" for label, value in facts)
+
+    content = f"""<div class="page-head">
+  <ol class="crumbs">
+    <li><a href="/">Board</a></li>
+    <li><a href="/#plan-{esc(plan_name)}">{esc(plan_name)}</a></li>
+    <li>{esc(task_id)}</li>
+  </ol>
+  <div class="task-id"><span>{esc(task_id)}</span>{status_html(info)}</div>
+  <h1 class="task-goal">{esc(contract.goal)}</h1>
+  <dl class="facts">{facts_html}</dl>
+</div>
+{_next_step(db, row, info, contract)}
+<div class="cols">
+  {_contract_block(db, contract, needed_by)}
+  {_runs_block(runs)}
+</div>
+{_log_block(home, task_id)}
+"""
+    return _page(contract.goal, project, home, port, content, refresh=2)
 
 
 def error_page(project: str, home: Path, port: int | None, title: str, message: str) -> str:

@@ -2,6 +2,7 @@
 
 import datetime as dt
 import hashlib
+import html
 import json
 import os
 import re
@@ -13,13 +14,14 @@ import sys
 import threading
 import urllib.request
 import webbrowser
+from urllib.parse import quote
 from html.parser import HTMLParser
 
 import pytest
 
 from factory import observe
 from factory.cli import main
-from factory.contracts import parse_text
+from factory.contracts import Task, parse_text
 from factory.db import open_db
 from factory.web import server as web_server
 from factory.web.server import App, make_server
@@ -113,7 +115,7 @@ def test_needs_you_lists_each_task_waiting_on_you_with_its_next_step(home, repo)
 
     _, _, body = _get(App(home, repo))
     section = re.search(r'<section class="block" aria-labelledby="h-you">(.*?)</section>', body, re.S).group(1)
-    ids = re.findall(r'<span class="id">([^<]+)</span>', section)
+    ids = re.findall(r'<a class="id" href="/tasks/[^"]+">([^<]+)</a>', section)
     assert ids == [f"needs-t{i:02d}" for i in range(1, 8)]
     for expected in (
             "Its process is gone. Check GitHub to mark it failed.",
@@ -128,7 +130,7 @@ def test_needs_you_lists_each_task_waiting_on_you_with_its_next_step(home, repo)
         assert expected in section
     assert section.count("Open pull request") == 5
     for task_id in ("needs-t08", "needs-t09", "needs-t10", "needs-t11"):
-        assert f'<span class="id">{task_id}</span>' not in section
+        assert f'<a class="id" href="/tasks/{task_id}">{task_id}</a>' not in section
 
 
 def test_running_tasks_show_their_step_activity_and_quiet_time(home, repo):
@@ -317,6 +319,248 @@ def test_pages_and_static_files_load_nothing_from_the_network(home, repo):
         assert status == 200
         assert "http://" not in content and "https://" not in content
     assert "<form" not in body and "<button" not in body
+
+
+def test_task_page_shows_the_contract_with_what_it_waits_for_and_what_needs_it(home, repo):
+    contract = """- id: page-t02
+  goal: "Show the whole contract"
+  spec_refs: ["docs/plans/webui.md#task-page", "docs/design/webui/task.html"]
+  depends_on: ["page-t01"]
+  non_goals: ["Editing the contract", "Adding action forms"]
+  acceptance: ["Every contract item is visible", "Dependencies link to their pages"]
+  verification: ["uv run pytest -q tests/test_web.py", "git diff --check"]
+  risk: medium
+"""
+    db = _board(home, [
+        _contract("page-t01"), contract, _contract("page-t03", depends=["page-t02"]),
+    ])
+    db.update("page-t01", status="ci_failed")
+    db.update("page-t02", status="failed", attempts=3, cost_usd=0.42, branch="factory/page-t02",
+              base_ref="factory/page-t01", base_sha="55d7f91abcdef", pr_url="https://github.test/pr/42")
+    db.close()
+
+    app = App(home, repo)
+    status_code, _, body = _get(app, "/tasks/page-t02")
+    assert status_code == 200
+    assert "<title>Show the whole contract · demo</title>" in body
+    assert '<li><a href="/">Board</a></li>' in body
+    assert '<li><a href="/#plan-demo">demo</a></li>' in body
+    assert "<li>page-t02</li>" in body
+    assert '<div class="task-id"><span>page-t02</span><span class="status s-failed">' in body
+    assert '<h1 class="task-goal">Show the whole contract</h1>' in body
+    facts = re.search(r'<dl class="facts">(.*?)</dl>', body, re.S).group(1)
+    for fact in (
+            "<dt>risk</dt><dd>medium</dd>", "<dt>builds</dt><dd>3</dd>", "<dt>cost</dt><dd>$0.42</dd>",
+            "<dt>branch</dt><dd>factory/page-t02</dd>",
+            "<dt>built on</dt><dd>factory/page-t01 at 55d7f91</dd>",
+            '<dt>pull request</dt><dd><a href="https://github.test/pr/42">pull request</a></dd>'):
+        assert fact in facts
+
+    section = re.search(r'<section class="block contract" aria-labelledby="h-contract">(.*?)</section>',
+                        body, re.S).group(1)
+    for heading in ("Done when", "Not part of it", "Checked with", "Waits for", "Needed by", "Reads"):
+        assert f"<h3>{heading}</h3>" in section
+    for text in ("Every contract item is visible", "Dependencies link to their pages",
+                 "Editing the contract", "Adding action forms"):
+        assert f"<li>{text}</li>" in section
+    for command in ("uv run pytest -q tests/test_web.py", "git diff --check"):
+        assert (f'<div class="cmd"><code>{command}</code>'
+                '<button class="copy" type="button" hidden>Copy</button></div>') in section
+    assert section.count('<div class="cmd">') == 2
+    waits = re.search(r'<h3>Waits for</h3>\s*<ul class="deps">(.*?)</ul>', section, re.S).group(1)
+    needed = re.search(r'<h3>Needed by</h3>\s*<ul class="deps">(.*?)</ul>', section, re.S).group(1)
+    assert '<span class="status s-attn"><i class="mark"></i>CI failing</span>' in waits
+    assert '<a class="mono" href="/tasks/page-t01">page-t01</a>' in waits
+    assert '<span class="status s-waiting"><i class="mark"></i>Waiting</span>' in needed
+    assert '<a class="mono" href="/tasks/page-t03">page-t03</a>' in needed
+    assert '<li class="mono">docs/plans/webui.md#task-page</li>' in section
+    assert '<li class="mono">docs/design/webui/task.html</li>' in section
+    assert body.count("<button") == 2 and "<form" not in body
+
+    _, _, sparse = _get(app, "/tasks/page-t01")
+    sparse_facts = re.search(r'<dl class="facts">(.*?)</dl>', sparse, re.S).group(1)
+    assert "<dt>risk</dt><dd>low</dd>" in sparse_facts
+    for label in ("builds", "cost", "branch", "built on", "pull request"):
+        assert f"<dt>{label}</dt>" not in sparse_facts
+
+
+def test_task_page_lists_runs_newest_first_with_labels_outcomes_and_reports(home, repo):
+    db = _board(home, [_contract("runs-t01")])
+    now = dt.datetime.now(dt.timezone.utc)
+
+    def stamp(run_id, minutes_ago, duration=None):
+        started = now - dt.timedelta(minutes=minutes_ago)
+        ended = started + dt.timedelta(seconds=duration) if duration is not None else None
+        db.conn.execute("UPDATE runs SET started_at=?, ended_at=? WHERE id=?",
+                        (started.isoformat(timespec="seconds"),
+                         ended.isoformat(timespec="seconds") if ended else None, run_id))
+        db.conn.commit()
+        return started.isoformat(timespec="seconds")
+
+    plan = db.start_run("runs-t01", "plan", 0, "models/glm-5.3")
+    db.progress("runs-t01", plan, "planning", 14, 211000, 3000, 0.02)
+    db.finish_run(plan, "done", "the plan")
+    build = db.start_run("runs-t01", "build", 3, "openrouter/kimi-k3.1-pro")
+    db.progress("runs-t01", build, "building", 31, 1204113, 14020, 0.11)
+    db.finish_run(build, "committed (step limit)", "built <ok>")
+    review = db.start_run("runs-t01", "review", 3, "deepseek-v4-pro")
+    db.progress("runs-t01", review, "reviewing", 16, 402000, 6000, 0.04)
+    db.finish_run(review, "APPROVE")
+    gates = db.start_run("runs-t01", "verify", 2, step="gates")
+    db.finish_run(gates, "fail unit_tests", "FAIL unit_tests\nsecond line")
+    live = db.start_run("runs-t01", "build", 4, "provider/live-model")
+    db.progress("runs-t01", live, "build#4 step 2/20", 2, 1000, 100, 0.01)
+    started = {
+        plan: stamp(plan, 31, 116), build: stamp(build, 13, 220), review: stamp(review, 9, 134),
+        gates: stamp(gates, 6, 62), live: stamp(live, 4),
+    }
+    db.close()
+
+    _, _, body = _get(App(home, repo), "/tasks/runs-t01")
+    section = re.search(r'<section class="block" aria-labelledby="h-runs">(.*?)</section>', body, re.S).group(1)
+    assert "Runs <span class=\"count\">5</span> <span class=\"aside\">Newest first</span>" in section
+    assert '<p class="runs-head">Each line is one agent, or one pass of the gates.</p>' in section
+    assert re.findall(r'<span class="run-name">([^<]+)</span>', section) == [
+        "build 4", "gates, build 2", "review, build 3", "build 3", "plan",
+    ]
+    assert re.findall(r'<span class="outcome([^"]*)">', section) == [
+        " o-live", " o-bad", " o-good", " o-good", " o-good",
+    ]
+    reports = re.findall(r'<details id="run-(\d+)-report"( open)?><summary>Report</summary>', section)
+    assert [int(run_id) for run_id, _ in reports] == [live, gates, review, build, plan]
+    assert [int(run_id) for run_id, open_ in reports if open_] == [live]
+    assert '<li class="run is-live">' in section
+    assert "committed (step limit)" in section
+    assert "built &lt;ok&gt;" in section and "FAIL unit_tests\nsecond line" in section
+    assert ('<span title="openrouter/kimi-k3.1-pro">kimi-k3.1-pro</span>, 31 steps, '
+            '1,204k in, 14k out, $0.11') in section
+    assert '<span title="deepseek-v4-pro">deepseek-v4-pro</span>, 16 steps, 402k in, 6k out, $0.04' in section
+    assert (f'<time datetime="{started[gates]}" title="{started[gates]}">6 minutes</time> ago, '
+            "took 1m02s") in section
+    assert "Read the transcript" not in body
+
+
+def test_task_page_next_step_follows_the_status(home, repo):
+    contracts = [_contract(f"state-t{index:02d}") for index in range(1, 13)]
+    contracts[7] = _contract("state-t08", depends=["state-t07"])
+    db = _board(home, contracts)
+    notes = {
+        "state-t01": "gates failed: unit_tests\n\nFAIL first\n  second <tag>",
+        "state-t02": "conflict with main\nresolve both files",
+        "state-t03": "CI failed\nunit_tests: 2 failed",
+        "state-t04": "changes requested\nadd the missing test",
+    }
+    for task_id, note in notes.items():
+        status = {"state-t01": "failed", "state-t02": "conflict",
+                  "state-t03": "ci_failed", "state-t04": "changes_requested"}[task_id]
+        db.update(task_id, status=status, note=note)
+    db.update("state-t05", status="building")
+    db.claim("state-t05", _dead_pid())
+    db.update("state-t06", status="building")
+    db.claim("state-t06", os.getpid())
+    db.update("state-t06", progress="build#2 step 14/120", activity="run(command=uv run pytest -q)")
+    db.update("state-t09", status="merged", pr_url="https://github.test/pr/66")
+    db.update("state-t10", status="abandoned")
+    db.update("state-t11", status="pr_open", pr_url="https://github.test/pr/77")
+    db.update("state-t12", status="reviewing", progress="collecting review context")
+    db.claim("state-t12", os.getpid())
+    db.close()
+
+    app = App(home, repo)
+    headings = {
+        "state-t01": "Read why it failed, then run it again.",
+        "state-t02": "Run it again to resolve the conflict with its base.",
+        "state-t03": "Run it again to fix the failing checks on its pull request.",
+        "state-t04": "Run it again to address the review.",
+        "state-t05": "Its process is gone. Check GitHub to mark it failed.",
+        "state-t06": "Running: build 2, step 14 of 120.",
+        "state-t07": "Ready.",
+        "state-t08": "Waits for state-t07 (queued).",
+        "state-t09": "Merged.",
+        "state-t10": "On hold.",
+        "state-t11": "Review and merge pull request #77.",
+        "state-t12": "Running: collecting review context",
+    }
+    panels = {}
+    for task_id, heading in headings.items():
+        status_code, _, body = _get(app, f"/tasks/{task_id}")
+        assert status_code == 200
+        assert '<main class="wrap" data-refresh="2">' in body
+        panel = re.search(r'<section class="next-step" aria-labelledby="h-next">(.*?)</section>', body, re.S).group(1)
+        panels[task_id] = panel
+        assert f'<h2 id="h-next">{heading}</h2>' in panel
+        assert '<div class="acts">' not in body and "<form" not in body
+    for task_id, note in notes.items():
+        assert f"<pre>{html.escape(note, quote=True)}</pre>" in panels[task_id]
+    assert "FAIL first\n  second &lt;tag&gt;" in panels["state-t01"]
+    assert "DEAD: process" in panels["state-t05"] and "<pre>" not in panels["state-t05"]
+    assert "run(command=uv run pytest -q)" in panels["state-t06"]
+    assert re.search(r"quiet \d+s", panels["state-t06"])
+    assert "The next run of its plan starts it." in panels["state-t07"]
+    assert '<a href="https://github.test/pr/66">Open pull request</a>' in panels["state-t09"]
+    assert "Plan runs skip it until you take it off hold." in panels["state-t10"]
+    assert "Every gate passed. Merging is your approval." in panels["state-t11"]
+
+
+def test_task_page_tails_the_task_log(home, repo):
+    db = _board(home, [_contract("log-t01"), _contract("log-t02")])
+    db.close()
+    (home / "logs").mkdir()
+    lines = [f"12:34:{index % 60:02d} [build#1] message {index:03d}" for index in range(250)]
+    lines[-1] += " <unsafe>"
+    (home / "logs/log-t01.log").write_text("\n".join(lines) + "\n")
+
+    app = App(home, repo)
+    _, _, body = _get(app, "/tasks/log-t01")
+    log = re.search(r'<pre class="log" data-follow>(.*?)</pre>', body, re.S).group(1)
+    assert log.count('<span class="t">') == 200
+    assert log.count('<span class="tag">[build#1]</span>') == 200
+    assert "message 049" not in log
+    assert "message 050" in log and "message 249" in log
+    assert log.index("message 050") < log.index("message 249")
+    assert '<span class="t">12:34:50</span> <span class="tag">[build#1]</span> message 050' in log
+    assert "message 249 &lt;unsafe&gt;" in log and "<unsafe>" not in log
+
+    _, _, missing = _get(app, "/tasks/log-t02")
+    assert '<pre class="log" data-follow>No log yet.</pre>' in missing
+
+
+def test_unknown_task_is_a_404_that_links_back_to_the_board(home, repo):
+    _board(home).close()
+    status, _, body = _get(App(home, repo), "/tasks/nope-t01")
+    assert status == 404
+    assert "nope-t01 isn&#x27;t on this board" in body
+    assert '<a href="/">Back to the board</a>' in body
+
+
+def test_board_links_every_task_to_its_page(home, repo):
+    db = _board(home, [_contract("link-t01"), _contract("link-t02"), _contract("link-t03")])
+    special = Task(id="link t04+%", goal="A quoted task id", spec_refs=(), depends_on=(), non_goals=(),
+                   acceptance=("Done",), verification=("true",), risk="low", plan=PLAN)
+    db.upsert_task(special)
+    db.update("link-t01", status="failed")
+    db.update("link-t02", status="building")
+    db.claim("link-t02", os.getpid())
+    db.update("link-t03", status="merged")
+    db.close()
+
+    app = App(home, repo)
+    _, _, body = _get(app)
+    needs = re.search(r'<section class="block" aria-labelledby="h-you">(.*?)</section>', body, re.S).group(1)
+    running = re.search(r'<section class="block" aria-labelledby="h-run">(.*?)</section>', body, re.S).group(1)
+    plans = re.search(r'<section class="block" aria-labelledby="h-plans">(.*?)</section>', body, re.S).group(1)
+    assert re.findall(r'<a class="id" href="([^"]+)">([^<]+)</a>', needs) == [("/tasks/link-t01", "link-t01")]
+    assert re.findall(r'<a class="id" href="([^"]+)">([^<]+)</a>', running) == [("/tasks/link-t02", "link-t02")]
+    links = {text: href for href, text in re.findall(r'<a class="id" href="([^"]+)">([^<]+)</a>', plans)}
+    quoted = quote(special.id, safe="")
+    assert links == {
+        "link-t01": "/tasks/link-t01", "link-t02": "/tasks/link-t02", "link-t03": "/tasks/link-t03",
+        special.id: f"/tasks/{quoted}",
+    }
+    assert quoted == "link%20t04%2B%25"
+    assert '<span class="id">' not in body
+    status, _, page = _get(app, f"/tasks/{quoted}")
+    assert status == 200 and '<h1 class="task-goal">A quoted task id</h1>' in page
 
 
 def test_web_serves_the_board_and_its_assets_over_http(home, repo):
