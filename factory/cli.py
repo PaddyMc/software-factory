@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import config as C
@@ -124,7 +126,12 @@ def cmd_run_plan(a, plan: Path, tasks: dict) -> int:
     p = scheduler.Plan(name=contracts.plan_name(rel), tasks=[t.id for t in mine], parallel=a.parallel,
                        network_for=tuple(x for x in (a.network_for or "").split(",") if x),
                        child_args=_child_args(a), manual=manual)
-    results = scheduler.run(db, p, scheduler.default_launch(root))
+    from .pipeline import Stopped
+    try:
+        results = scheduler.run(db, p, scheduler.default_launch(root))
+    except Stopped:
+        print(scheduler.summary(db, p))
+        return 1
     print(scheduler.summary(db, p))
     return 0 if all(s in ("pr_open", "merged") for s in results.values()) else 1
 
@@ -133,7 +140,7 @@ def cmd_run_one(a) -> int:
     import os
 
     from .agents import LangChainRoles, flow_models, missing_keys
-    from .pipeline import KINDS, Options, Pipeline, PipelineError, create_worktree, git
+    from .pipeline import KINDS, Options, Pipeline, PipelineError, Stopped, create_worktree, git
 
     root = repo_root()
     home = factory_home()
@@ -229,6 +236,11 @@ def cmd_run_one(a) -> int:
                   trunk=trunk, stacked_on=",".join(stacked) or None,
                   candidate_sha=None, pr_url=None, attempts=0, note=None, progress=None)
     db.claim(task.id, os.getpid())
+
+    def _stopped(signum, frame):
+        raise Stopped("stopped by factory stop")
+
+    previous_sigterm = signal.signal(signal.SIGTERM, _stopped)
     sbx = S.make(wt, home / "cache", sandbox=not a.no_sandbox, network=a.network, cfg=cfg.sandbox)
     opts = Options(base_ref=pr_base, max_attempts=a.max_attempts, open_pr=not a.no_pr,
                    skip_gates=tuple(x for x in a.skip_gates.split(",") if x), full_e2e=a.full_e2e,
@@ -245,7 +257,10 @@ def cmd_run_one(a) -> int:
     try:
         result = Pipeline(db, LangChainRoles(root, a.model, cfg=cfg), task, wt, base_sha, sbx, opts, log=log,
                           transcript_dir=home / "transcripts" / task.id).run()
+    except Stopped:
+        result = {"outcome": "stopped"}
     finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
         log.close()
     row = db.task(task.id)
     if resolution and row["status"] == "failed":
@@ -690,6 +705,92 @@ def cmd_gates(a) -> int:
     return 0 if G.passed(gs) else 1
 
 
+def _stop_pid(pid: int, wait: float) -> bool:
+    """SIGTERM a process, then SIGKILL it after `wait` seconds. Return whether the kill was needed."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    deadline = time.monotonic() + max(0.0, wait)
+    while pid_alive(pid):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.1, remaining))
+    if not pid_alive(pid):
+        return False
+    try:
+        pgid = os.getpgid(pid)
+        if pgid == pid:
+            os.killpg(pgid, signal.SIGKILL)
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    return True
+
+
+def _stop_task(db, row, wait: float) -> int:
+    tid, pid = row["id"], row["pid"]
+    if row["status"] not in ACTIVE or not pid_alive(pid):
+        print(f"{tid} is {row['status']}; nothing to stop", file=sys.stderr)
+        return 1
+    killed = _stop_pid(pid, wait)
+    current = db.task(tid)
+    if current is not None and current["status"] in ACTIVE:
+        from .pipeline import stopped_note
+        db.update(tid, status="failed", progress=None, note=stopped_note())
+    print(f"stopped {tid} (pid {pid})" + (" (killed)" if killed else ""))
+    return 0
+
+
+def _stop_plan(db, home: Path, root: Path, plan: Path, wait: float) -> int:
+    from .scheduler import plan_pid_file
+
+    rel = str(plan.relative_to(root))
+    name = contracts.plan_name(rel)
+    stopped = 0
+    pid_file = plan_pid_file(home, name)
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            if pid <= 0:
+                raise ValueError("not a process id")
+        except ValueError:
+            pid = None
+        if pid is not None and pid_alive(pid):
+            killed = _stop_pid(pid, wait)
+            print(f"stopped plan run {name} (pid {pid})" + (" (killed)" if killed else ""))
+            stopped += 1
+        pid_file.unlink(missing_ok=True)
+    for row in db.tasks():
+        if row["plan"] == rel and row["status"] in ACTIVE and pid_alive(row["pid"]):
+            stopped += _stop_task(db, row, wait) == 0
+    if not stopped:
+        print(f"nothing to stop: {name} has no running plan run or task")
+    return 0
+
+
+def cmd_stop(a) -> int:
+    db = _db()
+    row = db.task(a.target)
+    if row is not None:
+        return _stop_task(db, row, a.wait)
+    root = repo_root()
+    try:
+        plan = contracts.find_plan(root, a.target)
+    except contracts.ContractError as e:
+        print(f"FAIL {e}", file=sys.stderr)
+        return 1
+    if plan is None:
+        print(f"{a.target} is neither a task on the board nor a plan "
+              "(a path, or a plan's file name without .md)", file=sys.stderr)
+        return 1
+    return _stop_plan(db, factory_home(), root, plan, a.wait)
+
+
 def cmd_clean(a) -> int:
     from .pipeline import git
 
@@ -861,6 +962,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--notify", action="store_true", help="desktop notification (notify-send) when the run ends")
     s.add_argument("--flow", help="the agent flow to run (a key of `flows`; default: the config's `flow`)")
     s.set_defaults(fn=cmd_run)
+
+    s = sub.add_parser("stop", help="stop a running task, or a plan run and every task it started")
+    s.add_argument("target", help="a task on the board, or a plan (path, or file name without .md)")
+    s.add_argument("--wait", type=float, default=10.0, metavar="SECONDS",
+                   help="seconds to wait for each process before SIGKILL (default: 10)")
+    s.set_defaults(fn=cmd_stop)
 
     s = sub.add_parser("top", help="live dashboard: plans with their task counters, running tasks, recent events")
     s.add_argument("plan", nargs="?", help="only this plan (name or path)")

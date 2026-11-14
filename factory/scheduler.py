@@ -14,6 +14,8 @@ conflicts resolved, and PRs whose CI fails (`ci_failed`) get the failures fixed.
 from __future__ import annotations
 
 import datetime as dt
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -38,6 +40,11 @@ class Plan:
 
 def say(msg: str) -> None:
     print(f"{dt.datetime.now():%H:%M:%S} {msg}", flush=True)
+
+
+def plan_pid_file(home: Path, name: str) -> Path:
+    """A plan run's pid file: $FACTORY_HOME/plan-runs/<name>.pid."""
+    return home / "plan-runs" / f"{name}.pid"
 
 
 def default_launch(repo: Path) -> Callable[[str, list[str]], subprocess.Popen]:
@@ -66,10 +73,20 @@ def run(db: DB, plan: Plan, launch: Callable[[str, list[str]], subprocess.Popen]
         clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep) -> dict[str, str]:
     """Supervise until nothing is running and nothing more can start.
     Returns {task_id: final status} for every task this run started."""
+    from .pipeline import Stopped
+
     running: dict[str, tuple[subprocess.Popen, float]] = {}
     results: dict[str, str] = {}
-    say(f"plan {plan.name}: {len(plan.tasks)} tasks, up to {plan.parallel} at once — follow with `factory top`")
+    pid_file = plan_pid_file(db.path.parent, plan.name)
+
+    def _stopped(signum, frame):
+        raise Stopped("stopped by factory stop")
+
+    previous = signal.signal(signal.SIGTERM, _stopped)
     try:
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text(str(os.getpid()))
+        say(f"plan {plan.name}: {len(plan.tasks)} tasks, up to {plan.parallel} at once — follow with `factory top`")
         while True:
             for tid, (proc, t0) in list(running.items()):
                 if proc.poll() is None:
@@ -94,9 +111,24 @@ def run(db: DB, plan: Plan, launch: Callable[[str, list[str]], subprocess.Popen]
             if not running and not elsewhere(db, plan, running):
                 break
             sleep(plan.poll)
+    except Stopped:
+        say(f"stopped; terminating {len(running)} task run(s)")
+        for proc, _ in running.values():
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+        for proc, _ in running.values():
+            proc.wait()
+        raise
     except KeyboardInterrupt:
         if running:
             say(f"stopped; {len(running)} run(s) continue in the background: " + ", ".join(running))
+        return results
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        pid_file.unlink(missing_ok=True)
     return results
 
 

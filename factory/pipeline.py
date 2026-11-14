@@ -39,6 +39,14 @@ class PipelineError(RuntimeError):
     pass
 
 
+class Stopped(BaseException):
+    """Raised in the main thread when SIGTERM arrives: the run was stopped by `factory stop`."""
+
+
+def stopped_note() -> str:
+    return f"stopped by factory stop at {dt.datetime.now(dt.timezone.utc):%H:%M} UTC; run it again to start over"
+
+
 @dataclass
 class Resolution:
     """An open PR's change replayed onto a base it conflicts with (see `replay_worktree`)."""
@@ -582,6 +590,14 @@ class Pipeline:
         try:
             return self.graph().invoke(
                 {}, config={"recursion_limit": (8 + len(self.opts.flow.steps)) * self.opts.max_attempts + 10})
+        except Stopped:
+            note = stopped_note()
+            if self.run_id is not None and self.db.conn.execute(
+                    "SELECT 1 FROM runs WHERE id=? AND ended_at IS NULL", (self.run_id,)).fetchone():
+                self.db.finish_run(self.run_id, "stopped", note)
+            self.db.update(self.task.id, status="failed", progress=None, note=note)
+            self._event("stage", "stopped")
+            raise
         except Exception as e:
             self.db.update(self.task.id, status="failed", progress=None, note=f"error: {type(e).__name__}: {e}"[:2000])
             self._event("stage", f"failed: {clip(f'{type(e).__name__}: {e}', 300)}")
