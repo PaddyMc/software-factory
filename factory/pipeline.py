@@ -268,7 +268,8 @@ class Pipeline:
     def _event(self, tag: str, message: str) -> None:
         """Log line + heartbeat/activity in the db, so `factory top` shows what is happening now."""
         self.log(tag, message)
-        self.db.heartbeat(self.task.id, f"[{tag}] {message}")
+        if not self.db.heartbeat(self.task.id, f"[{tag}] {message}"):
+            self.log("board", "board busy: skipped a heartbeat")
 
     def _record(self, event: dict) -> None:
         if self.transcript is None:
@@ -284,7 +285,8 @@ class Pipeline:
         text = f"{label} step {steps}/{max_steps} · {tin // 1000}k in / {tout // 1000}k out"
         text += f" · ${cost:.3f}" if cost is not None else ""
         text += f" · {refused} refused" if refused else ""
-        self.db.progress(self.task.id, self.run_id, text, steps, tin, tout, cost, refused)
+        if not self.db.progress(self.task.id, self.run_id, text, steps, tin, tout, cost, refused):
+            self.log("board", "board busy: skipped a progress update")
         if self.opts.max_cost is not None:
             spent = self.db.task(self.task.id)["cost_usd"] or 0.0
             if spent > self.opts.max_cost:

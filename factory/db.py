@@ -69,11 +69,17 @@ def now() -> str:
 
 
 class DB:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, timeout: float = 30.0):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self.conn = sqlite3.connect(path)
+        self.conn = sqlite3.connect(path, timeout=timeout)
         self.conn.row_factory = sqlite3.Row
+        # Readers never block writers in WAL; a locked switch is retried on the next open.
+        try:
+            self.conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError:
+            pass
+        self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
         for table, cols in MIGRATIONS.items():
             have = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
@@ -150,22 +156,37 @@ class DB:
         self.conn.commit()
 
     def progress(self, task_id: str, run_id: int, text: str, steps: int, tokens_in: int, tokens_out: int,
-                 cost_usd: float | None = None, refused: int = 0) -> None:
-        """Live progress of the running role: shown by `factory status` and `factory top`."""
-        self.conn.execute("UPDATE runs SET steps=?, tokens_in=?, tokens_out=?, cost_usd=?, refused=? WHERE id=?",
-                          (steps, tokens_in, tokens_out, cost_usd, refused, run_id))
-        self.conn.execute(
-            "UPDATE tasks SET progress=?, cost_usd=(SELECT SUM(cost_usd) FROM runs WHERE task_id=?), "
-            "heartbeat_at=?, updated_at=? WHERE id=?", (text, task_id, now(), now(), task_id))
-        self.conn.commit()
+                 cost_usd: float | None = None, refused: int = 0) -> bool:
+        """Advisory live progress for observers: True on commit, False when the board is locked."""
+        try:
+            self.conn.execute("UPDATE runs SET steps=?, tokens_in=?, tokens_out=?, cost_usd=?, refused=? WHERE id=?",
+                              (steps, tokens_in, tokens_out, cost_usd, refused, run_id))
+            self.conn.execute(
+                "UPDATE tasks SET progress=?, cost_usd=(SELECT SUM(cost_usd) FROM runs WHERE task_id=?), "
+                "heartbeat_at=?, updated_at=? WHERE id=?", (text, task_id, now(), now(), task_id))
+            self.conn.commit()
+        except sqlite3.OperationalError as e:
+            if "database is locked" not in str(e):
+                raise
+            self.conn.rollback()
+            return False
+        return True
 
-    def heartbeat(self, task_id: str, activity: str | None = None) -> None:
-        """Last sign of life from the running `factory run` process (+ what it was doing)."""
-        if activity is None:
-            self.conn.execute("UPDATE tasks SET heartbeat_at=? WHERE id=?", (now(), task_id))
-        else:
-            self.conn.execute("UPDATE tasks SET heartbeat_at=?, activity=? WHERE id=?", (now(), activity[:500], task_id))
-        self.conn.commit()
+    def heartbeat(self, task_id: str, activity: str | None = None) -> bool:
+        """Advisory last sign of life for observers: True on commit, False when the board is locked."""
+        try:
+            if activity is None:
+                self.conn.execute("UPDATE tasks SET heartbeat_at=? WHERE id=?", (now(), task_id))
+            else:
+                self.conn.execute("UPDATE tasks SET heartbeat_at=?, activity=? WHERE id=?",
+                                  (now(), activity[:500], task_id))
+            self.conn.commit()
+        except sqlite3.OperationalError as e:
+            if "database is locked" not in str(e):
+                raise
+            self.conn.rollback()
+            return False
+        return True
 
     def claim(self, task_id: str, pid: int) -> None:
         """Record the process that is running this task (liveness is checked against it)."""
