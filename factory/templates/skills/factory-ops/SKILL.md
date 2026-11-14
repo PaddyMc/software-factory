@@ -30,7 +30,7 @@ These are read-only and safe to run, as are `top --once`, `logs`, `transcript`, 
 ## How it works
 
 - **Task:** an 8-key YAML contract in the plans (`plans` in `.factory/config.yaml`). Its state lives only in the board, `$FACTORY_HOME/factory.db` (`factory config` names the directory); plans carry no status.
-- **`factory run TASK`:** planner → builder ⇄ reviewer → deterministic gates → verifier → PR, with up to `--max-attempts` (3) builds, in `$FACTORY_HOME/worktrees/TASK` on branch `factory/TASK`, in an offline bubblewrap sandbox. It ends `pr_open` or `failed`. Nothing retries automatically across runs.
+- **`factory run TASK`:** the built-in `default` flow is planner → builder ⇄ reviewer → deterministic gates → verifier → PR; `flows:` and `--flow NAME` reshape it. It runs with up to `--max-attempts` (3) builds, in `$FACTORY_HOME/worktrees/TASK` on branch `factory/TASK`, in an offline bubblewrap sandbox. It ends `pr_open` or `failed`. Nothing retries automatically across runs.
 - **`factory run PLAN`** (the plan's file name without `.md`, or its path): every task of the plan without a PR, in dependency order, `--parallel N` (default 3) at once, one PR per task.
 - **Stacking:** a task starts once each dependency is merged or has an open PR. On an open PR it is built on top of it, and its PR targets `factory/<dep>`.
 - **Statuses:** `queued → planning → building → reviewing → verifying → pr_open → merged`, or `failed`, or `abandoned` (a closed PR, or a deliberate hold), or `conflict` (an open PR that no longer applies to its base), or `ci_failed` (an open PR whose CI fails on its head), or `changes_requested` (an open PR a review asks to change).
@@ -45,8 +45,8 @@ These are read-only and safe to run, as are `top --once`, `logs`, `transcript`, 
 
 | The user asks | Answer |
 |---|---|
-| Start, kick off, "finish the backlog" | `export OPENROUTER_API_KEY=…` then `factory run PLAN --parallel 3 --max-cost 10 --notify`, one per plan (separate terminals are fine). Add `--network-for TASK` for tasks that must download. A task whose dependency in another plan has no PR yet waits, so rerun its plan once it does. The user still merges each PR, and manual tasks stay manual |
-| What's happening | `factory top [PLAN]` (live, per plan: ✓ merged ◆ PR open ≠ PR conflicts ! CI fails ▶ running ✗ failed · queued ⊘ held), `factory logs TASK -f` or `factory logs --all -f`, `factory show TASK`, `factory transcript TASK --role build`, `factory trace TASK` |
+| Start, kick off, "finish the backlog" | `export OPENROUTER_API_KEY=…` then `factory run PLAN --parallel 3 --max-cost 10 --notify`, one per plan (separate terminals are fine). Add `--network-for TASK` for tasks that must download, and `--flow NAME` to run a different agent flow than the config's `flow` (a key of `flows:`). A task whose dependency in another plan has no PR yet waits, so rerun its plan once it does. The user still merges each PR, and manual tasks stay manual |
+| What's happening | `factory top [PLAN]` (live, per plan: ✓ merged ◆ PR open ≠ PR conflicts ! CI fails ▶ running ✗ failed · queued ⊘ held), `factory logs TASK -f` or `factory logs --all -f`, `factory show TASK`, `factory transcript TASK --role build`, `factory trace TASK`. Each run records its flow and step; `factory show TASK` labels them and `--step NAME` filters |
 | What's left | `factory status` (counters such as `2/8 merged · 2 failed · 4 waiting`) |
 | Why did X fail | The diagnosis steps below |
 | Will failures retry? / Rerun everything | Not between runs; within a run, up to 3 builds. Rerun the plan to retry every failed task in it once: `factory run PLAN`. One task: `factory run TASK`. Leftover worktrees are replaced automatically |

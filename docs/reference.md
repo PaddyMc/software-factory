@@ -43,14 +43,45 @@ Codex links are also added when re-running `factory init` in a repository initia
 | `unit_tests` | `[]` | Commands for the `unit_tests` gate |
 | `lockfiles` | common lockfiles | Files the `diff` gate notes when they change |
 | `dependency_sources` | cargo registry and git sources, rustup toolchains | Directories the agents' file tools may also read, by absolute path (never write) |
-| `models` | `{}` | Model per role (`plan`, `build`, `review`, `verify`), e.g. `{review: "anthropic:claude-…"}`; over the prompt's frontmatter |
-| `max_steps` | `{}` | Model calls per agent run, per role; over the prompt's frontmatter |
+| `flow` | `default` | The flow `factory run` uses: a name from `flows` (the built-in `default` is today's pipeline); `factory run --flow` overrides it per run |
+| `flows` | `{default: …}` | Named agent flows: name → ordered step list. A step is a kind string (`plan`, `build`, `review`, `verify`, `gates`) or a mapping with `kind` and optional `name`, `model`, `max_steps`. Exactly one gates step; one is inserted after the last review (else build) step when omitted |
+| `models` | `{}` | Model per step kind (`plan`, `build`, `review`, `verify`), e.g. `{review: "anthropic:claude-…"}`; over the prompt's frontmatter |
+| `max_steps` | `{}` | Model calls per agent run, per step kind; over the prompt's frontmatter |
 | `denied_commands` | `[]` | Extra regexes the agents' `run` tool refuses (git push/commit/reset…, `sudo`, `gh`, `terraform apply/destroy` and `factory` are built in) |
 | `sandbox.ro_binds` / `rw_binds` | rustup + uv read-only, `~/.cargo` writable | Host paths visible inside the sandbox (missing ones are skipped) |
 | `sandbox.hide` | cargo credentials | Files masked with `/dev/null` |
 | `sandbox.path` | `~/.cargo/bin`, `~/.local/bin` | Prepended to `PATH` |
 | `sandbox.env` / `offline_env` | cargo/uv cache dirs / `CARGO_NET_OFFLINE`, `UV_OFFLINE` | Environment (`~` = home, `{cache}` = `$FACTORY_HOME/cache`); `offline_env` applies without `--network` |
 | `sandbox.cache_dirs` | `target`, `uv` | Subdirectories of the shared cache to create |
+
+**Agent flows:** choose one with `flow:` or `factory run --flow`; see [Agent flows](architecture.md#agent-flows) for how a flow runs.
+
+```yaml
+flow: careful
+flows:
+  lean:                           # no planner, gates decide, no verifier report
+    - build
+    - review
+  careful:
+    - plan
+    - build
+    - review
+    - {name: second-review, kind: review, model: "anthropic:claude-opus-5-5"}
+    - verify
+  gates-first:
+    - plan
+    - build
+    - gates                       # reviewers only see changes that pass the gates
+    - review
+    - verify
+  test-first:
+    - plan
+    - {name: tests, kind: build}  # prompt: .factory/agents/tests.md
+    - build
+    - review
+```
+
+Steps follow `[plan]? build+ (review | gates)* [verify]?`. In `lean`, `careful` and `test-first`, a gates step is inserted after the last review; `gates-first` places it explicitly. Custom steps can set their own prompt, model and step limit as described under [Agent flows](architecture.md#agent-flows).
 
 **A Rust workspace** with a dedicated e2e crate (`my-e2e`); changes to the core crates run the whole e2e suite:
 
@@ -153,17 +184,17 @@ Use `factory init --no-skills` to skip the skills, and `factory init --force` to
 |---|---|
 | `factory init [--force] [--no-skills] [--session-log DIR \| --no-session-log]` | Set the repository up: config, skills, session log, starter plan, guidance section |
 | `factory config` | Print the effective project settings, the state directory and the GitHub identity |
-| `factory prompt ROLE` | Print a role's prompt as the agents get it (the repository's override, else the shipped one), with its model |
+| `factory prompt ROLE\|STEP [--flow F]` | Print a role's or flow step's prompt as the agents get it, with its model and step limit. A step name resolves within `--flow`, defaulting to the config's `flow` |
 | `factory validate-plan [PLAN…]` | Check contracts |
 | `factory sync` | Load every contract from the plans into the db (statuses kept) |
 | `factory status [PLAN] [--refresh] [--json]` | The board, grouped by plan with a task counter. `--refresh` picks up merged or closed PRs, takes up open or merged PRs opened from another board, moves stacked PRs whose dependencies merged, marks PRs that conflict with their base `conflict`, marks PRs a review requests changes on `changes_requested` and clears them when the request is approved or dismissed, and marks PRs whose CI fails `ci_failed`, and fails dead runs. Conflicts come first, then requested changes, then CI |
-| `factory run PLAN [--parallel N] [--network-for T1,T2] [flags]` | Every task of the plan without a PR, one PR each, dependents stacked on open dependency PRs; PRs in `conflict` get their conflicts resolved, PRs in `ci_failed` get their CI fixed, and PRs in `changes_requested` get the review addressed |
-| `factory run TASK [flags]` | Run one task in the foreground (stacked the same way). On a `conflict` task it resolves the conflicts, on a `ci_failed` task it fixes CI, and on a `changes_requested` task it addresses the review; `--force` rebuilds any of them from scratch instead |
+| `factory run PLAN [--flow NAME] [--parallel N] [--network-for T1,T2] [flags]` | Every task of the plan without a PR, one PR each, dependents stacked on open dependency PRs; PRs in `conflict` get their conflicts resolved, PRs in `ci_failed` get their CI fixed, and PRs in `changes_requested` get the review addressed. `--flow NAME` runs every child under that flow instead of the config's `flow` |
+| `factory run TASK [--flow NAME] [flags]` | Run one task in the foreground (stacked the same way) under `--flow NAME` instead of the config's `flow` when given. On a `conflict` task it resolves the conflicts, on a `ci_failed` task it fixes CI, and on a `changes_requested` task it addresses the review; `--force` rebuilds any of them from scratch instead |
 | `factory top [PLAN] [--once]` | Live dashboard: each active plan with its glyph strip (✓ merged ◆ PR open ≠ PR conflicts ! CI fails ▶ running ✗ failed · queued ⊘ held) and counter, then its tasks' progress, current action, elapsed and quiet time, cost; recent events |
 | `factory logs TASK [-f] [-n N]` / `factory logs --all -f` | One task's log, or every task's log merged |
-| `factory trace TASK [--role R] [--attempt N] [--all]` | Per-step model time, tool time, context size, cached tokens, output, cost, calls, largest results |
-| `factory transcript TASK [--role R] [--attempt N] [--all] [--full]` | Exactly what the model saw and did |
-| `factory show TASK [--role R]` | Every step's report and stats. `--role human_review` shows the review brief a `changes_requested` rework gave the builder |
+| `factory trace TASK [--role R] [--step S] [--attempt N] [--all]` | Per-step model time, tool time, context size, cached tokens, output, cost, calls, largest results; `--step` filters by flow step |
+| `factory transcript TASK [--role R] [--step S] [--attempt N] [--all] [--full]` | Exactly what the model saw and did; `--step` filters by flow step |
+| `factory show TASK [--role R] [--step S]` | Every step's report and stats, labelled with its flow and step; `--step` filters by flow step. `--role human_review` shows the review brief a `changes_requested` rework gave the builder |
 | `factory gates TASK [--ref R] [--base B] [--skip …]` | Deterministic gates only, in a throwaway worktree. The base defaults to the PR a stacked task is built on, else the default branch |
 | `factory requeue TASK…` | Put `failed` or `abandoned` tasks back to `queued` so the next plan run picks them up (refuses running, open-PR and merged tasks) |
 | `factory clean TASK` | Remove a task's worktree |
@@ -175,7 +206,8 @@ Useful `run` flags:
 | Flag | Effect |
 |---|---|
 | `--base B` | Branch for the worktree and PR (default: current branch) |
-| `--model M` | Override every role's model |
+| `--flow NAME` | The agent flow to run (a key of `flows`; default: the config's `flow`) |
+| `--model M` | Override every step's model |
 | `--max-attempts N` | Build attempts (default 3) |
 | `--max-cost USD` | Abort the task above this cost |
 | `--network` | Allow network in the sandbox |
@@ -200,6 +232,8 @@ Each keeps their own board; GitHub is what they share. `factory sync && factory 
 |---|---|
 | `… which the factory refuses; run it by hand` | The contract's verification runs a denied command. Do the task by hand, or `--skip-gates verification` |
 | `.factory/config.yaml: unknown key …` | A typo in the config; `factory config` shows what was understood |
+| `unknown flow NAME (flows: default, …)` | The `flow` or `--flow` value matches no flow in `flows`. `factory config` prints the defined names; use one or add it under `flows:` |
+| `flows.<name>.<step>: build steps come first (after any plan step) and are contiguous` (or `at most one plan step`, `the plan step must be first`, `at most one verify step`, `the verify step must be last`, `at least one build step is required`, `at most one gates step`) | The steps must follow `[plan]? build+ (review \| gates)* [verify]?`. Reorder them; see [Agent flows](architecture.md#agent-flows) |
 | Status `DEAD` | The `factory run` process died (killed, crashed). `factory status --refresh` marks it failed; run the task or its plan again |
 | `cannot stack TASK: its open dependencies conflict` | Merge one of the dependencies' PRs, `factory status --refresh`, then run again |
 | Status `conflict` | The PR no longer applies to its base. `factory run TASK` (or its plan) resolves it; see [Merge conflicts](architecture.md#merge-conflicts) |
@@ -211,6 +245,7 @@ Each keeps their own board; GitHub is what they share. `factory sync && factory 
 | `… not the factory's candidate: someone pushed to it` | A commit the factory didn't make is on the PR branch, so its CI isn't the factory's to fix. Fix it there, or `factory run TASK --force` to rebuild |
 | A CI fix `failed` | The PR still holds the failing head. Run the task again to rebuild it from scratch on the trunk |
 | `⚠ stopped: step limit` in the log | The agent used `max_steps`. Raise it with `max_steps: {ROLE: N}` in `.factory/config.yaml`, or narrow the task |
+| `factory prompt` or the run log prints `⚠ <step>'s prompt has no VERDICT: line; every review will count as CHANGES` | A custom review prompt without `VERDICT: APPROVE` and `VERDICT: CHANGES` lines fails safe to CHANGES, so every attempt is spent. Add the verdict lines to `.factory/agents/<step>.md` (or its kind's override) |
 | Gates fail on network or dependency fetches | The sandbox is offline. Fetch dependencies first, or pass `--network` for tasks that download |
 | A tool is "not found" inside the sandbox | It lives under `$HOME`, which is hidden. Add its directory to `sandbox.ro_binds` and `sandbox.path` |
 | `set OPENROUTER_API_KEY first` | Export the key for the providers the roles use (`factory run` lists them) |

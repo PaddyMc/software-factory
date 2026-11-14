@@ -75,6 +75,7 @@ Dotted lines are observability data, not control flow.
 |---|---|---|
 | Entry | `cli.py` | Commands, pre-run checks (contract valid, factory-runnable, API keys present, dependencies merged or with open PRs), worktree setup, `status --refresh`, `init` and `config` |
 | Settings | `config.py` | Load and validate `.factory/config.yaml` from the **main checkout** (never a task worktree, so an agent can't weaken its own gates) |
+| Flows | `flows.py` | Parse and validate named flows from `flows:` (step kinds, names, models, step limits and order rules), hold the built-in `default` flow, and insert a gates step when one is omitted |
 | Contracts | `contracts.py` | Read the fenced YAML in plans into `Task` objects (8 keys). Validate schema, IDs, dependencies across plans, command selection, placeholders |
 | Scheduling | `scheduler.py` | Run one plan's tasks as child `factory run` processes, up to `--parallel`. A task starts once each dependency is merged or has an open PR |
 | Stacking | `stack.py` | After a merge, rebase the PRs stacked on it onto the trunk and retarget them; edit PRs through the GitHub REST API |
@@ -308,7 +309,9 @@ sequenceDiagram
 | reviewer | `z-ai/glm-5.3` | 60 | read, `git_diff` | `VERDICT: APPROVE` or `CHANGES` (missing verdict = CHANGES) |
 | verifier | `deepseek/deepseek-v4-flash-0731` | 30 | read, `git_diff`, sandboxed `run` | Nothing: it writes the PR report; **the gates decide** |
 
-Set models and step limits per role with `models` and `max_steps` in `.factory/config.yaml`; `--model` overrides every role for one run. To replace a whole prompt, put it in `.factory/agents/<planner|builder|reviewer|verifier>.md` (frontmatter `model` and `max_steps` optional); the config's settings still win over its frontmatter. Any `provider:model` that LangChain's `init_chat_model` supports works, with the provider's key in the environment (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
+Roles are **step kinds**: a flow step of kind `build` gets the builder's tools and default prompt whatever its name. Set models and step limits per kind with `models` and `max_steps` in `.factory/config.yaml`; `--model` overrides every step for one run. To replace a kind's whole prompt, put it in `.factory/agents/<planner|builder|reviewer|verifier>.md` (frontmatter `model` and `max_steps` optional); the config's settings still win over its frontmatter. Any `provider:model` that LangChain's `init_chat_model` supports works, with the provider's key in the environment (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
+
+A **custom step** (a mapping step whose `name` differs from its `kind`) gets its own prompt from `.factory/agents/<name>.md` when that file exists, else its kind's prompt. Model precedence is `--model` > the step's `model` > `models[kind]` > prompt frontmatter > the default; step-limit precedence is the step's `max_steps` > `max_steps[kind]` > prompt frontmatter > 60.
 
 The system prompt is assembled from four parts:
 1. the role prompt, shipped in [`factory/prompts/`](../factory/prompts/) or overridden by the repository;
@@ -319,6 +322,42 @@ The system prompt is assembled from four parts:
 The shipped role prompts therefore carry no project specifics.
 
 No agent can commit, push, call `gh`, run `factory`, or touch the database. The pipeline does those things outside the sandbox.
+
+---
+
+## Agent flows
+
+A **flow** is a named, ordered list of agent steps under `flows:` in `.factory/config.yaml`; `flow:` picks the default for runs. `factory run TASK|PLAN --flow NAME` overrides it for one run, and a plan run passes it to every child. The built-in `default` flow — plan, build, review, gates, verify — is today's pipeline and can't be redefined. A step is a kind string (`plan`, `build`, `review`, `verify`, `gates`) or a mapping with `kind` required and optional `name`, `model` and `max_steps` (`gates` itself is a bare string). A step's kind fixes its tools, task message and output, as the [Roles](#roles) table describes.
+
+```mermaid
+flowchart TD
+  fresh(["fresh build"]) --> plan{"plan step in the flow?"}
+  plan -->|"yes, once"| p["PLAN"] --> builds
+  plan -->|"no"| builds
+  rework(["rework entry: resolve | ci | human_review<br/>no plan step; build on the PR's head"]) --> builds
+  subgraph attempt["attempt N"]
+    builds["every build step in order<br/>each commits what it leaves"] --> checks{"review steps and the gates step<br/>in flow order"}
+  end
+  checks -->|"first CHANGES or gate failure"| feedback["next attempt with the feedback"] --> builds
+  checks -->|"all passed"| verify{"verify step in the flow?"}
+  verify -->|"yes"| report["VERIFY<br/>write the PR report"] --> push["push + PR"]
+  verify -->|"no"| push
+```
+
+The order rules are:
+
+```text
+[plan]?   build+   ( review | gates )*   [verify]?
+  once    contiguous  any order              last
+```
+
+The effective flow has exactly one gates step: when omitted, one is inserted after the last review step, else after the last build step. Step names are unique, match `^[a-z][a-z0-9-]*$`, and aren't reserved (`resolve`, `ci`, `pr`, `human_review`, `planner`, `builder`, `reviewer`, `verifier`); a step named after a kind must have that kind.
+
+**How attempts end.** The first review step to return `CHANGES`, or a gates failure, ends the attempt; the next starts again at the first build step with that feedback (a custom reviewer's feedback is labelled ``Reviewer `NAME` requested changes``). Later build steps also see the earlier build steps' final messages from the same attempt. A no-change attempt ends with the no-change feedback, and no review or gates run. `--max-attempts` and the stop on identical gates failures are unchanged. When the gates pass, the run continues to the next review step if the flow puts reviewers after gates (gates-first), so those reviewers only see changes that passed the gates. Review and verify steps never commit, so the candidate the gates passed is the one pushed.
+
+**Where reworks enter.** Conflict resolution, CI fixes and human-review reworks keep their fixed entry, skip the plan step and build on the PR's head; from there they run the flow's build steps, review steps, gates and verify step. The resolve agent uses the flow's first build step's model and step limit; a clean conflict replay goes straight to the gates. CI and human-review reworks keep the brief in view on every attempt, and every review step of a human-review rework gets the review brief.
+
+**What runs record.** `runs.role` is still the kind: the gates run is role `verify`, step `gates`, and `resolve`, `ci`, `pr` and `human_review` keep their existing roles. The `runs.flow` and `runs.step` columns hold the flow and step names. `factory show TASK --step NAME` filters runs, and `factory show` labels each run with its flow and step; `factory top`'s progress label is the step name. The PR body has one `Reviewer report (<step>)` block per review step, a Verifier report only with a verify step, a Plan block only with a plan step, and a line naming the flow and its steps in order.
 
 ---
 
@@ -375,7 +414,7 @@ The agent interface is a single seam: a role receives a `Ctx` with `log`, `progr
 
 ## Known limitations and next steps
 
-- **The reviewer runs before the gates**, so it can approve builds that then fail mechanical checks. Planned: gates first.
+- **The default flow reviews before the gates**, so its reviewer can approve builds that then fail mechanical checks. A flow can put the gates first; see [Agent flows](#agent-flows).
 - **Context cost:** whole files stay in context for every later step. Planned: capped tool output, a slimmer system prompt, summarizing old steps.
 - **The builder re-explores what the planner already read.** Planned: the planner hands over exact files and line ranges.
 - **Conflicts and CI failures are found on refresh, not live.** GitHub computes `mergeable` lazily, so a PR that just started conflicting may show up one `status --refresh` later.
