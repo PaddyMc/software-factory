@@ -1,0 +1,23 @@
+title: Add --format json to the report tool
+kind: multi-file
+requires: [python3]
+config:
+  unit_tests: ["python3 -m unittest -q"]
+  dependency_sources: []
+  sandbox: {ro_binds: [], rw_binds: [], path: [], hide: []}
+contract:
+  id: report-json-t01
+  goal: "Add JSON output to the reporttool command-line tool while preserving its table output"
+  spec_refs: ["docs/plans/report-json.md"]
+  depends_on: []
+  non_goals: ["Changing the default table output or the KEY=VALUE item format, or adding third-party dependencies"]
+  acceptance:
+    - "The python3 -m reporttool entry point accepts --format {table,json}, defaulting to table"
+    - "Omitting --format or passing --format table keeps the table output byte for byte unchanged, as tests/test_cli.py asserts"
+    - 'With --format json, stdout is a JSON object of the shape {"title": TITLE, "rows": [[KEY, VALUE], ...]}; rows stay in command-line order and keys and values are the exact strings given'
+    - "The JSON formatter lives in reporttool/jsonfmt.py::format_json(title, rows)"
+    - "The README usage documents --format and tests/test_json.py adds visible unittest coverage"
+  verification: ["python3 -m unittest -v tests.test_json"]
+  risk: low
+hidden:
+  - python3 -m unittest -v bench_hidden.test_report

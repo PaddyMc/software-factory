@@ -1,0 +1,1 @@
+"""Small report-formatting tools."""

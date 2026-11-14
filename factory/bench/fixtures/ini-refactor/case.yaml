@@ -1,0 +1,22 @@
+title: Extract one shared settings parser
+kind: refactor
+requires: [python3]
+config:
+  unit_tests: ["python3 -m unittest -q"]
+  dependency_sources: []
+  sandbox: {ro_binds: [], rw_binds: [], path: [], hide: []}
+contract:
+  id: ini-refactor-t01
+  goal: "Extract the duplicated key = value settings parser into iniapp.ini.parse_pairs(text) without changing behavior"
+  spec_refs: ["docs/plans/ini-refactor.md"]
+  depends_on: []
+  non_goals: ["Changing the settings format with sections, inline comments or quoting, renaming public functions, or adding third-party dependencies"]
+  acceptance:
+    - "iniapp/ini.py::parse_pairs(text) is the single shared parser for the key = value settings format"
+    - "Parsing strips each line, skips blank lines and lines starting with #, raises ValueError when a line has no =, splits on the first =, strips keys and values while preserving inner value whitespace, and lets the last duplicate key win"
+    - "iniapp.app.load_settings(text) and iniapp.db.load_db_config(text) keep their names and behavior and delegate to parse_pairs, with neither module keeping its own parsing loop"
+    - "tests/test_ini.py adds visible unittest coverage for the shared parser and both public functions"
+  verification: ["python3 -m unittest -v tests.test_ini"]
+  risk: low
+hidden:
+  - python3 -m unittest -v bench_hidden.test_ini
