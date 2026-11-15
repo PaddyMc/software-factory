@@ -7,7 +7,7 @@ How the factory takes a task contract to a pull request. To install and run it, 
 ## Policy
 
 - **Merging is the approval.** Agents never merge, push, commit to your checkout, or see secrets; a passing check alone approves nothing. Branch protection is a GitHub setting you own.
-- **Gates decide.** A PR is opened only when every deterministic gate passes at the exact candidate commit. The verifier agent writes the PR report; it can't override a gate.
+- **Gates decide.** A PR is opened only when every deterministic gate passes at the exact candidate commit. The verifier agent writes the PR's title and summary; it can't override a gate.
 - **Isolation.** Agent commands and gates run under bubblewrap: read-only host, empty `$HOME`, `/tmp` and `/run`, cleared environment, no network unless asked. File tools stay in the worktree (reads also reach `dependency_sources`), and never write `.git`.
 - **Scope is the reviewer's call.** The builder may edit any file in the worktree; the contract's goal and non-goals bound the change, and unrelated edits are findings.
 - **Settings come from the main checkout,** never from a task worktree, so an agent can't weaken its own gates or change its own prompt.
@@ -106,7 +106,7 @@ flowchart TD
   verify -->|"fail"| retry
   retry -->|"yes, with feedback"| build
   retry -->|"no"| failed(["failed, reason in factory show"])
-  verify -->|"pass"| report["verifier agent writes the PR report"]
+  verify -->|"pass"| report["verifier agent writes the PR summary"]
   report --> pr["git push + gh pr create"]
   pr --> open(["pr_open"])
   open -->|"you merge, then status --refresh"| merged(["merged; PRs stacked on it move onto the trunk"])
@@ -154,7 +154,7 @@ What moves between agents is only what the pipeline hands over:
 | Planner | Builder | The plan text |
 | Reviewer (`VERDICT: CHANGES`) | Builder | The review, as feedback to address first |
 | Gates (fail) | Builder | The failing gates' output, as feedback |
-| Gates (pass) | Verifier | The gate table, for the PR report |
+| Gates (pass) | Verifier | The gate table, plus each review step's report from this attempt (cleaned and capped), for the PR summary |
 | CI (failing checks) | Builder | The failing checks and their jobs' logs, as feedback, on every attempt of a CI fix |
 
 A build is retried up to `--max-attempts` times (default 3). The run stops earlier when the same gates fail with identical output twice in a row. A task that ends `failed` stays failed until you run it, or its plan, again; the rerun starts from a fresh worktree. `factory requeue TASK…` puts `failed` or `abandoned` tasks back to `queued` without running them.
@@ -271,6 +271,79 @@ The run ends when nothing more can start, and prints each task's outcome and the
 
 ---
 
+## Pull requests
+
+A factory PR leads with the human summary and keeps the longer evidence collapsed. Its body has this shape (the three opening lines appear only when they apply, and there is one reviewer block per review step, in flow order):
+
+```markdown
+**Stacked** on DEPENDENCIES: merge those first. …
+**Conflicts resolved** on `BASE`: …
+REWORK LINE: …
+
+## What changed
+- What a user or maintainer will notice, naming the main files.
+
+## What to check
+- A decision, risk, unaddressed review finding, assumption or follow-up.
+
+## Checks
+All N gates passed on CANDIDATE after N build attempts. …
+
+<details><summary>Gate table</summary> … </details>
+<details><summary>The task</summary> goal, non-goals, acceptance criteria, verification commands </details>
+<details><summary>Reviewer report (first-review)</summary> … </details>
+<details><summary>Reviewer report (second-review)</summary> … </details>
+
+---
+<sub>Factory task `ID` from `PLAN` · **Flow** `FLOW`: plan, build, … · Candidate `SHA` on base `BASE` (`BASE_SHA`) · COST · The planner's plan and every agent's full report: `factory show ID`</sub>
+```
+
+The parts, in order, come from:
+
+| Part | Written by | From |
+|---|---|---|
+| **Stacked**, **Conflicts resolved** and rework lines, each only when it applies | The factory | The stack, conflict resolution, CI fix or human-review rework |
+| `## What changed` and `## What to check` | The verifier, parsed and bounded; otherwise the factory's fallback | The diff, gates and reviewers' reports |
+| `## Checks` | The factory | Gate results, build attempts, command and test counts, skipped gates and each review run's outcome |
+| Collapsed **Gate table** | The factory | The gate table, with detail lines shortened |
+| Collapsed **The task** | The factory | The contract's goal, non-goals, acceptance criteria and verification commands |
+| One collapsed **Reviewer report (NAME)** per review step, in flow order | The reviewers | Each report's last draft only, cleaned and capped |
+| `---`, then the `<sub>` footer | The factory | Factory task and plan, flow and its steps, candidate and base, recorded cost, and the full-report pointer |
+
+The verifier's whole report stays in its run record rather than being pasted into the body. Agent preambles are removed; repeated reviewer drafts keep only the last one. Headings inside collapsed blocks move down two levels (never beyond `######`), without changing fenced code, so they do not compete with the body's own headings.
+
+**Limits.** The bounds are deterministic; an overlong agent response cannot make GitHub refuse the PR.
+
+| What | Limit | What happens over it |
+|---|---|---|
+| The whole body | 60,000 characters (`BODY_LIMIT`; GitHub refuses more than 65,536) | The shrink ladder below runs, then the body is capped |
+| Each collapsed block | 12,000 characters (`BLOCK_LIMIT`) | The text is cut at a line where possible, an open code fence is closed, and a full-report pointer is added |
+| A gate-detail line | 160 characters | It is cut with `…` |
+| The summary title | 72 characters | It is cut at a word boundary with `…` |
+| What changed | At most 5 bullets, each at most 400 characters | Extra bullets become one bullet naming the count and the full-report command |
+| What to check | At most 8 bullets, each at most 400 characters | The same |
+
+The verifier prompt asks for 1–5 What changed bullets and 0–6 What to check bullets; the factory allows up to 8 in the latter so a bounded summary can carry all the reviewers' findings. When bullets are omitted, the replacement reads `N more bullets: factory show ID --step STEP`. A capped report ends `… kept N of M characters: factory show ID --step STEP`.
+
+When the assembled body exceeds 60,000 characters, it shrinks in a fixed order: reviewer blocks shrink to 2,000 characters each, longest first; each reviewer block then becomes its `factory show` line; The task becomes its pointer; then the gate table becomes its pointer; finally the whole body is capped if necessary.
+
+**Fallback summary.** If the verifier's response cannot be parsed in the fixed shape (there is no readable What changed bullet), or the flow has no verify step, the factory writes the summary itself. The title is the contract goal shortened to 72 characters; What changed contains the goal and a count of changed files with up to 10 paths; What to check collects every reviewer's findings, labelled by step. There is no second verifier call. An unparseable verify run gets outcome `report (fallback)` instead of `report`; a verify-less flow has no verify run to label. The PR still opens with the fallback summary.
+
+**Title and commits.** A new PR is titled `ID: TITLE`, where TITLE is the verifier's summary title or, when that is empty, the contract goal, cut at a word to 72 characters. The title is set only when the PR is created: conflict resolutions and reworks update its body and commits but never retitle it.
+
+Factory task commits have subject `factory(ID): GOAL`, with GOAL shortened at a word so the whole subject is at most 72 characters, then a blank line and a body explaining the commit:
+
+- `Build attempt N.` for a build;
+- `Fix CI, attempt N.` for a CI fix;
+- `Address review, attempt N.` for a human-review rework;
+- `Rebuilt on ONTO.` for a conflict resolution replayed onto ONTO.
+
+**Put the PR title on the trunk.** In the repository's settings (Settings → Pull Requests), set the squash-merge default commit message to the pull request title. A squash merge then lands the verifier's title, prefixed by the task id, instead of the less descriptive commit subject. Without that setting, GitHub uses the commit subject for a one-commit PR's squash merge. The factory cannot put the verifier's title into the candidate commit itself: commits are made before the verifier runs, and rewriting one afterwards would push a commit the gates never saw.
+
+**The full material.** The planner's plan is the plan run's report. `factory show TASK` prints it and every agent's full report; `factory show TASK --step STEP` prints one step's report, and the transcripts show exactly what the model saw and did. The task page served by `factory web` also shows every run's full report. Nothing is lost when the PR body cleans, caps or omits a report.
+
+---
+
 ## Inside one agent: the loop
 
 ```mermaid
@@ -309,7 +382,7 @@ sequenceDiagram
 | planner | `z-ai/glm-5.3` | 40 | read | The implementation plan |
 | builder | `deepseek/deepseek-v4-pro-0813` | 120 | read, write anywhere in the worktree except `.git`, sandboxed `run` | The change, or a conflicting PR's resolution |
 | reviewer | `z-ai/glm-5.3` | 60 | read, `git_diff` | `VERDICT: APPROVE` or `CHANGES` (missing verdict = CHANGES) |
-| verifier | `deepseek/deepseek-v4-flash-0731` | 30 | read, `git_diff`, sandboxed `run` | Nothing: it writes the PR report; **the gates decide** |
+| verifier | `deepseek/deepseek-v4-flash-0731` | 30 | read, `git_diff`, sandboxed `run` | Nothing: it writes the PR's title and summary (what changed, what to check); **the gates decide** |
 
 Roles are **step kinds**: a flow step of kind `build` gets the builder's tools and default prompt whatever its name. Set models and step limits per kind with `models` and `max_steps` in `.factory/config.yaml`; `--model` overrides every step for one run. To replace a kind's whole prompt, put it in `.factory/agents/<planner|builder|reviewer|verifier>.md` (frontmatter `model` and `max_steps` optional); the config's settings still win over its frontmatter. Any `provider:model` that LangChain's `init_chat_model` supports works, with the provider's key in the environment (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
 
@@ -342,7 +415,7 @@ flowchart TD
   end
   checks -->|"first CHANGES or gate failure"| feedback["next attempt with the feedback"] --> builds
   checks -->|"all passed"| verify{"verify step in the flow?"}
-  verify -->|"yes"| report["VERIFY<br/>write the PR report"] --> push["push + PR"]
+  verify -->|"yes"| report["VERIFY<br/>write the PR summary"] --> push["push + PR"]
   verify -->|"no"| push
 ```
 
@@ -359,7 +432,7 @@ The effective flow has exactly one gates step: when omitted, one is inserted aft
 
 **Where reworks enter.** Conflict resolution, CI fixes and human-review reworks keep their fixed entry, skip the plan step and build on the PR's head; from there they run the flow's build steps, review steps, gates and verify step. The resolve agent uses the flow's first build step's model and step limit; a clean conflict replay goes straight to the gates. CI and human-review reworks keep the brief in view on every attempt, and every review step of a human-review rework gets the review brief.
 
-**What runs record.** `runs.role` is still the kind: the gates run is role `verify`, step `gates`, and `resolve`, `ci`, `pr` and `human_review` keep their existing roles. The `runs.flow` and `runs.step` columns hold the flow and step names. `factory show TASK --step NAME` filters runs, and `factory show` labels each run with its flow and step; `factory top`'s progress label is the step name. The PR body has one `Reviewer report (<step>)` block per review step, a Verifier report only with a verify step, a Plan block only with a plan step, and a line naming the flow and its steps in order.
+**What runs record.** `runs.role` is still the kind: the gates run is role `verify`, step `gates`, and `resolve`, `ci`, `pr` and `human_review` keep their existing roles. The `runs.flow` and `runs.step` columns hold the flow and step names. `factory show TASK --step NAME` filters runs, and `factory show` labels each run with its flow and step; `factory top`'s progress label is the step name. The PR body has one `Reviewer report (<step>)` block per review step, What changed and What to check from the verify step's summary or the factory's fallback, and the flow and its steps in the footer; it has no Plan block. See [Pull requests](#pull-requests).
 
 ---
 

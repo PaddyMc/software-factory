@@ -15,7 +15,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 8 | Compare flows and setups. Planned: [bench](docs/plans/bench.md) | medium | 7 |
 | 9 | The steps of a flow are still the first version's. Planned: [strict-flow](docs/plans/strict-flow.md) | large | 3, 7, 8 |
 | 10 | Managing the factory takes many terminal commands. Planned as a web page: [webui](docs/plans/webui.md) | medium | — |
-| 11 | Factory PR descriptions are long and hard to read. Planned: [pr-descriptions](docs/plans/pr-descriptions.md) | small | — |
+| ✓ | Factory PR descriptions are long and hard to read. Done: [Pull requests](docs/architecture.md#pull-requests) | — | — |
 | 12 | The models' reasoning is thrown away. Planned: [thoughts](docs/plans/thoughts.md) | small | 10 (its web task) |
 
 ## 1. Act on human PR review comments
