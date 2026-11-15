@@ -1,6 +1,7 @@
 """End-to-end bench runs: real pipelines and git, with scripted models and no GitHub calls."""
 
 import copy
+import datetime as dt
 import hashlib
 import json
 import shutil
@@ -340,3 +341,281 @@ def test_results_are_written_after_every_cell(bench_repo, home, monkeypatch):
     assert [cell["outcome"] for cell in results["cells"]] == ["solved", "error"]
     assert results["cells"][0]["repeat"] == 1 and results["cells"][1]["repeat"] == 2
     assert results["run"]["ended_at"] is not None
+
+
+def _steps(model="fake:builder", prompt="a" * 64):
+    return [{"name": "build", "kind": "build", "model": model, "max_steps": 20, "prompt_sha": prompt}]
+
+
+def _cell(variant, case, *, repeat=1, outcome="solved", attempts=1, cost=0.25, seconds=120.0,
+          directory=None):
+    return {
+        "variant": variant,
+        "case": case,
+        "repeat": repeat,
+        "outcome": outcome,
+        "attempts": attempts,
+        "cost_usd": cost,
+        "seconds": seconds,
+        "model_calls": 4,
+        "tokens_in": 100,
+        "tokens_out": 50,
+        "review_changes": 0,
+        "step_limit_stops": 0,
+        "failed_gates": [],
+        "dir": directory,
+    }
+
+
+def _write_run(home, run_id, cases, variants, cells, *, repeat=1, sandbox=True, max_cost=5.0):
+    started = dt.datetime.strptime(run_id, "%Y%m%d-%H%M%S").replace(tzinfo=dt.timezone.utc)
+    case_records = {}
+    for case_id, value in cases.items():
+        if isinstance(value, dict):
+            record = copy.deepcopy(value)
+            record.setdefault("kind", "feature")
+            record.setdefault("base", "0" * 40)
+            record.setdefault("fixture_sha", "0" * 64)
+        else:
+            record = {"kind": "feature", "base": "0" * 40, "fixture_sha": value}
+        case_records[case_id] = record
+    variant_records = {}
+    for variant_id, value in variants.items():
+        if isinstance(value, dict):
+            record = copy.deepcopy(value)
+            record.setdefault("steps", _steps())
+        else:
+            record = {"steps": copy.deepcopy(value)}
+        record.setdefault("flow", variant_id)
+        record.setdefault("model", None)
+        variant_records[variant_id] = record
+    results = {
+        "run": {
+            "id": run_id,
+            "started_at": started.isoformat(),
+            "ended_at": started.isoformat(),
+            "factory": "0.1.0",
+            "sandbox": sandbox,
+            "max_cost": max_cost,
+            "max_attempts": 3,
+            "repeat": repeat,
+        },
+        "cases": case_records,
+        "variants": variant_records,
+        "cells": cells,
+    }
+    run_dir = home / "bench" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+    return run_dir
+
+
+def test_report_shows_solved_rates_per_variant_and_case(home, capsys):
+    older = "20261115-060000"
+    newest = "20261115-063000"
+    _write_run(home, older, {"slugify": "o" * 64}, {"default": _steps()},
+               [_cell("default", "slugify")])
+    cases = {"slugify": "s" * 64, "money-rounding": "m" * 64}
+    variants = {"default": _steps(), "lean": _steps()}
+    cells = [
+        _cell("default", "slugify", repeat=1, cost=0.10, seconds=60),
+        _cell("default", "slugify", repeat=2, cost=0.20, seconds=120),
+        _cell("default", "money-rounding", repeat=1, cost=0.30, seconds=180),
+        _cell("default", "money-rounding", repeat=2, outcome="false_pass", cost=0.40, seconds=240),
+        _cell("lean", "slugify", repeat=1, outcome="failed", cost=0.50, seconds=300),
+        _cell("lean", "slugify", repeat=2, cost=0.60, seconds=360),
+        _cell("lean", "money-rounding", repeat=1, cost=0.70, seconds=420),
+        _cell("lean", "money-rounding", repeat=2, outcome="failed", cost=0.80, seconds=480),
+    ]
+    _write_run(home, newest, cases, variants, cells, repeat=2)
+
+    assert main(["bench", "report"]) == 0
+    out = capsys.readouterr().out
+    assert f"bench {newest}" in out
+    assert "2 cases · 2 variants × 2 · $3.60 of $5.00 · factory 0.1.0" in out
+    default = next(line for line in out.splitlines() if line.startswith("default "))
+    lean = next(line for line in out.splitlines() if line.startswith("lean "))
+    assert default.split()[1] == "4" and "3/4 75%" in default
+    assert lean.split()[1] == "4" and "2/4 50%" in lean
+    slugify = next(line for line in out.splitlines() if line.startswith("slugify "))
+    money = next(line for line in out.splitlines() if line.startswith("money-rounding "))
+    assert slugify.split() == ["slugify", "2/2", "1/2"]
+    assert money.split() == ["money-rounding", "1/2", "1/2"]
+
+    assert main(["bench", "report", "19990101-000000"]) == 1
+    error = capsys.readouterr().err
+    assert "unknown bench run 19990101-000000" in error
+    assert older in error and newest in error
+
+    _write_run(home, newest, cases, variants, cells, repeat=2, sandbox=False)
+    assert main(["bench", "report", newest]) == 0
+    assert "unsandboxed: agents could read the hidden tests" in capsys.readouterr().out
+
+
+def test_report_cells_lists_each_cell_and_its_directory(home, capsys):
+    run_id = "20261115-080000"
+    cells = []
+    for variant in ("default", "lean"):
+        for repeat, seconds in ((1, 60.0), (2, 366.0)):
+            directory = f"cells/{variant}/slugify/r{repeat}"
+            cells.append(_cell(
+                variant, "slugify", repeat=repeat, outcome="solved" if repeat == 1 else "false_pass",
+                attempts=repeat if repeat == 1 else 3, cost=0.25 * len(cells) + 0.25,
+                seconds=seconds + (120 if variant == "lean" else 0), directory=directory,
+            ))
+    run_dir = _write_run(home, run_id, {"slugify": "s" * 64},
+                         {"default": _steps(), "lean": _steps()}, cells, repeat=2)
+
+    assert main(["bench", "report", run_id, "--cells"]) == 0
+    out = capsys.readouterr().out
+    for cell in cells:
+        directory = str(run_dir / cell["dir"])
+        line = next(line for line in out.splitlines() if directory in line)
+        attempts = f"{cell['attempts']} attempt" + ("" if cell["attempts"] == 1 else "s")
+        assert cell["variant"] in line
+        assert f"{cell['case']} #{cell['repeat']}" in line
+        assert cell["outcome"] in line and attempts in line
+        assert f"${cell['cost_usd']:.2f}" in line
+        assert f"{cell['seconds'] / 60:.1f} min" in line
+    assert sum(str(run_dir / "cells") in line for line in out.splitlines()) == 4
+
+
+def test_report_of_an_interrupted_run_counts_cells_not_run(home, capsys):
+    run_id = "20261115-090000"
+    _write_run(home, run_id, {"slugify": "s" * 64}, {"default": _steps()},
+               [_cell("default", "slugify", repeat=1)], repeat=3)
+
+    assert main(["bench", "report", run_id]) == 0
+    out = capsys.readouterr().out
+    assert "not run: 2 of 3 cells" in out
+    row = next(line for line in out.splitlines() if line.startswith("default "))
+    assert row.split()[1] == "3"
+    assert "1/1 100%" in row and "0/0/0/2" in row
+
+    assert main(["bench", "report", run_id, "--cells"]) == 0
+    out = capsys.readouterr().out
+    assert "default · slugify #2: not run, -, -, -, -" in out
+    assert "default · slugify #3: not run, -, -, -, -" in out
+
+
+def test_compare_pairs_variants_and_cases_across_runs(home, capsys):
+    a, b = "20261115-100000", "20261115-103000"
+    cases = {"slugify": "s" * 64, "money-rounding": "m" * 64}
+    _write_run(home, a, cases, {"default": _steps()}, [
+        _cell("default", "slugify", attempts=1, cost=0.40, seconds=120),
+        _cell("default", "money-rounding", outcome="false_pass", attempts=2, cost=0.60, seconds=180),
+    ])
+    _write_run(home, b, cases, {"default": _steps()}, [
+        _cell("default", "slugify", outcome="failed", attempts=3, cost=0.20, seconds=60),
+        _cell("default", "money-rounding", attempts=1, cost=0.40, seconds=300),
+    ])
+
+    assert main(["bench", "compare", a, b]) == 0
+    out = capsys.readouterr().out
+    assert f"compare {a} → {b}" in out
+    assert "cases: 2 in both, unchanged" in out
+    assert "variants: 1 in both" in out
+    row = next(line for line in out.splitlines() if line.startswith("default "))
+    for expected in ("1/2 → 1/2", "1 → 0", "$0.50 → $0.30", "1.5 → 2.0", "2.5 → 3.0"):
+        assert expected in row
+    slugify = next(line for line in out.splitlines() if line.startswith("slugify "))
+    money = next(line for line in out.splitlines() if line.startswith("money-rounding "))
+    assert "1/1 → 0/1" in slugify
+    assert "0/1 → 1/1" in money
+
+    assert main(["bench", "compare", a, "19990101-000000"]) == 1
+    error = capsys.readouterr().err
+    assert "unknown bench run 19990101-000000" in error
+    assert a in error and b in error
+
+
+def test_compare_flags_changed_cases_models_and_prompts(home, capsys):
+    a, b = "20261115-110000", "20261115-113000"
+
+    def step(name, kind, model, prompt):
+        return {**_steps(model, prompt)[0], "name": name, "kind": kind}
+
+    a_steps = [
+        step("build", "build", "fake:old", "p" * 64),
+        step("review", "review", "fake:r", "q" * 64),
+        step("verify", "verify", "fake:v", "v" * 64),
+    ]
+    b_steps = [
+        step("build", "build", "fake:new", "p" * 64),
+        step("review", "review", "fake:r", "z" * 64),
+    ]
+    _write_run(home, a, {"slugify": "a" * 64, "rate-limiter": "r" * 64},
+               {"default": a_steps, "lean": _steps()}, [_cell("default", "slugify")])
+    _write_run(home, b, {"slugify": "b" * 64, "money-rounding": "m" * 64},
+               {"default": b_steps, "strict": _steps()}, [_cell("default", "slugify")])
+
+    assert main(["bench", "compare", a, b]) == 0
+    out = capsys.readouterr().out
+    assert "slugify (aaaaaaaaaaaa → bbbbbbbbbbbb)" in out
+    assert f"only in {a}: rate-limiter" in out
+    assert f"only in {b}: money-rounding" in out
+    assert f"only in {a}: lean" in out
+    assert f"only in {b}: strict" in out
+    assert "build: model fake:old → fake:new" in out
+    assert "review: prompt_sha qqqqqqqqqqqq → zzzzzzzzzzzz" in out
+    assert f"verify: only in {a}" in out
+    assert any(line.startswith("default ") and "1/1 → 1/1" in line for line in out.splitlines())
+
+
+def test_list_shows_runs_newest_first_and_cases_lists_the_suite(home, capsys):
+    older, newer, broken = "20261115-060000", "20261115-063000", "20261115-070000"
+    _write_run(home, older, {"slugify": "s" * 64}, {"default": _steps()},
+               [_cell("default", "slugify", cost=0.25)], repeat=2)
+    _write_run(home, newer, {"slugify": "s" * 64}, {"default": _steps()},
+               [_cell("default", "slugify", cost=0.75)])
+    broken_dir = home / "bench" / broken
+    broken_dir.mkdir(parents=True)
+    (broken_dir / "results.json").write_text("{oops")
+
+    assert main(["bench", "list"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.index(newer) < captured.out.index(older)
+    assert broken not in captured.out
+    assert (f"{older}  2026-11-15T06:00:00+00:00  1 cases  1 variants  1/2 cells  $0.25"
+            in captured.out)
+    assert (f"{newer}  2026-11-15T06:30:00+00:00  1 cases  1 variants  1/1 cells  $0.75"
+            in captured.out)
+    assert str(broken_dir / "results.json") in captured.err
+
+    assert main(["bench", "cases"]) == 0
+    out = capsys.readouterr().out
+    expected = [
+        ("slugify", "feature", "Slugify titles for URLs"),
+        ("money-rounding", "bugfix", "Round ledger money exactly to cents"),
+        ("report-json", "multi-file", "Add --format json to the report tool"),
+        ("ini-refactor", "refactor", "Extract one shared settings parser"),
+        ("rate-limiter", "algorithm", "Implement the token-bucket rate limiter"),
+    ]
+    for case_id, kind, title in expected:
+        assert f"{case_id:<18} {kind:<12} {title}" in out
+
+    assert main(["bench", "cases", "--cases", str(BENCH_CASES)]) == 0
+    out = capsys.readouterr().out
+    assert f"{'adder':<18} {'feature':<12} Add integer addition to the calc package" in out
+
+
+def test_a_cell_can_be_inspected_with_factory_show(bench_repo, home, monkeypatch, capsys):
+    _scripted(monkeypatch, {"scripted:good": GOOD})
+    assert main(_args("--model", "scripted:good")) == 0
+    cell = load_results(home)["cells"][0]
+    cell_home = bench_run_dir(home) / cell["dir"]
+    db = open_db(cell_home)
+    transcripts = [run["transcript"] for run in db.runs("adder-t01") if run["transcript"]]
+    db.close()
+    assert transcripts
+    monkeypatch.setenv("FACTORY_HOME", str(cell_home))
+    capsys.readouterr()
+
+    assert main(["show", "adder-t01"]) == 0
+    out = capsys.readouterr().out
+    assert "adder-t01" in out and "## build #1" in out and "step build" in out
+
+    assert main(["trace", "adder-t01"]) == 0
+    capsys.readouterr()
+    assert main(["transcript", "adder-t01"]) == 0
+    assert transcripts[-1] in capsys.readouterr().out
