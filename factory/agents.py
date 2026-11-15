@@ -62,6 +62,7 @@ class Output:
     steps: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
+    thinking: int = 0                          # sum of the steps' thinking tokens (output_token_details.reasoning)
     cost_usd: float | None = None
     refused: int = 0                         # tool calls refused (paths, denied commands)
     stopped: str | None = None               # why the loop ended early, e.g. "step limit"
@@ -268,7 +269,8 @@ class LangChainRoles:
             ctx.record({"type": "stopped", "reason": out.stopped, "steps": out.steps})
         cost = f", ${out.cost_usd:.4f}" if out.cost_usd is not None else ""
         refused = f", {out.refused} tool calls refused" if out.refused else ""
-        ctx.log(tag, f"done: {out.steps} steps, {out.tokens_in} tokens in / {out.tokens_out} out{cost}{refused}")
+        thinking_note = f" ({out.thinking} thinking)" if out.thinking else ""
+        ctx.log(tag, f"done: {out.steps} steps, {out.tokens_in} tokens in / {out.tokens_out} out{thinking_note}{cost}{refused}")
         if log is not None:
             out.log = log
         if step.kind == "review":
@@ -325,16 +327,23 @@ class LangChainRoles:
             usage = m.usage_metadata or {}
             tin, tout = usage.get("input_tokens", 0), usage.get("output_tokens", 0)
             cached = (usage.get("input_token_details") or {}).get("cache_read", 0) or 0
+            reasoning = "\n\n".join(b["reasoning"] for b in m.content_blocks
+                                    if b.get("type") == "reasoning" and b.get("reasoning"))[:200_000]
+            thinking = (usage.get("output_token_details") or {}).get("reasoning")
             out.tokens_in += tin
             out.tokens_out += tout
+            if thinking is not None:
+                out.thinking += thinking
             out.wants_tools = bool(m.tool_calls)
             step_cost = prices.cost(out.model, tin, tout, cached)
             if step_cost is not None:
                 out.cost_usd = (out.cost_usd or 0.0) + step_cost
-            ctx.record({"type": "ai", "step": out.steps, "text": m.text,
-                        "usage": {"in": tin, "out": tout, "cache_read": cached},
+            ctx.record({"type": "ai", "step": out.steps, "text": m.text, "reasoning": reasoning,
+                        "usage": {"in": tin, "out": tout, "cache_read": cached, "reasoning": thinking},
                         "cost_usd": step_cost,
                         "tool_calls": [{"name": tc["name"], "args": tc["args"]} for tc in m.tool_calls]})
+            if reasoning:
+                ctx.log(tag, "thinks: " + clip(reasoning, 240))
             if m.text:
                 out.text = m.text.strip()
                 ctx.log(tag, "says: " + clip(m.text, 240))
