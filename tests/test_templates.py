@@ -183,6 +183,26 @@ def test_skills_are_valid_and_generic(skill):
             assert specific not in f.read_text(), (f, specific)
 
 
+def test_this_repository_uses_the_factory_it_ships():
+    """The factory's own repository has the skills, guidance and config comments `factory init` ships:
+    a change to a template is copied here too (.claude/skills/<skill>/, AGENTS.md, .factory/config.yaml)."""
+    repo = PACKAGE.parent
+    for skill in SKILLS:
+        shipped, installed = PACKAGE / "templates/skills" / skill, repo / ".claude/skills" / skill
+        files = sorted(p.relative_to(shipped) for p in shipped.rglob("*") if p.is_file())
+        assert files == sorted(p.relative_to(installed) for p in installed.rglob("*") if p.is_file()), installed
+        for rel in files:
+            assert (installed / rel).read_text() == (shipped / rel).read_text(), f"copy {shipped / rel} to {installed / rel}"
+        assert (repo / ".agents/skills" / skill).readlink() == Path(f"../../.claude/skills/{skill}")
+    guidance = (repo / "AGENTS.md").read_text()
+    assert guidance[guidance.index(BEGIN) + len(BEGIN):guidance.index(END)].strip() == \
+        (PACKAGE / "templates/agents-section.md").read_text().strip()
+    lines = iter((repo / C.CONFIG_PATH).read_text().splitlines())
+    for prose in (line for line in (PACKAGE / "templates/config.yaml").read_text().splitlines() if re.match(r"# [A-Z]", line)):
+        assert prose in lines, f"{C.CONFIG_PATH} lacks (or reorders) the template's comment {prose!r}"
+    C.load(repo)                                                  # and it is valid, flows included
+
+
 def test_nothing_in_the_package_names_the_original_project():
     for f in PACKAGE.rglob("*"):
         if f.is_file() and f.suffix in (".py", ".md", ".yaml"):

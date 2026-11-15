@@ -11,7 +11,7 @@ exclude: []
 # Repository guidance appended to every agent's system prompt: the first file that exists.
 guidance: ["AGENTS.md", "CLAUDE.md"]
 
-# Uncomment to require a session log entry (<dir>/<today>.md) in every task.
+# Uncomment to require a session log entry (<dir>/<today>-<task id>.md) in every task.
 session_log: docs/sessions
 
 # Uncomment to require every task to add a new end-to-end test, and to run it.
@@ -27,8 +27,25 @@ unit_tests: ["uv run pytest -q"]
 
 # Models and step limits per role (plan, build, review, verify), over the shipped prompts' defaults.
 # A whole prompt can be replaced with .factory/agents/<planner|builder|reviewer|verifier>.md.
-# models: {review: "openrouter:z-ai/glm-5.3"}
+models:
+  build: "openrouter:moonshotai/kimi-k3.1-pro"
+  review: "openrouter:z-ai/glm-5.3"         # deepseek-v4-pro left 4 of 26 reviews without a VERDICT line
 # max_steps: {build: 150}
+
+# Agent flows: named step lists, chosen with `flow:` or per run with `factory run --flow NAME`.
+# The built-in `default` is plan, build, review, gates, verify. Steps follow
+# [plan] build+ (review | gates)* [verify]; a gates step goes after the last review when omitted.
+flow: gates-first           # `factory run --flow default` runs the built-in order instead
+flows:
+  gates-first:              # reviewers only see changes that already pass the gates
+    - plan
+    - build
+    - gates
+    - review
+    - verify
+  lean:                     # small, low-risk tasks: no planner and no verifier report; the gates still decide
+    - build
+    - review
 
 # Extra regexes the agents' `run` tool refuses (git push/commit, sudo, gh, terraform apply… are built in).
 # A contract whose verification runs one is done by hand: `factory run` refuses it.
