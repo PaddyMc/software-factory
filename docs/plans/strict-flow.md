@@ -1,6 +1,6 @@
 # Plan: A stricter agent flow
 
-**Status:** Planned (2026-11-13). Workstream scoped; awaiting kickoff: t01 starts once `measure-t03` and `bench-t05` have PRs. Roadmap: [NEXT.md item 9](../../NEXT.md#9-a-stricter-agent-flow), which also closes most of [item 2](../../NEXT.md#2-the-builder-writes-the-test-that-judges-it).
+**Status:** Planned (2026-11-13). Workstream scoped; awaiting kickoff: t01 starts once `measure-t03`, `bench-t05` and `pr-descriptions-t04` have PRs. Roadmap: [NEXT.md item 9](../../NEXT.md#9-a-stricter-agent-flow), which also closes most of [item 2](../../NEXT.md#2-the-builder-writes-the-test-that-judges-it).
 
 ---
 
@@ -29,7 +29,7 @@
 | **M8** | Bench can compare it | The t08 tests in `tests/test_bench_cases.py` and `tests/test_bench.py` pass | — |
 | **M9** | Docs | Architecture, reference, NEXT.md, the config template and the factory-ops skill describe it; `tests/test_templates.py` passes | — |
 
-**Sequence:** `(measure-t03 ∥ bench-t05) → M1 → M2 → M3 → M4 → M5 → M6 → M7 → M8 → [measure-t04, bench-t06 →] M9`, then `M8 → wiki-t01` and `M9 → wiki-t07`. The code tasks run one after another: each one changes `factory/flows.py` and `factory/agents.py`, or `factory/pipeline.py`.
+**Sequence:** `(measure-t03 ∥ bench-t05 ∥ pr-descriptions-t04) → M1 → M2 → M3 → M4 → M5 → M6 → M7 → M8 → [measure-t04, bench-t06, pr-descriptions-t05 →] M9`, then `M8 → wiki-t01` and `M9 → wiki-t07`. The code tasks run one after another: each one changes `factory/flows.py` and `factory/agents.py`, or `factory/pipeline.py`.
 
 ### Task Contracts
 
@@ -57,6 +57,7 @@
   depends_on:
     - measure-t03
     - bench-t05
+    - pr-descriptions-t04
   non_goals:
     - "The loop values map, nudge and resume (strict-flow-t02, strict-flow-t03): `loop` accepts only `trim` after this task"
     - "Summarizing old steps with a model call, or changing what grep, run or git_diff return"
@@ -148,7 +149,7 @@
     - "On a fresh build the pipeline runs the test step once, after the plan step when there is one and before attempt 1, with status `building`. It commits what the step left as `factory(ID): acceptance tests`, ID being the task id, and records a run with role `test` (db.ROLES gains it), the try number as its attempt, outcome `committed`, and the tester's final message as its report. Build attempts start from that commit: an attempt that leaves HEAD there counts as no changes, as leaving it at the base does today"
     - "A try that changes nothing, or changes a path outside `test_paths`, is discarded: the worktree goes back to the base and the step runs once more, with the reason and the offending paths as feedback in its task message. Each try is its own `test` run, with outcome `no-changes` or `out-of-scope`. After pipeline.TEST_TRIES (2) failed tries the task fails with the reason in its note, and no build runs"
     - "`factory run` refuses, before any work, a flow with a test step when `test_paths` is empty, with `flow NAME has a test step: set test_paths in .factory/config.yaml` (NAME being the flow), and checks the test step's provider key like any other step's"
-    - "The PR body has an `Acceptance tests (NAME)` details block with the tester's report, NAME being the step's name, and its Flow line lists the step"
+    - "The PR body has a collapsed `Acceptance tests (NAME)` block after its `The task` block, NAME being the step's name, holding the tester's report cleaned and capped as a reviewer report is (prbody.clean_report, prbody.cap, with its headings moved down), and the Flow line in its footer lists the step"
     - "Flows without a test step behave as today: the existing tests pass unmodified, and tests/fake_model.py gains a TESTER script without changing what the other roles play"
     - "docs/sessions/ has this task's session log entry, as the project rules require"
   verification:
@@ -204,7 +205,7 @@
     - "A review step mapping accepts `prove`, a boolean (default false) kept on flows.Step. On any other kind, or with a value that isn't a boolean, it raises ConfigError naming the flow and step. `factory config` prints it"
     - "Under `prove`, the reviewer has the read tools, git_diff and the sandboxed `run` (denied commands are refused as for the builder), and its system prompt gains a `# Proof rules` block after the project rules. The rules: a blocker or major finding about what the code does when it runs carries a line `REPRO:` with one shell command that fails on the candidate; a finding about scope (a non-goal done, an acceptance criterion with no change behind it, an unrelated edit, documentation made untrue) is tagged `[scope]` and cites path:line; CHANGES counts only with a failing REPRO or a `[scope]` blocker or major"
     - "After the review, the factory runs each distinct REPRO command again in the sandbox: at most agents.PROVE_MAX (5) of them, each for at most agents.PROVE_TIMEOUT (300) seconds. A command is reproduced when it exits non-zero. One that passes, times out, or matches a denied pattern is unproven. The report gains a `## Proof` section with each command, its result and the last lines of its output"
-    - "A reported CHANGES stands when at least one REPRO is reproduced, or the report has a blocker or major finding tagged `[scope]`. Otherwise the step's verdict is APPROVE, its run's outcome reads `APPROVE (unproven)`, and the findings stay in its report and in the PR body. A reported APPROVE stays APPROVE. A report with no VERDICT line counts as CHANGES, as today, whatever its proof"
+    - "A reported CHANGES stands when at least one REPRO is reproduced, or the report has a blocker or major finding tagged `[scope]`. Otherwise the step's verdict is APPROVE, its run's outcome reads `APPROVE (unproven)`, the PR body's Checks paragraph shows that outcome, and the findings stay in its report, which the verifier gets and the PR body holds. A reported APPROVE stays APPROVE. A report with no VERDICT line counts as CHANGES, as today, whatever its proof"
     - "When CHANGES stands, the builder's feedback is the report with its Proof section, so the builder gets each reproduced command and its output"
     - "After a review step with `prove`, the pipeline puts the worktree back at the candidate (tracked files reset, untracked files removed, ignored files kept) and logs what it removed, so nothing the reviewer's commands wrote can fail the clean gate"
     - "Review steps without `prove` behave as today: tests/test_pipeline.py, tests/test_flows.py and tests/test_templates.py pass unmodified apart from the tests this task adds"
@@ -274,6 +275,7 @@
     - strict-flow-t08
     - measure-t04
     - bench-t06
+    - pr-descriptions-t05
   non_goals:
     - "Changing code, or tests beyond what tests/test_templates.py needs for the new template text"
     - "Editing the installed skill copies under .claude/skills or .agents/skills: `factory init --force` refreshes them"
@@ -628,6 +630,7 @@ Through the real CLI, pipeline, agents, git, bubblewrap and fake `gh`, with `Scr
 - **Depends on:**
   - [agent-flows](agent-flows.md), merged up to t04. This plan extends its `Step`, its order rule and its built-in flow, and keeps its promise that `default` is today's pipeline.
   - [measure](measure.md). `strict-flow-t01` depends on `measure-t03`, the last task to change `agents.py`, `pipeline.py`, `db.py` and `cli.py` there, and `strict-flow-t09` on `measure-t04`, which edits the same docs. Its prompt version covers the proof rules, since they are part of the system prompt, and `factory stats` sees the `test` role and the `APPROVE (unproven)` outcome as new values.
+  - [pr-descriptions](pr-descriptions.md). `strict-flow-t01` depends on `pr-descriptions-t04`, the last task there to change `factory/agents.py` and `factory/pipeline.py`, and `strict-flow-t09` on `pr-descriptions-t05`, which edits the same docs. This plan's PR-body criteria (t04's Acceptance tests block, t05's gate, t06's outcome) are written against its layout.
   - [bench](bench.md). `strict-flow-t01` depends on `bench-t05`, the last task to change `cli.py` there, `strict-flow-t08` changes its fixtures and results, and `strict-flow-t09` depends on `bench-t06`. Bench is how this plan's options are judged.
 - **Required by:**
   - [wiki](wiki.md). `wiki-t01` depends on `strict-flow-t08` and `wiki-t07` on `strict-flow-t09`: wiki changes the same `agents.py`, `gates.py` and `tools.py`, and its role pages should describe the loop the task crew then runs. wiki-t03's `PathGuard` with writable prefixes builds on the glob-limited write tools t04 adds. A `test` step gets a role page only if the wiki has one for it.
