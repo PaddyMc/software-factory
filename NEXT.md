@@ -16,6 +16,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 9 | The steps of a flow are still the first version's. Planned: [strict-flow](docs/plans/strict-flow.md) | large | 3, 7, 8 |
 | 10 | Managing the factory takes many terminal commands. Planned as a web page: [webui](docs/plans/webui.md) | medium | — |
 | 11 | Factory PR descriptions are long and hard to read. Planned: [pr-descriptions](docs/plans/pr-descriptions.md) | small | — |
+| 12 | The models' reasoning is thrown away. Planned: [thoughts](docs/plans/thoughts.md) | small | 10 (its web task) |
 
 ## 1. Act on human PR review comments
 
@@ -164,3 +165,13 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 - The verifier writes a fixed-shape summary: a title, what changed, and what to check, including the reviewer findings left unaddressed. The factory parses and bounds it, and builds one itself when it can't.
 - The planner's hand-off leaves the PR. The gate table, the contract and each reviewer's last draft stay collapsed and capped, and the body is held under 60,000 characters.
 - The PR title is the task id and the verifier's title. Commit subjects are cut at a word, with the attempt in the commit body.
+
+## 12. See what the models thought
+
+**Gap.** Every model the factory runs reasons before it answers, and the OpenRouter integration hands that reasoning to the factory with each reply. The factory records only the reply text (`factory/agents.py:329`), so transcripts, the live log and traces show what an agent did but never why. Its thinking tokens are paid for, and then thrown away.
+
+**Plan.** [docs/plans/thoughts.md](docs/plans/thoughts.md) (planned 2026-11-15, tasks `thoughts-t01`…`t03`, alongside [measure](docs/plans/measure.md) and [pr-descriptions](docs/plans/pr-descriptions.md)):
+- Each step's reasoning and thinking-token count go into its transcript, and the live log gets a short `thinks:` line per step.
+- `factory transcript` prints each step's thoughts before what it said and did, and `factory trace` counts thinking tokens.
+- The web transcript page shows the thoughts above what each step said, once `webui-t05` lands.
+- Model requests don't change: a model that doesn't share its reasoning is shown as not sharing it.
