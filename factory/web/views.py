@@ -13,8 +13,9 @@ from pathlib import Path
 from urllib.parse import quote
 
 from .. import observe
-from ..db import ACTIVE, DB, seconds_since
+from ..db import ACTIVE, DB, pid_alive, seconds_since
 from ..log import log_path
+from . import jobs
 
 DONE = ("merged", "abandoned")
 ATTENTION = ("pr_open", "conflict", "ci_failed", "changes_requested")
@@ -74,6 +75,42 @@ def safe_url(url: str | None) -> str | None:
     return url if url and url.startswith(("https://", "http://")) else None
 
 
+def action_form(action: str, token: str, next_: str, label: str, title: str,
+                target: str | None = None, btn: str = "btn") -> str:
+    target_field = (f'<input type="hidden" name="target" value="{esc(target)}">'
+                    if target is not None else "")
+    return f"""<form class="inline" method="post" action="/actions/{esc(action)}">
+  <input type="hidden" name="token" value="{esc(token)}">{target_field}<input type="hidden" name="next" value="{esc(next_)}">
+  <button class="{esc(btn)}" title="{esc(title)}">{esc(label)}</button>
+</form>"""
+
+
+def confirm_link(action: str, target: str, label: str, title: str, btn: str = "btn-danger") -> str:
+    href = f"/confirm?action={quote(action, safe='')}&target={quote(target, safe='')}"
+    return (f'<a class="btn {esc(btn)}" title="{esc(title)}" href="{esc(href)}">'
+            f'{esc(label)}</a>')
+
+
+def notice(job: jobs.Job | None) -> str:
+    if job is None:
+        return ""
+    outcome = job.outcome
+    if outcome == "done":
+        wording, class_ = f"Done: {job.command}", "notice-ok"
+    elif outcome == "running":
+        wording, class_ = f"Still running: {job.command}", "notice-ok"
+    else:
+        wording, class_ = f"Failed: {job.command}", "notice-bad"
+    output = job.output(1)
+    last_line = output[-1] if output else ""
+    return f"""<div class="notice {class_}" role="status">
+  <span>{esc(wording)}</span>
+  <span class="mono">{esc(last_line)}</span>
+  <a href="/activity#job-{esc(job.id)}">View job</a>
+</div>
+"""
+
+
 def status(db: DB, row) -> Status:
     if observe.liveness(row) == "DEAD":
         return GONE
@@ -127,12 +164,18 @@ def _needs_next(db: DB, row, info: Status) -> tuple[str, str]:
     return first, "Every gate passed. Merging is your approval."
 
 
-def _needs_row(db: DB, row, info: Status) -> str:
+def _needs_row(db: DB, row, info: Status, token: str) -> str:
     next_step, why = _needs_next(db, row, info)
-    action = ""
+    actions = []
+    if info.kind == "gone":
+        actions.append(action_form("status", token, "/", "Check GitHub", "factory status --refresh"))
+    elif info.kind == "failed":
+        command = f'factory abandon {row["id"]} --note "put on hold from factory web"'
+        actions.append(action_form("abandon", token, "/", "Put on hold", command, row["id"]))
     url = safe_url(row["pr_url"])
     if url:
-        action = f'<a class="btn" href="{esc(url)}">Open pull request</a>'
+        actions.append(f'<a class="btn" href="{esc(url)}">Open pull request</a>')
+    action = "".join(actions)
     return f"""<li class="row">
   {status_html(info)}
   <a class="id" href="/tasks/{quote(row['id'], safe='')}">{esc(row['id'])}</a>
@@ -146,6 +189,9 @@ def _needs_row(db: DB, row, info: Status) -> str:
 
 def _running_row(db: DB, row, info: Status) -> str:
     goal = _goal(db, row)
+    stop = ""
+    if pid_alive(row["pid"]):
+        stop = confirm_link("stop", row["id"], "Stop", f'factory stop {row["id"]}')
     progress = row["progress"] or ""
     match = STEP.search(progress)
     if match:
@@ -165,6 +211,7 @@ def _running_row(db: DB, row, info: Status) -> str:
   <div class="end">
     <span class="num quiet">{esc(elapsed)}</span>
     <span class="num cost">{esc(_cost(row))}</span>
+    <div class="acts">{stop}</div>
   </div>
   <div class="now">
     <span>{esc(step)}</span>
@@ -252,9 +299,11 @@ def _version() -> str:
 
 
 def _page(title: str, project: str, home: Path, port: int | None, content: str,
-          refresh: int | None = None) -> str:
+          refresh: int | None = None, current: str | None = None, top_end: str = "") -> str:
     address = f"127.0.0.1:{port}" if port is not None else "127.0.0.1"
     refresh_attr = f' data-refresh="{esc(refresh)}"' if refresh is not None else ""
+    board_current = ' aria-current="page"' if current == "board" else ""
+    activity_current = ' aria-current="page"' if current == "activity" else ""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -269,8 +318,8 @@ def _page(title: str, project: str, home: Path, port: int | None, content: str,
 <header class="top">
   <div class="wrap">
     <a class="brand" href="/">factory <span>/ {esc(project)}</span></a>
-    <nav class="nav" aria-label="Pages"><a href="/" aria-current="page">Board</a></nav>
-    <div class="top-end"><span class="live-dot" data-state="live">Live</span></div>
+    <nav class="nav" aria-label="Pages"><a href="/"{board_current}>Board</a><a href="/activity"{activity_current}>Activity</a></nav>
+    <div class="top-end"><span class="live-dot" data-state="live">Live</span>{top_end}</div>
   </div>
 </header>
 <main class="wrap"{refresh_attr}>
@@ -287,7 +336,8 @@ def _page(title: str, project: str, home: Path, port: int | None, content: str,
 """
 
 
-def board(db: DB, home: Path, project: str, port: int | None) -> str:
+def board(db: DB, home: Path, project: str, port: int | None, token: str = "",
+          job: jobs.Job | None = None) -> str:
     rows = db.tasks()
     infos = {row["id"]: status(db, row) for row in rows}
     running_rows = [row for row in rows if row["status"] in ACTIVE]
@@ -306,11 +356,12 @@ def board(db: DB, home: Path, project: str, port: int | None) -> str:
   <h1 class="lede">{esc(_sentence(rows, running, needs, ready, waiting))}</h1>
   {_tally(running, needs, ready, waiting, merged, held, spent)}
 </div>
-"""
+{notice(job)}"""
     if not rows:
-        content += '<p class="fine">Load your plans with factory sync.</p>\n'
+        content += ('<p class="fine">Load your plans with factory sync.</p>\n'
+                    + action_form("sync", token, "/", "Load plans", "factory sync") + "\n")
 
-    needs_html = "".join(_needs_row(db, row, infos[row["id"]]) for row in needs_rows)
+    needs_html = "".join(_needs_row(db, row, infos[row["id"]], token) for row in needs_rows)
     if not needs_html:
         needs_html = '<p class="empty">Nothing needs you right now.</p>'
     else:
@@ -349,10 +400,12 @@ def board(db: DB, home: Path, project: str, port: int | None) -> str:
   {plans}
 </section>
 """
-    return _page("Board", project, home, port, content, refresh=2)
+    top_end = (action_form("sync", token, "/", "Load plans", "factory sync")
+               + action_form("status", token, "/", "Check GitHub", "factory status --refresh"))
+    return _page("Board", project, home, port, content, refresh=2, current="board", top_end=top_end)
 
 
-def _next_step(db: DB, row, info: Status, contract) -> str:
+def _next_step(db: DB, row, info: Status, contract, actions: str = "") -> str:
     kind = info.kind
     note = ""
     if kind in NEEDS_ORDER:
@@ -395,11 +448,13 @@ def _next_step(db: DB, row, info: Status, contract) -> str:
     else:
         heading = info.word
         paragraph = esc(observe.detail(db, row))
+    actions_html = f'<div class="acts">{actions}</div>' if actions else ""
     return f"""<section class="next-step" aria-labelledby="h-next">
   <div>
     <h2 id="h-next">{esc(heading)}</h2>
     <p>{paragraph}</p>
   </div>
+  {actions_html}
   {note}
 </section>"""
 
@@ -730,10 +785,24 @@ def _log_block(home: Path, task_id: str) -> str:
 </section>"""
 
 
-def task(db: DB, home: Path, project: str, port: int | None, task_id: str) -> str:
+def task(db: DB, home: Path, project: str, port: int | None, task_id: str, token: str = "",
+         job: jobs.Job | None = None) -> str:
     row = db.task(task_id)
     info = status(db, row)
     contract = db.contract(task_id)
+    task_href = f"/tasks/{quote(task_id, safe='')}"
+    running = row["status"] in ACTIVE and pid_alive(row["pid"])
+    actions = []
+    if row["status"] in ("queued", "failed") and not running:
+        command = f'factory abandon {task_id} --note "put on hold from factory web"'
+        actions.append(action_form("abandon", token, task_href, "Put on hold", command, task_id))
+    if row["status"] == "abandoned":
+        actions.append(action_form("requeue", token, task_href, "Take off hold",
+                                   f"factory requeue {task_id}", task_id))
+    if running:
+        actions.append(confirm_link("stop", task_id, "Stop", f"factory stop {task_id}"))
+    if (home / "worktrees" / task_id).exists() and not running:
+        actions.append(confirm_link("clean", task_id, "Remove worktree", f"factory clean {task_id}", "btn-quiet"))
     plan_name = observe.plan_name(row["plan"])
     runs = list(reversed(db.runs(task_id)))
     needed_by = [r["id"] for r in db.tasks() if task_id in db.contract(r["id"]).depends_on]
@@ -764,7 +833,7 @@ def task(db: DB, home: Path, project: str, port: int | None, task_id: str) -> st
   <h1 class="task-goal">{esc(contract.goal)}</h1>
   <dl class="facts">{facts_html}</dl>
 </div>
-{_next_step(db, row, info, contract)}
+{notice(job)}{_next_step(db, row, info, contract, "".join(actions))}
 <div class="cols">
   {_contract_block(db, contract, needed_by)}
   {_runs_block(runs, task_id)}
@@ -772,6 +841,120 @@ def task(db: DB, home: Path, project: str, port: int | None, task_id: str) -> st
 {_log_block(home, task_id)}
 """
     return _page(contract.goal, project, home, port, content, refresh=2)
+
+
+def _job_item(job: jobs.Job) -> str:
+    outcome = job.outcome
+    outcome_class = "o-live" if outcome == "running" else "o-good" if outcome == "done" else "o-bad"
+    live = " is-live" if outcome == "running" else ""
+    try:
+        started = dt.datetime.fromisoformat(job.started_at)
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=dt.timezone.utc)
+        elapsed = max(0, (dt.datetime.now(dt.timezone.utc) - started).total_seconds())
+        relative = _relative(elapsed)
+    except (TypeError, ValueError):
+        started = None
+        relative = "unknown time"
+    time_html = (f'<time datetime="{esc(job.started_at)}" title="{esc(job.started_at)}">'
+                 if started is not None else "<span>")
+    close_time = "</time>" if started is not None else "</span>"
+    ended = None
+    if job.result and job.result.get("ended_at"):
+        try:
+            ended = dt.datetime.fromisoformat(str(job.result["ended_at"]))
+            if ended.tzinfo is None:
+                ended = ended.replace(tzinfo=dt.timezone.utc)
+        except (TypeError, ValueError):
+            ended = None
+    if started is not None and ended is not None:
+        duration = observe.human_secs(max(0, (ended - started).total_seconds()))
+        timing = f"{time_html}{esc(relative)}{close_time} ago, took {esc(duration)}"
+    elif started is not None:
+        duration = observe.human_secs(elapsed)
+        suffix = f"running for {duration}" if outcome == "running" else f"{duration} since start"
+        timing = f"{time_html}started {esc(relative)}{close_time} ago, {esc(suffix)}"
+    else:
+        timing = f"{time_html}{esc(relative)}{close_time} ago"
+    output = job.output(200)
+    report = f'<pre class="report">{esc(chr(10).join(output))}</pre>' if output else ""
+    open_attr = " open" if outcome != "done" else ""
+    stop = ""
+    if outcome == "running" and job.kind == "run" and job.target:
+        stop = confirm_link("stop", job.target, "Stop this run", f"factory stop {job.target}")
+    return f"""<li class="run{live}">
+  <div class="run-head"><span class="run-name">{esc(job.command)}</span><span class="outcome {outcome_class}">{esc(outcome)}</span><span class="quiet">{timing}</span></div>
+  <details id="job-{esc(job.id)}"{open_attr}><summary>Output</summary>{report}</details>
+  {stop}
+</li>"""
+
+
+def _all_task_logs(home: Path) -> str:
+    logs = home / "logs"
+    task_ids = sorted(path.stem for path in logs.glob("*.log")) if logs.is_dir() else []
+    rendered = []
+    for time, task_id, line in observe.recent_lines(home, task_ids, 200):
+        rest = line[8:].lstrip()
+        rendered.append(f'<span class="t">{esc(time)}</span> <span class="tag">{esc(task_id)}</span> {esc(rest)}')
+    return "\n".join(rendered) if rendered else "No log yet."
+
+
+def activity(home: Path, project: str, port: int | None, job: jobs.Job | None = None) -> str:
+    all_jobs = jobs.load(home)
+    running = sum(item.outcome == "running" for item in all_jobs)
+    if running == 1:
+        sentence = "1 command is running."
+    elif running:
+        sentence = f"{running} commands are running."
+    else:
+        sentence = "Nothing is running from this page."
+    shown = all_jobs[:50]
+    items = "".join(_job_item(item) for item in shown)
+    content = f"""<div class="page-head">
+  <h1 class="lede">{esc(sentence)}</h1>
+</div>
+{notice(job)}<section class="block" aria-labelledby="h-cmds">
+  <h2 id="h-cmds">Commands from this page <span class="count">{len(shown)}</span> <span class="aside">Newest first</span></h2>
+  <ol class="runs">{items}</ol>
+</section>
+<section class="block" aria-labelledby="h-events">
+  <h2 id="h-events">Latest from every task <span class="aside">Last 200 lines</span></h2>
+  <pre class="log" data-follow>{_all_task_logs(home)}</pre>
+</section>
+"""
+    return _page("Activity", project, home, port, content, refresh=2, current="activity")
+
+
+def confirm(project: str, home: Path, port: int | None, token: str, action: str, target: str,
+            applies: bool, why: str = "", back=("Back to the board", "/")) -> str:
+    stopping = action == "stop"
+    title = f"Stop {target}?" if stopping else f"Remove {target}'s worktree?"
+    command = f"factory {action} {target}"
+    if stopping:
+        explanation = (f"{command} terminates the running task, or the plan run and every task it started. "
+                       "It waits briefly, then kills a process that does not exit.")
+        next_ = "/activity"
+        label = "Stop"
+        return_to = ("Back to the board", "/")
+    else:
+        explanation = (f"{command} removes this task's worktree. Its board entry, branches and pull request "
+                       "are left alone.")
+        next_ = f"/tasks/{quote(target, safe='')}"
+        label = "Remove worktree"
+        return_to = (f"Back to {target}", next_)
+    if applies:
+        detail = (f'<p class="fine">{esc(explanation)}</p>'
+                  + action_form(action, token, next_, label, command, target, "btn btn-danger")
+                  + f' <a class="btn" href="{esc(return_to[1])}">{esc(return_to[0])}</a>')
+    else:
+        detail = (f'<p class="fine">{esc(why)}</p>'
+                  f'<a class="btn" href="{esc(back[1])}">{esc(back[0])}</a>')
+    content = f"""<div class="page-head">
+  <h1 class="lede">{esc(title)}</h1>
+</div>
+{detail}
+"""
+    return _page(title, project, home, port, content)
 
 
 def error_page(project: str, home: Path, port: int | None, title: str, message: str,

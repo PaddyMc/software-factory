@@ -12,10 +12,13 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import urllib.request
 import webbrowser
 from collections import Counter
-from urllib.parse import quote
+from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import quote, urlencode
 from html.parser import HTMLParser
 
 import pytest
@@ -24,7 +27,7 @@ from factory import observe
 from factory.cli import main
 from factory.contracts import Task, parse_text
 from factory.db import open_db
-from factory.web import server as web_server
+from factory.web import jobs, server as web_server
 from factory.web.server import App, make_server
 from conftest import plan_text
 
@@ -100,6 +103,61 @@ def _dead_pid():
 def _get(app, path="/", headers=HOST, method="GET"):
     status, response_headers, body = app.handle(method, path, headers, b"")
     return status, dict(response_headers), body.decode()
+
+
+def _post(app, action, fields=None, headers=None, body=None):
+    fields = dict(fields or {})
+    fields.setdefault("token", app.token)
+    if body is None:
+        body = urlencode(fields).encode()
+    request_headers = {**HOST, "Content-Type": "application/x-www-form-urlencoded"}
+    for name, value in (headers or {}).items():
+        if value is None:
+            request_headers = {key: existing for key, existing in request_headers.items()
+                               if key.lower() != name.lower()}
+        else:
+            request_headers[name] = value
+    status, response_headers, response_body = app.handle("POST", f"/actions/{action}", request_headers, body)
+    return status, dict(response_headers), response_body.decode()
+
+
+class Recording:
+    """A launch double; optionally finish the command before the server starts waiting."""
+    def __init__(self, exit_code=None, output="", pid=None):
+        self.exit_code = exit_code
+        self.output = output
+        self.pid = pid
+        self.calls = []
+
+    def __call__(self, argv, cwd):
+        self.calls.append((argv, cwd))
+        directory = Path(argv[-1])
+        if self.exit_code is not None:
+            (directory / "output.log").write_text(self.output)
+            (directory / "result.json").write_text(json.dumps({
+                "exit": self.exit_code,
+                "ended_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            }))
+        return SimpleNamespace(pid=self.pid)
+
+
+def _job_dir(home, number, command=None, kind="quick", target="", minutes=1, pid=None,
+             exit_code=None, output=""):
+    directory = home / "web" / "jobs" / f"{number:06d}"
+    directory.mkdir(parents=True)
+    started = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=minutes)
+    (directory / "job.json").write_text(json.dumps({
+        "argv": [sys.executable, "-m", "factory.cli", "sync"],
+        "command": command or "factory sync", "kind": kind, "target": target,
+        "started_at": started.isoformat(timespec="seconds"), "pid": pid, "root": "/repo",
+    }))
+    (directory / "output.log").write_text(output)
+    if exit_code is not None:
+        ended = started + dt.timedelta(seconds=9)
+        (directory / "result.json").write_text(json.dumps({
+            "exit": exit_code, "ended_at": ended.isoformat(timespec="seconds"),
+        }))
+    return directory
 
 
 def test_board_sentence_and_counts_match_factory_top(home, repo):
@@ -353,7 +411,8 @@ def test_pages_and_static_files_load_nothing_from_the_network(home, repo):
         status, _, content = _get(app, path)
         assert status == 200
         assert "http://" not in content and "https://" not in content
-    assert "<form" not in body and "<button" not in body
+    forms = re.findall(r'<form\b[^>]*action="([^"]+)"', body)
+    assert forms and all(action.startswith("/actions/") for action in forms)
 
 
 def test_task_page_shows_the_contract_with_what_it_waits_for_and_what_needs_it(home, repo):
@@ -410,7 +469,9 @@ def test_task_page_shows_the_contract_with_what_it_waits_for_and_what_needs_it(h
     assert '<a class="mono" href="/tasks/page-t03">page-t03</a>' in needed
     assert '<li class="mono">docs/plans/webui.md#task-page</li>' in section
     assert '<li class="mono">docs/design/webui/task.html</li>' in section
-    assert body.count("<button") == 2 and "<form" not in body
+    assert body.count("<button") == 3
+    assert body.count("<form") == 1
+    assert 'title="factory abandon page-t02 --note &quot;put on hold from factory web&quot;"' in body
 
     _, _, sparse = _get(app, "/tasks/page-t01")
     sparse_facts = re.search(r'<dl class="facts">(.*?)</dl>', sparse, re.S).group(1)
@@ -776,7 +837,13 @@ def test_task_page_next_step_follows_the_status(home, repo):
         panel = re.search(r'<section class="next-step" aria-labelledby="h-next">(.*?)</section>', body, re.S).group(1)
         panels[task_id] = panel
         assert f'<h2 id="h-next">{heading}</h2>' in panel
-        assert '<div class="acts">' not in body and "<form" not in body
+    for task_id in ("state-t01", "state-t07", "state-t08"):
+        assert 'action="/actions/abandon"' in panels[task_id] and "Put on hold" in panels[task_id]
+    assert 'action="/actions/requeue"' in panels["state-t10"] and "Take off hold" in panels["state-t10"]
+    for task_id in ("state-t06", "state-t12"):
+        assert f'href="/confirm?action=stop&amp;target={task_id}"' in panels[task_id]
+    for task_id in ("state-t02", "state-t03", "state-t04", "state-t05", "state-t09", "state-t11"):
+        assert '<div class="acts">' not in panels[task_id] and "<form" not in panels[task_id]
     for task_id, note in notes.items():
         assert f"<pre>{html.escape(note, quote=True)}</pre>" in panels[task_id]
     assert "FAIL first\n  second &lt;tag&gt;" in panels["state-t01"]
@@ -874,6 +941,43 @@ def test_web_serves_the_board_and_its_assets_over_http(home, repo):
     assert not thread.is_alive()
 
 
+def test_http_oversized_posts_are_capped_before_the_application_reads_them(home, repo):
+    app = App(home, repo)
+    body_sizes = []
+    handle = app.handle
+
+    def record_body_size(method, path, headers, body):
+        body_sizes.append(len(body))
+        return handle(method, path, headers, body)
+
+    app.handle = record_body_size
+    httpd = make_server(app, 0)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    client = socket.create_connection(httpd.server_address, timeout=5)
+    try:
+        client.settimeout(5)
+        port = httpd.server_address[1]
+        client.sendall((
+            "POST /actions/sync HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            "Content-Type: application/x-www-form-urlencoded\r\n"
+            "Content-Length: 1048576\r\n"
+            "Connection: keep-alive\r\n\r\n"
+        ).encode() + b"x" * (web_server.MAX_FORM_BODY + 1))
+        response = b""
+        while chunk := client.recv(65536):
+            response += chunk
+        assert response.startswith(b"HTTP/1.0 413 ")
+        assert body_sizes == [web_server.MAX_FORM_BODY + 1]
+    finally:
+        client.close()
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
 def test_web_command_falls_back_to_a_free_port_and_refuses_a_busy_explicit_one(
         home, repo, monkeypatch, capsys):
     held = socket.socket()
@@ -906,3 +1010,293 @@ def test_web_command_falls_back_to_a_free_port_and_refuses_a_busy_explicit_one(
         assert len(opened) == 1
     finally:
         held.close()
+
+
+def test_each_action_runs_its_factory_command_as_a_job(home, repo):
+    db = _board(home, [
+        _contract("act-t01"), _contract("act-t02"), _contract("act-t03"), _contract("act-t04"),
+    ])
+    db.update("act-t01", status="failed")
+    db.update("act-t02", status="abandoned")
+    db.update("act-t04", status="building")
+    db.claim("act-t04", os.getpid())
+    db.close()
+    (home / "worktrees" / "act-t03").mkdir(parents=True)
+    recording = Recording()
+    app = App(home, repo, launch=recording)
+
+    posts = [
+        ("sync", "", ["sync"], "factory sync", "quick", ""),
+        ("status", "", ["status", "--refresh"], "factory status --refresh", "quick", ""),
+        ("abandon", "act-t01", ["abandon", "act-t01", "--note", "put on hold from factory web"],
+         'factory abandon act-t01 --note "put on hold from factory web"', "quick", "act-t01"),
+        ("requeue", "act-t02", ["requeue", "act-t02"], "factory requeue act-t02", "quick", "act-t02"),
+        ("clean", "act-t03", ["clean", "act-t03"], "factory clean act-t03", "quick", "act-t03"),
+        ("stop", "act-t04", ["stop", "act-t04"], "factory stop act-t04", "stop", "act-t04"),
+        ("stop", "demo", ["stop", "demo"], "factory stop demo", "stop", "demo"),
+    ]
+    for index, (action, target, args, command, kind, job_target) in enumerate(posts, 1):
+        status, headers, _ = _post(app, action, {"target": target, "next": "/"})
+        assert status == 303
+        expected_location = f"/activity?job={index:06d}" if kind == "stop" else f"/?job={index:06d}"
+        assert headers["Location"] == expected_location
+        directory = home / "web" / "jobs" / f"{index:06d}"
+        record = json.loads((directory / "job.json").read_text())
+        assert record["argv"] == [sys.executable, "-m", "factory.cli", *args]
+        assert record["command"] == command
+        assert record["kind"] == kind and record["target"] == job_target
+        assert record["started_at"] and "pid" in record
+        assert record["root"] == str(repo)
+        assert recording.calls[index - 1] == (
+            [sys.executable, "-m", "factory.web.jobs", str(directory)], repo)
+
+
+def test_actions_are_refused_for_tasks_they_dont_apply_to(home, repo):
+    db = _board(home, [_contract("bad-t01"), _contract("bad-t02"), _contract("bad-t03")])
+    db.update("bad-t01", status="merged")
+    db.update("bad-t02", status="building")
+    db.claim("bad-t02", os.getpid())
+    _add(db, [_contract("idle-t01")], "docs/plans/idle/idle.md")
+    db.close()
+    (home / "worktrees" / "bad-t02").mkdir(parents=True)
+    pid_file = home / "plan-runs" / "idle.pid"
+    pid_file.parent.mkdir()
+    pid_file.write_text("-1")
+    app = App(home, repo, launch=Recording())
+
+    refused = [
+        ("abandon", "bad-t01", "bad-t01 is merged; only a queued or failed task can be put on hold"),
+        ("abandon", "bad-t02", "bad-t02 is building; only a queued or failed task can be put on hold"),
+        ("requeue", "bad-t03", "bad-t03 is queued; only a task on hold can be taken off hold"),
+        ("clean", "bad-t03", "bad-t03 has no worktree to remove"),
+        ("clean", "bad-t02", "bad-t02 is running; stop it first"),
+        ("stop", "bad-t03", "bad-t03 is queued; nothing to stop"),
+        ("stop", "missing", "missing is neither a task on the board nor a plan"),
+        ("stop", "idle", "nothing to stop: idle has no running plan run or task"),
+    ]
+    for action, target, reason in refused:
+        status, _, body = _post(app, action, {"target": target})
+        assert status == 409
+        assert html.escape(reason, quote=True) in body
+        assert 'class="nav"' in body and ">Board</a>" in body
+    assert not (home / "web" / "jobs").exists()
+
+
+def test_posts_without_this_servers_token_or_from_another_origin_are_refused(home, repo):
+    db = _board(home, [_contract("secure-t01")])
+    db.close()
+    (home / "worktrees" / "secure-t01").mkdir(parents=True)
+    app = App(home, repo, launch=Recording())
+
+    assert _post(app, "sync", {"token": "wrong"})[0] == 403
+    assert _post(app, "sync", {"token": None}, body=b"next=%2F")[0] == 403
+    assert _post(app, "sync", headers={"Origin": "http://evil.example"})[0] == 403
+    app.port = 8765
+    for origin in ("http://127.0.0.1:8765", "http://localhost:8765"):
+        assert _post(app, "sync", headers={"Origin": origin})[0] == 303
+    assert _post(app, "sync", headers={"Sec-Fetch-Site": "cross-site"})[0] == 403
+    assert _post(app, "sync", headers={"Sec-Fetch-Site": "same-origin"})[0] == 303
+    assert _post(app, "sync", headers={"Content-Type": "text/plain"})[0] == 415
+    assert _post(app, "sync", headers={"Content-Type": None})[0] == 415
+    oversized = urlencode({"token": app.token, "padding": "x" * (17 * 1024)}).encode()
+    assert _post(app, "sync", body=oversized)[0] == 413
+    assert _post(app, "sync", headers={"Host": "evil.example:8765"})[0] == 403
+    status, headers, _ = _get(app, method="POST")
+    assert status == 405 and headers["Allow"] == "GET, HEAD"
+
+    for path in ("/", "/tasks/secure-t01", "/confirm?action=clean&target=secure-t01"):
+        _, _, body = _get(app, path)
+        forms = [form for form in re.findall(r"<form\b.*?</form>", body, re.S) if 'method="post"' in form]
+        assert forms
+        for form in forms:
+            assert f'<input type="hidden" name="token" value="{app.token}">' in form
+
+
+def test_stop_and_remove_worktree_ask_for_confirmation(home, repo):
+    db = _board(home, [_contract("confirm-t01"), _contract("confirm-t02"), _contract("confirm-t03")])
+    db.update("confirm-t01", status="building")
+    db.claim("confirm-t01", os.getpid())
+    db.update("confirm-t02", status="failed")
+    db.close()
+    (home / "worktrees" / "confirm-t02").mkdir(parents=True)
+    app = App(home, repo, launch=Recording())
+
+    _, _, board = _get(app)
+    assert '<a class="btn btn-danger" title="factory stop confirm-t01" href="/confirm?action=stop&amp;target=confirm-t01">Stop</a>' in board
+    _, _, task = _get(app, "/tasks/confirm-t02")
+    assert '<a class="btn btn-quiet" title="factory clean confirm-t02" href="/confirm?action=clean&amp;target=confirm-t02">Remove worktree</a>' in task
+    for body in (board, task):
+        forms = re.findall(r"<form\b.*?</form>", body, re.S)
+        assert not any('action="/actions/stop"' in form or 'action="/actions/clean"' in form for form in forms)
+
+    for action, target, command, next_ in (
+            ("stop", "confirm-t01", "factory stop confirm-t01", "/activity"),
+            ("clean", "confirm-t02", "factory clean confirm-t02", "/tasks/confirm-t02")):
+        status, _, body = _get(app, f"/confirm?action={action}&target={target}")
+        assert status == 200 and command in body
+        assert ("terminates" in body if action == "stop" else "removes this task" in body)
+        form = re.search(r"<form\b.*?</form>", body, re.S).group(0)
+        assert f'action="/actions/{action}"' in form
+        assert f'name="token" value="{app.token}"' in form
+        assert f'name="target" value="{target}"' in form
+        assert f'name="next" value="{next_}"' in form
+        assert f'title="{command}"' in form
+
+    status, _, body = _get(app, "/confirm?action=stop&target=confirm-t03")
+    assert status == 200 and "confirm-t03 is queued; nothing to stop" in body
+    assert "<form" not in body
+    status, _, body = _get(app, "/confirm?action=clean&target=missing")
+    assert status == 200 and "missing isn&#x27;t on this board" in body
+    assert '<a class="btn" href="/">Back to the board</a>' in body
+    assert 'href="/tasks/missing"' not in body and "<form" not in body
+    assert _get(app, "/confirm?action=nonsense&target=confirm-t03")[0] == 404
+
+
+def test_quick_actions_return_to_their_page_with_a_notice(home, repo):
+    db = _board(home, [_contract("quick-t01"), _contract("quick-t02")])
+    db.update("quick-t01", status="failed")
+    db.update("quick-t02", status="building")
+    db.claim("quick-t02", os.getpid())
+    db.close()
+    recording = Recording(exit_code=0, output="first line\nsynced 2 tasks\n")
+    app = App(home, repo, launch=recording)
+
+    status, headers, _ = _post(app, "sync")
+    assert status == 303 and headers["Location"] == "/?job=000001"
+    _, _, board = _get(app, headers["Location"])
+    assert '<div class="notice notice-ok" role="status">' in board
+    assert "Done: factory sync" in board and "synced 2 tasks" in board
+    assert "first line" not in board
+    assert '<a href="/activity#job-000001">View job</a>' in board
+
+    status, headers, _ = _post(app, "abandon", {"target": "quick-t01", "next": "/tasks/quick-t01"})
+    assert status == 303 and headers["Location"] == "/tasks/quick-t01?job=000002"
+    _, _, task = _get(app, headers["Location"])
+    assert "Done: factory abandon quick-t01" in task
+    assert '<a href="/activity#job-000002">View job</a>' in task
+
+    recording.exit_code = 1
+    recording.output = "sync failed\n"
+    for next_ in ("https://evil.example/", "//evil.example/", "///evil.example/", "tasks/quick-t01",
+                  "/\\evil.example/", "/tasks/quick-t01#fragment"):
+        status, headers, _ = _post(app, "sync", {"next": next_})
+        assert status == 303
+        assert re.fullmatch(r"/\?job=\d{6}", headers["Location"])
+    _, _, failed = _get(app, headers["Location"])
+    assert '<div class="notice notice-bad" role="status">' in failed
+    assert "Failed: factory sync" in failed and "sync failed" in failed
+    status, headers, _ = _post(app, "sync", {"next": "/?view=all"})
+    assert status == 303 and re.fullmatch(r"/\?view=all&job=\d{6}", headers["Location"])
+
+    recording.exit_code = None
+    recording.pid = os.getpid()
+    status, headers, _ = _post(app, "stop", {"target": "quick-t02", "next": "/tasks/quick-t02"})
+    assert status == 303 and re.fullmatch(r"/activity\?job=\d{6}", headers["Location"])
+    _, _, activity = _get(app, headers["Location"])
+    assert "Still running: factory stop quick-t02" in activity
+    assert '<div class="notice notice-ok" role="status">' in activity
+    _, _, missing = _get(app, "/?job=999999")
+    assert '<div class="notice' not in missing
+
+
+def _wait_for_result(home, job_id, timeout=10):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        job = jobs.get(home, job_id)
+        if job is not None and job.result is not None:
+            return job
+        time.sleep(0.05)
+    raise AssertionError(f"job {job_id} did not finish")
+
+
+def test_a_job_records_its_output_and_exit_code_and_outlives_the_server(home, repo):
+    _board(home).close()
+    app = App(home, repo)
+    status, headers, _ = _post(app, "sync")
+    assert status == 303 and headers["Location"] == "/?job=000001"
+    first = _wait_for_result(home, "000001")
+    assert first.result["exit"] == 0 and first.result["ended_at"]
+    assert isinstance(json.loads((first.directory / "job.json").read_text())["pid"], int)
+    output = (first.directory / "output.log").read_text()
+    assert "synced 2 tasks" in output and "ready to run:" in output
+
+    sleeper = jobs.start(home, repo,
+                         [sys.executable, "-c", "import time; time.sleep(1.5); print('slept through')"],
+                         "sleep 1.5", "quick", "")
+    running = jobs.get(home, sleeper)
+    assert os.getpgid(running.pid) == running.pid
+    finished = _wait_for_result(home, sleeper)
+    assert finished.result["exit"] == 0
+    assert "slept through" in (finished.directory / "output.log").read_text()
+    for job in (first, finished):
+        try:
+            os.waitpid(job.pid, 0)
+        except (ChildProcessError, ProcessLookupError):
+            pass
+
+    fresh = App(home, repo)
+    status, _, body = _get(fresh, "/activity")
+    assert status == 200
+    assert "factory sync" in body and "sleep 1.5" in body
+    assert body.index("sleep 1.5") < body.index("factory sync")
+
+
+def test_activity_lists_jobs_newest_first_with_their_output(home, repo):
+    _board(home).close()
+    _job_dir(home, 1, "factory sync", minutes=120, exit_code=0)
+    _job_dir(home, 2, "factory requeue wiki-t01", target="wiki-t01", minutes=18,
+             exit_code=1, output="".join(f"line {index:03d}\n" for index in range(250)))
+    _job_dir(home, 3, "factory status --refresh", minutes=6, pid=os.getpid())
+    _job_dir(home, 4, "factory clean wiki-t01", target="wiki-t01", minutes=4, pid=_dead_pid())
+    _job_dir(home, 5, "factory run demo --max-cost 5.00", kind="run", target="demo",
+             minutes=2, pid=os.getpid(), output="run started\n")
+    logs = home / "logs"
+    logs.mkdir()
+    (logs / "alpha.log").write_text("12:00:00 [build] alpha zero\n12:00:02 [build] alpha two\n")
+    (logs / "beta.log").write_text("12:00:01 [review] beta one\n12:00:03 [verify] beta three\n")
+
+    status, _, body = _get(App(home, repo), "/activity")
+    assert status == 200
+    assert '<h1 class="lede">2 commands are running.</h1>' in body
+    assert "Commands from this page <span class=\"count\">5</span>" in body
+    commands = re.findall(r'<span class="run-name">([^<]+)</span>', body)
+    assert commands == [
+        "factory run demo --max-cost 5.00", "factory clean wiki-t01", "factory status --refresh",
+        "factory requeue wiki-t01", "factory sync",
+    ]
+    outcomes = re.findall(r'<span class="outcome ([^"]+)">([^<]+)</span>', body)
+    assert outcomes == [("o-live", "running"), ("o-bad", "lost"), ("o-live", "running"),
+                        ("o-bad", "exit 1"), ("o-good", "done")]
+    opened = {job_id for job_id, open_ in re.findall(r'<details id="job-(\d+)"( open)?>', body) if open_}
+    assert opened == {"000002", "000003", "000004", "000005"}
+    failed = re.search(r'<details id="job-000002" open>(.*?)</details>', body, re.S).group(1)
+    assert failed.count("line ") == 200
+    assert "line 049" not in failed and "line 050" in failed and "line 249" in failed
+    assert "took 9s" in body
+    assert re.search(r"started \d+ minutes</time> ago, running for \d+m\d\ds", body)
+    assert re.search(r"started \d+ minutes</time> ago, \d+m\d\ds since start", body)
+    assert body.count("Stop this run") == 1
+    assert 'title="factory stop demo" href="/confirm?action=stop&amp;target=demo"' in body
+    assert '<main class="wrap" data-refresh="2">' in body
+    assert '<a href="/">Board</a><a href="/activity" aria-current="page">Activity</a>' in body
+    for text in (
+            '<span class="t">12:00:00</span> <span class="tag">alpha</span> [build] alpha zero',
+            '<span class="t">12:00:01</span> <span class="tag">beta</span> [review] beta one',
+            '<span class="t">12:00:02</span> <span class="tag">alpha</span> [build] alpha two',
+            '<span class="t">12:00:03</span> <span class="tag">beta</span> [verify] beta three'):
+        assert text in body
+    positions = [body.index(f"12:00:0{index}") for index in range(4)]
+    assert positions == sorted(positions)
+
+
+def test_old_jobs_are_pruned(home, repo):
+    for number in range(1, 201):
+        _job_dir(home, number, f"factory sync {number}", exit_code=0)
+    recording = Recording()
+    job_id = jobs.start(home, repo, [sys.executable, "-m", "factory.cli", "sync"],
+                        "factory sync", "quick", "", recording)
+    assert job_id == "000201"
+    remaining = sorted(path.name for path in (home / "web" / "jobs").iterdir())
+    assert len(remaining) == 200
+    assert remaining[0] == "000002" and remaining[-1] == "000201"
+    assert not (home / "web" / "jobs" / "000001").exists()
