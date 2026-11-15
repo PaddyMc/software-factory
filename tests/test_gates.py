@@ -142,3 +142,16 @@ def test_conflict_markers_fail_the_gate(repo):
     assert gs["conflict_markers"].ok is False
     assert gs["conflict_markers"].detail == "conflict markers left at src/greet.txt:1, src/greet.txt:3, src/greet.txt:6"
     assert G.conflict_markers("+++ b/a.md\n@@ -1 +1,2 @@\n context\n+<<<<<<<< eight is not a marker\n") == []
+
+
+def test_table_can_shorten_long_details():
+    long = "x" * 170
+    gate = G.Gate("verification", True, long + "\nshort | detail")
+    assert G.table([gate]) == (
+        "| Gate | Result | Detail |\n|---|---|---|\n"
+        f"| verification | PASS | {long}<br>short \\| detail |"
+    )
+    assert G.table([gate], width=160) == (
+        "| Gate | Result | Detail |\n|---|---|---|\n"
+        f"| verification | PASS | {'x' * 159}…<br>short \\| detail |"
+    )
