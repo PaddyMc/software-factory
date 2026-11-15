@@ -608,6 +608,7 @@ None: the project sets no `e2e`. `test_web_serves_the_board_and_its_assets_over_
 - **Depends on:** nothing. The pages read `runs.flow` and `runs.step` from [agent-flows](agent-flows.md), which are on main.
 - **Required by:** nothing.
 - **Overlaps:** [measure](measure.md), [bench](bench.md) and [strict-flow](strict-flow.md) also change `factory/cli.py`, `factory/db.py`, `factory/pipeline.py` and `factory/scheduler.py`. This plan only adds to them (see Risk 8), so whichever lands second has a small conflict for the factory's conflict resolution.
+- **Related:** [pr-descriptions](pr-descriptions.md). `webui-t05` failed when GitHub refused its PR body as over 65,536 characters; it runs again after `pr-descriptions-t01`, which keeps every body under the limit. Factory PRs then point to `factory show` and this plan's task page for the planner's plan and every agent's full report.
 - **Later:** once measure's `factory stats` lands, a stats page can render its numbers. Once NEXT.md item 5 (steer a running agent) lands, the task page can have a box to message the running agent.
 - **Supersedes** the unmerged `web-board` plan on branch `plan/web-board`, which was read-only and used system fonts and a different palette.
 

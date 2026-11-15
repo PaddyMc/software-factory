@@ -15,6 +15,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 8 | Compare flows and setups. Planned: [bench](docs/plans/bench.md) | medium | 7 |
 | 9 | The steps of a flow are still the first version's. Planned: [strict-flow](docs/plans/strict-flow.md) | large | 3, 7, 8 |
 | 10 | Managing the factory takes many terminal commands. Planned as a web page: [webui](docs/plans/webui.md) | medium | — |
+| 11 | Factory PR descriptions are long and hard to read. Planned: [pr-descriptions](docs/plans/pr-descriptions.md) | small | — |
 
 ## 1. Act on human PR review comments
 
@@ -150,3 +151,16 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 - Its buttons run the `factory` commands you'd type: load plans, check GitHub, hold, remove a worktree, stop, and start a plan or task run through a form with a cost cap. A new `factory stop` stops one task or a whole plan run.
 - It needs no new dependencies, and its look is fixed by mockups committed with the plan, in fractal-dev.xyz's palette and typefaces.
 - Its first task opens the board in WAL mode with a 30-second busy timeout, which fixes `database is locked`.
+
+## 11. Readable PR descriptions
+
+**Gap.** A factory PR is where the human approves, but its description is written for agents:
+- Recent ones run 19,000 to 33,000 characters, and over half of that is the planner's hand-off to the builder.
+- The verifier's sections sit at the same level as the body's own, and the acceptance evidence appears twice.
+- Nothing bounds an agent's report. `webui-t05` passed every gate and then failed, because GitHub refused a body over 65,536 characters.
+- The title and the commit subject are the goal cut mid-word, and a one-commit squash merge puts that subject on the trunk.
+
+**Plan.** [docs/plans/pr-descriptions.md](docs/plans/pr-descriptions.md) (planned 2026-11-15, tasks `pr-descriptions-t01`…`t05`, alongside [measure](docs/plans/measure.md), before [strict-flow](docs/plans/strict-flow.md)):
+- The verifier writes a fixed-shape summary: a title, what changed, and what to check, including the reviewer findings left unaddressed. The factory parses and bounds it, and builds one itself when it can't.
+- The planner's hand-off leaves the PR. The gate table, the contract and each reviewer's last draft stay collapsed and capped, and the body is held under 60,000 characters.
+- The PR title is the task id and the verifier's title. Commit subjects are cut at a word, with the attempt in the commit body.
