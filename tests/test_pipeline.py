@@ -164,6 +164,7 @@ def test_the_pr_shows_what_changed_and_what_to_check(factory_repo, home, fake_gh
 
 
 def test_the_pr_body_reads_in_a_fixed_order(factory_repo, home, fake_gh, monkeypatch):
+    monkeypatch.setattr("factory.prices.cost", lambda *args, **kwargs: 0.0)
     _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
     assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
 
@@ -188,8 +189,12 @@ def test_the_pr_body_reads_in_a_fixed_order(factory_repo, home, fake_gh, monkeyp
     assert "**Non-goals**\n\n- Anything else" in body
     assert "**Acceptance criteria**\n\n- src/greet.txt says hello" in body
     assert "**Verification commands**\n\n- `grep -q hello src/greet.txt`" in body
-    assert "**Flow** `default`: plan, build, review, gates, verify" in body
-    assert f"Candidate `{candidate}` on base `main` (`{row['base_sha'][:12]}`)" in body
+    footer = body.rsplit("\n---\n\n", 1)[1]
+    assert footer.startswith("<sub>Factory task `demo-t01`")
+    assert "**Flow** `default`: plan, build, review, gates, verify" in footer
+    assert f"Candidate `{candidate}` on base `main` (`{row['base_sha'][:12]}`)" in footer
+    assert " · $0.00 · The planner's plan and every agent's full report: `factory show demo-t01`" in footer
+    assert "\n" not in footer
     assert body.endswith("The planner's plan and every agent's full report: `factory show demo-t01`")
 
 

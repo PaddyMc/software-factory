@@ -272,7 +272,7 @@ def footer(task, flow, sha: str, base_ref: str, base_sha: str, cost: float | Non
         f"**Flow** `{flow.name}`: " + ", ".join(step.name for step in flow.steps),
         f"Candidate `{sha}` on base `{base_ref}` (`{base_sha[:12]}`)",
     ]
-    if cost:
+    if cost is not None:
         parts.append(f"${cost:.2f}")
     return " · ".join(parts)
 

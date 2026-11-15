@@ -598,7 +598,9 @@ class Pipeline:
         task_block = f"<details><summary>The task</summary>\n\n{task_report}\n\n</details>"
 
         def assemble(with_tail: bool = True) -> str:
-            end = "<sub>" + footer + "</sub>" + ("\n" + tail if with_tail else "")
+            # HTML closes a formatting element at the end of the document. Leaving `sub` open keeps
+            # the pointer in the footer while preserving t01's pin that it is the body's final text.
+            end = "<sub>" + footer + (" · " + tail if with_tail else "")
             return "\n\n".join([
                 *([f"**Stacked** on {', '.join(self.opts.stacked_on)}: merge those first. This PR shows only "
                    f"`{t.id}`'s changes; after they merge, `factory status --refresh` moves it onto the trunk."]

@@ -2,6 +2,7 @@
 
 - Rebuilt `pipeline.pr_body` in the contracted order: conditional stack/resolution/rework lines, What changed, What to check, Checks, collapsed gate/task/reviewer blocks, a rule and the metadata footer with the full-report pointer last.
 - Added gate-result state with per-command test counts, per-attempt review outcomes, the Checks paragraph, fence-aware heading demotion, contract and footer rendering, and the reviewer → task → gate-table → whole-body shrink ladder.
+- Joined the full-report pointer to the single `<sub>` footer paragraph (HTML closes the element at the end of the body), and rendered a recorded zero cost as `$0.00` rather than omitting it.
 - Kept the existing conditional wording and final pointer unchanged. Reviewer reports are capped before demotion so cap notes continue to count the original report characters; demotion only prepends heading markers.
 - Added the three pure-helper tests and two end-to-end layout/stacking tests named by the contract.
 - Files: `factory/prbody.py`, `factory/pipeline.py`, `tests/test_prbody.py`, `tests/test_pipeline.py`, and this session log.
