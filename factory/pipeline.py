@@ -339,7 +339,8 @@ class Pipeline:
             raise
         if getattr(out, "stopped", None):
             outcome = f"{outcome} ({out.stopped})"
-        self.db.conn.execute("UPDATE runs SET model=? WHERE id=?", (getattr(out, "model", None), run_id))
+        self.db.conn.execute("UPDATE runs SET model=?, prompt_version=? WHERE id=?",
+                             (getattr(out, "model", None), getattr(out, "prompt_version", None), run_id))
         if hasattr(out, "steps"):
             self.db.progress(self.task.id, run_id, f"{role}#{attempt} {outcome}", out.steps, out.tokens_in,
                              out.tokens_out, out.cost_usd, out.refused)
