@@ -180,9 +180,14 @@ def passed(gates: list[Gate]) -> bool:
     return all(g.ok is not False for g in gates)
 
 
-def table(gates: list[Gate]) -> str:
+def table(gates: list[Gate], width: int | None = None) -> str:
     rows = ["| Gate | Result | Detail |", "|---|---|---|"]
     for g in gates:
-        detail = g.detail.replace("\n", "<br>").replace("|", "\\|")
+        if width is None:
+            detail = g.detail.replace("\n", "<br>").replace("|", "\\|")
+        else:
+            lines = [line if len(line) <= width else line[:max(0, width - 1)] + ("…" if width > 0 else "")
+                     for line in g.detail.split("\n")]
+            detail = "<br>".join(lines).replace("|", "\\|")
         rows.append(f"| {g.name} | {g.mark} | {detail} |")
     return "\n".join(rows)

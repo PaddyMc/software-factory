@@ -5,11 +5,13 @@ except the LLM (ScriptedModel) and GitHub (fake `gh` + a bare `origin`).
 """
 
 import json
+import re
 import shutil
 
 import pytest
 
 from factory import agents
+from factory import prbody
 from factory.cli import main
 from factory.db import open_db
 from langchain_core.messages import AIMessage
@@ -72,6 +74,55 @@ def test_run_ends_in_a_working_pr(factory_repo, home, fake_gh, monkeypatch, caps
     assert main(["status", "--refresh"]) == 0
     assert open_db(home).task("demo-t01")["status"] == "merged"
     assert "demo-t01" in capsys.readouterr().out
+
+
+def test_a_huge_review_still_opens_a_pr_that_fits(factory_repo, home, fake_gh, monkeypatch):
+    def draft(marker, size, final=False):
+        ending = "\nVERDICT: APPROVE" if final else "\n"
+        heading = f"## Acceptance criteria\n- {marker}\n"
+        filler = "".join(f"{marker} filler {i:05d} {'x' * 40}\n" for i in range(size // 50 + 2))
+        result = (heading + filler)[:size - len(ending)] + ending
+        assert len(result) == size
+        return result
+
+    first = draft("DRAFT-ONE", 30_000)
+    second = draft("DRAFT-TWO", 30_000)
+    prefix = ("I reviewed this three times.\n" + first
+              + "Actually, let me reconsider the first draft.\n" + second
+              + "Actually, let me reconsider once more.\n")
+    third = draft("DRAFT-THREE", 100_000 - len(prefix), final=True)
+    huge = prefix + third
+    assert len(huge) == 100_000 and huge.strip() == huge
+
+    plays = scripts(review_verdicts=[])
+    plays["REVIEWER"] = [call("git_diff", stat=True), AIMessage(huge)]
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    assert db.task("demo-t01")["status"] == "pr_open"
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    assert len(body) <= prbody.BODY_LIMIT
+    assert body.count("## Acceptance criteria") == 1
+    assert "DRAFT-ONE" not in body and "DRAFT-TWO" not in body and "DRAFT-THREE" in body
+    note = re.search(r"… kept (\d+) of (\d+) characters: factory show demo-t01 --step review", body)
+    assert note and int(note.group(1)) < int(note.group(2)) == len(third)
+    assert body.endswith("The planner's plan and every agent's full report: `factory show demo-t01`")
+    review = next(r for r in db.runs("demo-t01") if r["role"] == "review")
+    assert review["report"] == huge
+
+
+def test_the_pr_body_leaves_out_the_plan(factory_repo, home, fake_gh, monkeypatch):
+    plays = scripts(review_verdicts=["APPROVE"])
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    assert "<summary>Plan</summary>" not in body
+    assert "**Files**: src/greet.txt" not in body
+    assert body.endswith("The planner's plan and every agent's full report: `factory show demo-t01`")
+    plan = next(r for r in open_db(home).runs("demo-t01") if r["role"] == "plan")
+    assert plan["report"] == plays["PLANNER"][-1].content
 
 
 def test_rerun_after_closed_pr_opens_a_new_one(factory_repo, home, fake_gh, monkeypatch):
@@ -1227,6 +1278,63 @@ def _flow_config(repo, yaml_tail: str):
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "config: flows")
     git(repo, "push", "-q", "origin", "main")
+
+
+def _run_with_two_long_reviews(factory_repo, home, fake_gh, monkeypatch):
+    _flow_config(factory_repo, "flow: pair\nflows:\n  pair:\n    - build\n"
+                               "    - {name: r1, kind: review, model: fake:r1}\n"
+                               "    - {name: r2, kind: review, model: fake:r2}\n")
+    reports = {}
+    for name, count in (("r1", 350), ("r2", 160)):
+        reports[name] = "\n".join([
+            "## Acceptance criteria", f"- {name}",
+            *(f"{name} filler {i:05d} {'x' * 35}" for i in range(count)),
+            "VERDICT: APPROVE",
+        ])
+    calls = []
+    base = scripts(review_verdicts=[])
+    base["_calls"] = calls
+    per_spec = {
+        f"fake:{name}": {"REVIEWER": [call("git_diff", stat=True), AIMessage(report)],
+                         "_verdicts": [], "_calls": calls}
+        for name, report in reports.items()
+    }
+    monkeypatch.setattr(agents, "build_model", lambda spec: ScriptedModel(plays=per_spec.get(spec, base)))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    return reports
+
+
+def test_a_body_over_the_limit_shrinks_its_longest_reviewer_block_first(factory_repo, home, fake_gh, monkeypatch):
+    monkeypatch.setattr(prbody, "BODY_LIMIT", 15_000)
+    reports = _run_with_two_long_reviews(factory_repo, home, fake_gh, monkeypatch)
+    assert len(reports["r1"]) > 15_000 and 8_000 < len(reports["r2"]) < prbody.BLOCK_LIMIT
+
+    assert open_db(home).task("demo-t01")["status"] == "pr_open"
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    assert len(body) <= 15_000
+    r1 = body.split("<details><summary>Reviewer report (r1)</summary>", 1)[1].split("</details>", 1)[0]
+    note = re.search(r"… kept (\d+) of (\d+) characters: factory show demo-t01 --step r1", r1)
+    assert note and int(note.group(1)) <= 2_000 and int(note.group(2)) == len(reports["r1"])
+    assert reports["r2"] in body                         # the shorter block is still whole
+    db = open_db(home)
+    for step, report in reports.items():
+        run = next(r for r in db.runs("demo-t01") if r["role"] == "review" and r["step"] == step)
+        assert run["report"] == report
+
+
+def test_a_body_over_the_limit_falls_back_to_one_liners_and_a_capped_body(factory_repo, home, fake_gh, monkeypatch):
+    monkeypatch.setattr(prbody, "BODY_LIMIT", 400)
+    reports = _run_with_two_long_reviews(factory_repo, home, fake_gh, monkeypatch)
+
+    assert open_db(home).task("demo-t01")["status"] == "pr_open"
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    assert len(body) <= 400
+    assert re.search(r"… kept \d+ of \d+ characters: factory show demo-t01\n", body)
+    assert body.endswith("The planner's plan and every agent's full report: `factory show demo-t01`")
+    db = open_db(home)
+    for step, report in reports.items():
+        run = next(r for r in db.runs("demo-t01") if r["role"] == "review" and r["step"] == step)
+        assert run["report"] == report
 
 
 def test_a_flow_without_planner_or_report_opens_a_pr_on_passing_gates(factory_repo, home, fake_gh, monkeypatch):

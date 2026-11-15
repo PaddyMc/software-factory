@@ -28,6 +28,7 @@ from langgraph.graph import END, StateGraph
 from . import flows
 from . import gates as G
 from . import github
+from . import prbody
 from .agents import Ctx, Roles
 from .config import Config
 from .contracts import Task
@@ -153,6 +154,7 @@ class State(TypedDict, total=False):
     verdict: str
     gates_ok: bool
     gates: str
+    gates_pr: str           # gate details cut for the PR; `gates` stays whole for the verifier
     reviews: dict[str, str]  # review step name -> its report (one PR-body block per review step)
     verify: str
     outcome: str
@@ -206,6 +208,8 @@ def trunk_tip(root: Path, trunk: str, remote: str = "origin") -> str:
 
 
 DIFF_LIMIT = 20000
+GATE_TABLE_WIDTH = 160
+SHRUNK_LIMIT = 2000
 
 
 def _diff(root: Path, a: str, b: str, paths: tuple[str, ...]) -> str:
@@ -426,6 +430,7 @@ class Pipeline:
 
         gs = self.role("verify", "verifying", s["attempt"], run, step="gates")
         table = G.table(gs)
+        table_pr = G.table(gs, width=GATE_TABLE_WIDTH)
         for g in gs:
             self._event("gate", f"{g.mark:<4} {g.name}: {clip(g.detail, 200)}")
         if not G.passed(gs):
@@ -435,9 +440,9 @@ class Pipeline:
             stuck = sig == s.get("failure_sig")
             if stuck:
                 self._event("stage", "no progress: the same gates failed with the same output twice in a row")
-            return {"gates_ok": False, "gates": table, "failure_sig": sig, "stuck": stuck,
+            return {"gates_ok": False, "gates": table, "gates_pr": table_pr, "failure_sig": sig, "stuck": stuck,
                     "feedback": f"Verification gates failed: {', '.join(g.name for g in bad)}\n\n{failed}"}
-        return {"gates_ok": True, "gates": table}
+        return {"gates_ok": True, "gates": table, "gates_pr": table_pr}
 
     def verify(self, s: State) -> State:
         step = self.verify_step
@@ -519,26 +524,57 @@ class Pipeline:
         t = self.task
         flow = self.opts.flow
         reviews = s.get("reviews", {})
-        return "\n\n".join([
-            f"Factory task **`{t.id}`** from `{t.plan}` — {t.goal}",
-            f"Candidate `{s['sha']}` on base `{self.opts.base_ref}` (`{self.base_sha[:12]}`), "
-            f"{s['attempt']} build attempt(s). Gates passed; merging is the human gate.",
-            f"**Flow** `{flow.name}`: " + ", ".join(step.name for step in flow.steps),
-            *([f"**Stacked** on {', '.join(self.opts.stacked_on)}: merge those first. This PR shows only "
-               f"`{t.id}`'s changes; after they merge, `factory status --refresh` moves it onto the trunk."]
-              if self.opts.stacked_on else []),
-            *([f"**Conflicts resolved** on `{r.onto}`: " + (", ".join(f"`{f}`" for f in r.conflicts) if r.conflicts
-               else "none left") + f". Previous candidate `{r.old_candidate[:12]}`."]
-              if (r := self.opts.resolution) else []),
-            *([KINDS[r.kind].body_line(r)] if (r := self.opts.rework) else []),
-            *(["## Verifier report\n\n" + s.get("verify", "")] if self.verify_step else []),
-            "## Gates\n\n" + s.get("gates", ""),
-            *[f"<details><summary>Reviewer report ({step.name})</summary>\n\n"
-              + reviews.get(step.name, "") + "\n\n</details>"
-              for step in flow.steps if step.kind == "review"],
-            *(["<details><summary>Plan</summary>\n\n" + s.get("plan", "") + "\n\n</details>"]
-              if self.plan_step else []),
-        ])
+        review_steps = [step for step in flow.steps if step.kind == "review"]
+        cleaned = {step.name: prbody.clean_report(reviews.get(step.name, ""), "## Acceptance criteria")
+                   for step in review_steps}
+        pointers = {step.name: f"factory show {t.id} --step {step.name}" for step in review_steps}
+        tail = f"The planner's plan and every agent's full report: `factory show {t.id}`"
+
+        def review_block(step: flows.Step, limit: int) -> str:
+            return (f"<details><summary>Reviewer report ({step.name})</summary>\n\n"
+                    + prbody.cap(cleaned[step.name], limit, pointers[step.name]) + "\n\n</details>")
+
+        blocks = {step.name: review_block(step, prbody.BLOCK_LIMIT) for step in review_steps}
+
+        def assemble(with_tail: bool = True) -> str:
+            return "\n\n".join([
+                f"Factory task **`{t.id}`** from `{t.plan}` — {t.goal}",
+                f"Candidate `{s['sha']}` on base `{self.opts.base_ref}` (`{self.base_sha[:12]}`), "
+                f"{s['attempt']} build attempt(s). Gates passed; merging is the human gate.",
+                f"**Flow** `{flow.name}`: " + ", ".join(step.name for step in flow.steps),
+                *([f"**Stacked** on {', '.join(self.opts.stacked_on)}: merge those first. This PR shows only "
+                   f"`{t.id}`'s changes; after they merge, `factory status --refresh` moves it onto the trunk."]
+                  if self.opts.stacked_on else []),
+                *([f"**Conflicts resolved** on `{r.onto}`: " + (", ".join(f"`{f}`" for f in r.conflicts) if r.conflicts
+                   else "none left") + f". Previous candidate `{r.old_candidate[:12]}`."]
+                  if (r := self.opts.resolution) else []),
+                *([KINDS[r.kind].body_line(r)] if (r := self.opts.rework) else []),
+                *(["## Verifier report\n\n" + prbody.cap(
+                    prbody.clean_report(s.get("verify", "")), prbody.BLOCK_LIMIT,
+                    f"factory show {t.id} --step {self.verify_step.name}")] if self.verify_step else []),
+                "## Gates\n\n" + s.get("gates_pr", ""),
+                *blocks.values(),
+                *([tail] if with_tail else []),
+            ])
+
+        body = assemble()
+        if len(body) <= prbody.BODY_LIMIT:
+            return body
+        longest = sorted(review_steps, key=lambda step: len(cleaned[step.name]), reverse=True)
+        for step in longest:
+            blocks[step.name] = review_block(step, SHRUNK_LIMIT)
+            body = assemble()
+            if len(body) <= prbody.BODY_LIMIT:
+                return body
+        for step in longest:
+            blocks[step.name] = f"Reviewer report ({step.name}): `{pointers[step.name]}`"
+            body = assemble()
+            if len(body) <= prbody.BODY_LIMIT:
+                return body
+        room = prbody.BODY_LIMIT - len(tail) - 2
+        if room < 0:                     # only a monkeypatched, impossibly small body limit
+            return (assemble(False) + "\n\n" + tail)[:max(0, prbody.BODY_LIMIT)]
+        return prbody.cap(assemble(False), room, f"factory show {t.id}") + "\n\n" + tail
 
     # ------------------------------------------------------------ graph
 
