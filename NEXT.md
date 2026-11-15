@@ -17,6 +17,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 10 | Managing the factory takes many terminal commands. Planned as a web page: [webui](docs/plans/webui.md) | medium | — |
 | ✓ | Factory PR descriptions are long and hard to read. Done: [Pull requests](docs/architecture.md#pull-requests) | — | — |
 | 12 | The models' reasoning is thrown away. Planned: [thoughts](docs/plans/thoughts.md) | small | 10 (its web task) |
+| 13 | You can't tell which factory version is running. Planned: [version](docs/plans/version.md) | small | — |
 
 ## 1. Act on human PR review comments
 
@@ -175,3 +176,11 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 - `factory transcript` prints each step's thoughts before what it said and did, and `factory trace` counts thinking tokens.
 - The web transcript page shows the thoughts above what each step said, once `webui-t05` lands.
 - Model requests don't change: a model that doesn't share its reasoning is shown as not sharing it.
+
+## 13. Which factory is this?
+
+**Gap.** Nothing says which factory version is running. `factory` has no `version` command or `--version` flag. The package version, `0.1.0` in `pyproject.toml`, stays the same until a release bumps it. An editable install runs whatever its checkout holds, and `main` is now 25 commits past `v0.1.0`, so a run's behaviour can't be tied to the code that produced it.
+
+**Plan.** [docs/plans/version.md](docs/plans/version.md) (planned 2026-11-15, tasks `version-t01` and `t02`):
+- `factory version` and `factory --version` print the installed package version. When the factory runs from its own git checkout, as an editable install does, they add that checkout's `git describe`, for example `factory 0.1.0 (v0.1.0-25-ge5f6b95-dirty)`.
+- Runs, the board and PR bodies don't record the version, and the build and release process stay as they are.
