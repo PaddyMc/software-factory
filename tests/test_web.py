@@ -941,6 +941,43 @@ def test_web_serves_the_board_and_its_assets_over_http(home, repo):
     assert not thread.is_alive()
 
 
+def test_http_oversized_posts_are_capped_before_the_application_reads_them(home, repo):
+    app = App(home, repo)
+    body_sizes = []
+    handle = app.handle
+
+    def record_body_size(method, path, headers, body):
+        body_sizes.append(len(body))
+        return handle(method, path, headers, body)
+
+    app.handle = record_body_size
+    httpd = make_server(app, 0)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    client = socket.create_connection(httpd.server_address, timeout=5)
+    try:
+        client.settimeout(5)
+        port = httpd.server_address[1]
+        client.sendall((
+            "POST /actions/sync HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            "Content-Type: application/x-www-form-urlencoded\r\n"
+            "Content-Length: 1048576\r\n"
+            "Connection: keep-alive\r\n\r\n"
+        ).encode() + b"x" * (web_server.MAX_FORM_BODY + 1))
+        response = b""
+        while chunk := client.recv(65536):
+            response += chunk
+        assert response.startswith(b"HTTP/1.0 413 ")
+        assert body_sizes == [web_server.MAX_FORM_BODY + 1]
+    finally:
+        client.close()
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
 def test_web_command_falls_back_to_a_free_port_and_refuses_a_busy_explicit_one(
         home, repo, monkeypatch, capsys):
     held = socket.socket()

@@ -29,6 +29,7 @@ STATIC_TYPES = {
     "fonts/instrument-serif-400-italic.woff2": "font/woff2",
 }
 QUICK_WAIT = 15.0
+MAX_FORM_BODY = 16 * 1024
 ACTIONS = {"sync", "status", "abandon", "requeue", "clean", "stop"}
 
 
@@ -181,7 +182,7 @@ class App:
         media_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
         if media_type != "application/x-www-form-urlencoded":
             return self._error(415, "Unsupported media type.", "POST a URL-encoded factory form.")
-        if len(body) > 16 * 1024:
+        if len(body) > MAX_FORM_BODY:
             return self._error(413, "Content too large.", "A factory form is at most 16 KB.")
         form = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
         token = self._field(form, "token")
@@ -314,7 +315,14 @@ def make_server(app: App, port: int) -> ThreadingHTTPServer:
                 length = int(self.headers.get("Content-Length", "0"))
             except ValueError:
                 length = 0
-            request_body = self.rfile.read(max(0, length)) if length else b""
+            if self.command == "POST":
+                request_body = (self.rfile.read(min(max(0, length), MAX_FORM_BODY + 1))
+                                if length else b"")
+                if length > MAX_FORM_BODY:
+                    # The rest of an oversized form is unread; never parse it as another request.
+                    self.close_connection = True
+            else:
+                request_body = self.rfile.read(max(0, length)) if length else b""
             status, headers, response_body = app.handle(self.command, self.path, self.headers, request_body)
             self.send_response(status)
             for name, value in headers:
