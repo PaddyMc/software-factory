@@ -160,3 +160,68 @@ def test_fallback_summary_uses_the_goal_the_diff_and_the_findings():
     assert "4 more bullets" in summary.check[-1]
     assert "factory show demo-t01 --step review" in summary.check[-1]
     assert "factory show demo-t01 --step second-review" in summary.check[-1]
+
+
+def test_checks_paragraph_counts_gates_tests_and_verdicts():
+    checks = [prbody.Check(name, True) for name in ("clean", "diff", "conflict_markers", "plan_untouched")]
+    checks += [
+        prbody.Check("verification", True, commands=2, tests=23),
+        prbody.Check("unit_tests", True, commands=1, tests=269),
+        prbody.Check("e2e_tests", None),
+    ]
+    assert prbody.checks_paragraph(
+        checks, [("review", "APPROVE")], "0b8369aab1d294b273b5ac8f4dd2d9f6cd0b1eff", 1,
+    ) == ("All 7 gates passed on 0b8369aab1d2 after 1 build attempt. verification: 2 commands, 23 tests. "
+          "unit_tests: 1 command, 269 tests. Skipped: e2e_tests. Reviewed by review: APPROVE.")
+
+    assert prbody.checks_paragraph(
+        [prbody.Check("verification", True, commands=1)], [], "abcdefghijklmno", 2,
+    ) == "All 1 gates passed on abcdefghijkl after 2 build attempts. verification: 1 command."
+    assert prbody.checks_paragraph(
+        [prbody.Check("clean", True), prbody.Check("verification", False, 2, 0),
+         prbody.Check("unit_tests", None)],
+        [("review", None)], "abcdefghijklmno", 1,
+    ) == ("2 of 3 gates passed on abcdefghijkl after 1 build attempt. verification: 2 commands, 0 tests. "
+          "Skipped: unit_tests.")
+
+
+def test_headings_in_collapsed_blocks_move_down():
+    report = ("# One\n  ## Two\n##### Five\n###### Six\n####### Not a heading\n"
+              "```markdown\n## Fenced\n# Also fenced\n```\n## After\n")
+    assert prbody.demote(report) == (
+        "### One\n  #### Two\n###### Five\n###### Six\n####### Not a heading\n"
+        "```markdown\n## Fenced\n# Also fenced\n```\n#### After\n"
+    )
+
+
+def test_fit_shrinks_blocks_in_order():
+    blocks = {"review": "R" * 8, "task": "T" * 8, "gates": "G" * 8}
+    log = []
+
+    def assemble():
+        return "/".join(blocks.values()) + "/tail"
+
+    def shrink(label, name, value):
+        def run():
+            log.append(label)
+            blocks[name] = value
+        return run
+
+    steps = [shrink("shrink review", "review", "RRRR"), shrink("replace review", "review", "r"),
+             shrink("replace task", "task", "t"), shrink("replace gates", "gates", "g"),
+             shrink("unused", "gates", "x")]
+    expected = "r/t/g/tail"
+    assert prbody.fit(assemble, steps, len(expected), lambda: "fallback") == expected
+    assert log == ["shrink review", "replace review", "replace task", "replace gates"]
+
+    log.clear()
+    tail = "The planner's plan and every agent's full report: `factory show demo-t01`"
+
+    def last_resort():
+        log.append("cap")
+        room = 140 - len(tail) - 2
+        return prbody.cap("x" * 200, room, "factory show demo-t01") + "\n\n" + tail
+
+    body = prbody.fit(lambda: "x" * 200, [lambda: log.append("shrink")], 140, last_resort)
+    assert log == ["shrink", "cap"]
+    assert len(body) <= 140 and body.endswith(tail)

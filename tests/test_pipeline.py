@@ -163,6 +163,36 @@ def test_the_pr_shows_what_changed_and_what_to_check(factory_repo, home, fake_gh
     assert verify["report"] == plays["VERIFIER"][-1].content.strip()
 
 
+def test_the_pr_body_reads_in_a_fixed_order(factory_repo, home, fake_gh, monkeypatch):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    row = open_db(home).task("demo-t01")
+    candidate = row["candidate_sha"]
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    assert body.startswith("## What changed")
+    parts = [
+        "## What changed", "## What to check", "## Checks",
+        "<details><summary>Gate table</summary>", "<details><summary>The task</summary>",
+        "<details><summary>Reviewer report (review)</summary>", "\n---\n", "<sub>Factory task `demo-t01`",
+    ]
+    positions = [body.index(part) for part in parts]
+    assert positions == sorted(positions)
+    assert body.count("<details>") == 3
+    assert "Factory task **`" not in body
+    assert not re.search(r"^## Gates$", body, re.M)
+    assert "#### Gates" in body and "#### Findings" in body
+    assert ("All 9 gates passed on " + candidate[:12] + " after 1 build attempt. verification: 1 command. "
+            "Skipped: unit_tests, e2e_tests. Reviewed by review: APPROVE.") in body
+    assert "**Goal**\n\nAdd the greeting module" in body
+    assert "**Non-goals**\n\n- Anything else" in body
+    assert "**Acceptance criteria**\n\n- src/greet.txt says hello" in body
+    assert "**Verification commands**\n\n- `grep -q hello src/greet.txt`" in body
+    assert "**Flow** `default`: plan, build, review, gates, verify" in body
+    assert f"Candidate `{candidate}` on base `main` (`{row['base_sha'][:12]}`)" in body
+    assert body.endswith("The planner's plan and every agent's full report: `factory show demo-t01`")
+
+
 def test_an_unparseable_summary_falls_back(factory_repo, home, fake_gh, monkeypatch):
     plays = scripts(review_verdicts=["APPROVE"])
     plays["VERIFIER"] = [AIMessage("**Summary**\n- the old report shape\n")]
@@ -598,6 +628,16 @@ def _open_stack(monkeypatch, home):
     _use_model(monkeypatch, plays)
     assert main(["run", "demo-t02", "--skip-gates", SKIP, *SANDBOX]) == 0
     return [open_db(home).task(t)["candidate_sha"] for t in ("demo-t01", "demo-t02")]
+
+
+def test_a_stacked_pr_body_starts_with_its_merge_order(factory_repo, home, fake_gh, monkeypatch):
+    _open_stack(monkeypatch, home)
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t02"]["body"]
+    assert body.splitlines()[0] == (
+        "**Stacked** on demo-t01 (https://github.test/pr/1): merge those first. This PR shows only "
+        "`demo-t02`'s changes; after they merge, `factory status --refresh` moves it onto the trunk."
+    )
+    assert body.index("**Stacked**") < body.index("## What changed")
 
 
 def _squash_to_main(repo, sha, message):
