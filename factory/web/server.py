@@ -6,7 +6,7 @@ import importlib.resources
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from .. import config
 from ..db import open_db
@@ -48,8 +48,8 @@ class App:
         return status, headers + (extra or []), body
 
     def _error(self, status: int, title: str, message: str,
-               extra: list[tuple[str, str]] | None = None):
-        page = views.error_page(self.project, self.home, self.port, title, message).encode()
+               extra: list[tuple[str, str]] | None = None, back=("Back to the board", "/")):
+        page = views.error_page(self.project, self.home, self.port, title, message, back).encode()
         return self._response(status, "text/html; charset=utf-8", page, extra)
 
     @staticmethod
@@ -79,6 +79,22 @@ class App:
             db = open_db(self.home, readonly=True)
             try:
                 page = views.board(db, self.home, self.project, self.port).encode()
+            finally:
+                db.close()
+            return self._response(200, "text/html; charset=utf-8", page)
+        run_match = re.fullmatch(r"/tasks/([^/]+)/runs/([^/]+)", path)
+        if run_match:
+            task_id, run_id = run_match.groups()
+            db = open_db(self.home, readonly=True)
+            try:
+                if db.task(task_id) is None:
+                    return self._error(404, "Page not found.", f"{task_id} isn't on this board")
+                run = views.run_of(db, task_id, run_id)
+                if run is None:
+                    back = (f"Back to {task_id}", f"/tasks/{quote(task_id, safe='')}")
+                    return self._error(404, "Page not found.",
+                                       f"Run {run_id} isn't one of {task_id}'s runs", back=back)
+                page = views.transcript(db, self.home, self.project, self.port, task_id, run).encode()
             finally:
                 db.close()
             return self._response(200, "text/html; charset=utf-8", page)
