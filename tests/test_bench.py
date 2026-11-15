@@ -258,6 +258,15 @@ def test_bench_run_refuses_before_any_work(bench_repo, home, tmp_path, monkeypat
     (missing / "case.yaml").write_text(text)
     refuse((), command, cases=missing.parent)
 
+    exposed = tmp_path / "exposed-cases" / "adder"
+    exposed.parent.mkdir()
+    shutil.copytree(BENCH_CASES / "adder", exposed)
+    data = yaml.safe_load((exposed / "case.yaml").read_text())
+    data["config"]["dependency_sources"] = [str(exposed)]
+    (exposed / "case.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
+    refuse(("--no-sandbox",), "adder: hidden/solution files readable under its dependency_sources",
+           cases=exposed.parent, sandbox=False)
+
     from factory import sandbox as S
     with monkeypatch.context() as m:
         m.setattr(S, "available", lambda: False)

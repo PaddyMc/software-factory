@@ -126,11 +126,13 @@ def _check_requires(case: cases.Case, sandbox_on: bool) -> None:
                 raise BenchError(f"{case.id}: required command {command!r} is missing from its sandbox")
 
 
-def _check_hidden_files(case: cases.Case) -> None:
+def _check_dependency_sources(case: cases.Case) -> None:
     for source in case.cfg.dependency_dirs():
         if any(_inside(directory, source) for directory in (case.hidden_dir, case.solution_dir)):
             raise BenchError(f"{case.id}: hidden/solution files readable under its dependency_sources: {source}")
 
+
+def _check_hidden_files(case: cases.Case) -> None:
     files = sorted((p for directory in (case.hidden_dir, case.solution_dir)
                     for p in directory.rglob("*") if p.is_file()), key=lambda p: str(p))
     quoted = " ".join(shlex.quote(str(path)) for path in files)
@@ -161,6 +163,7 @@ def preflight(root: Path, cfg: C.Config, selected_cases: list[cases.Case],
         raise BenchError("bubblewrap (bwrap) is required; install it or pass --no-sandbox")
     for case in selected_cases:
         _check_requires(case, sandbox_on)
+        _check_dependency_sources(case)
     if sandbox_on:
         for case in selected_cases:
             _check_hidden_files(case)
