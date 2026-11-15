@@ -125,6 +125,62 @@ def test_the_pr_body_leaves_out_the_plan(factory_repo, home, fake_gh, monkeypatc
     assert plan["report"] == plays["PLANNER"][-1].content
 
 
+def test_the_verifier_sees_the_reviewer_reports(factory_repo, home, fake_gh, monkeypatch):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    run = next(r for r in open_db(home).runs("demo-t01") if r["role"] == "verify" and r["step"] == "verify")
+    events = [json.loads(line) for line in open(run["transcript"])]
+    message = next(event["content"] for event in events if event["type"] == "human")
+    assert message.index("# Gates") < message.index("# Reviewer reports")
+    assert "## review\n\n## Findings\n1. [minor] ok\n\nVERDICT: APPROVE" in message
+
+
+def test_the_pr_shows_what_changed_and_what_to_check(factory_repo, home, fake_gh, monkeypatch):
+    from factory import pipeline
+
+    plays = scripts(review_verdicts=["APPROVE"])
+    _use_model(monkeypatch, plays)
+    seen = {}
+    real_pr_body = pipeline.Pipeline.pr_body
+
+    def capture_summary(self, state):
+        seen["summary"] = state.get("summary")
+        return real_pr_body(self, state)
+
+    monkeypatch.setattr(pipeline.Pipeline, "pr_body", capture_summary)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    assert "## What changed\n\n- src/greet.txt says hello" in body
+    assert "## What to check\n\n- the greeting is the one the contract asks for" in body
+    assert body.index("## What changed") < body.index("## What to check") < body.index("## Gates")
+    assert "## Verifier report" not in body and "TITLE: Adds the greeting" not in body
+    assert "Reviewer report (review)" in body
+    assert body.endswith("The planner's plan and every agent's full report: `factory show demo-t01`")
+    assert seen["summary"].title == "Adds the greeting"
+    verify = next(r for r in open_db(home).runs("demo-t01") if r["role"] == "verify" and r["step"] == "verify")
+    assert verify["report"] == plays["VERIFIER"][-1].content.strip()
+
+
+def test_an_unparseable_summary_falls_back(factory_repo, home, fake_gh, monkeypatch):
+    plays = scripts(review_verdicts=["APPROVE"])
+    plays["VERIFIER"] = [AIMessage("**Summary**\n- the old report shape\n")]
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    verify = next(r for r in db.runs("demo-t01") if r["role"] == "verify" and r["step"] == "verify")
+    assert verify["outcome"] == "report (fallback)"
+    assert verify["report"] == "**Summary**\n- the old report shape"
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    assert "## What changed\n\n- Add the greeting module" in body
+    assert "- 3 files changed:" in body and "src/greet.txt" in body
+    assert "## What to check\n\n- review: 1. [minor] ok" in body
+    assert "the old report shape" not in body
+    assert "summary unparseable; using the fallback" in (home / "logs/demo-t01.log").read_text()
+
+
 def test_rerun_after_closed_pr_opens_a_new_one(factory_repo, home, fake_gh, monkeypatch):
     # A previous run left a branch on origin and a PR that was since closed.
     git(factory_repo, "push", "-q", "origin", "main:refs/heads/factory/demo-t01")

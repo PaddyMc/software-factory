@@ -157,6 +157,7 @@ class State(TypedDict, total=False):
     gates_pr: str           # gate details cut for the PR; `gates` stays whole for the verifier
     reviews: dict[str, str]  # review step name -> its report (one PR-body block per review step)
     verify: str
+    summary: prbody.Summary
     outcome: str
     failure_sig: str        # identical gate failures on consecutive attempts => stop (no progress)
     stuck: bool
@@ -444,18 +445,50 @@ class Pipeline:
                     "feedback": f"Verification gates failed: {', '.join(g.name for g in bad)}\n\n{failed}"}
         return {"gates_ok": True, "gates": table, "gates_pr": table_pr}
 
+    def _cleaned_reviews(self, s: State) -> dict[str, str]:
+        """The flow's review reports in step order, using the same last-draft cleaning as the PR body."""
+        reviews = s.get("reviews", {})
+        return {step.name: prbody.clean_report(reviews.get(step.name, ""), "## Acceptance criteria")
+                for step in self.opts.flow.steps if step.kind == "review"}
+
+    def _capped_reviews(self, cleaned: dict[str, str]) -> dict[str, str]:
+        """Non-empty review reports ready for the verifier, with pointers to their full run records."""
+        return {name: prbody.cap(report, prbody.BLOCK_LIMIT, f"factory show {self.task.id} --step {name}")
+                for name, report in cleaned.items() if report}
+
+    def _changed_files(self, s: State) -> list[str]:
+        return git(self.wt, "diff", "--name-only", f"{self.base_sha}..{s['sha']}").splitlines()
+
     def verify(self, s: State) -> State:
         step = self.verify_step
-        out = self.role("verify", "verifying", s["attempt"],
-                        lambda: (o := self.roles.step(step, self.ctx(s, gates=s["gates"])), "report", o.text, s["sha"]),
-                        step=step.name)
-        return {"verify": out.text}
+        reviews = self._capped_reviews(self._cleaned_reviews(s))
+        summary = None
+
+        def run():
+            nonlocal summary
+            out = self.roles.step(step, self.ctx(s, gates=s["gates"], reviews=reviews))
+            parsed = prbody.parse_summary(out.text)
+            if parsed is not None:
+                summary = prbody.bound_summary(parsed, self.task.id, step.name)
+                return out, "report", out.text, s["sha"]
+            summary = prbody.fallback_summary(self.task, self._changed_files(s), reviews)
+            self._event("stage", f"{step.name} #{s['attempt']}: summary unparseable; using the fallback")
+            return out, "report (fallback)", out.text, s["sha"]
+
+        out = self.role("verify", "verifying", s["attempt"], run, step=step.name)
+        return {"verify": out.text, "summary": summary}
 
     def pr(self, s: State) -> State:
+        added = {}
+        if s.get("summary") is None:
+            reviews = self._capped_reviews(self._cleaned_reviews(s))
+            added["summary"] = prbody.fallback_summary(self.task, self._changed_files(s), reviews)
+            s = {**s, **added}
+            self._event("stage", "pr: no verify step; using the fallback summary")
         if not self.opts.open_pr:
             self.db.update(self.task.id, status="verifying", progress=None, note="gates passed; --no-pr")
             self._event("stage", "gates passed; --no-pr, stopping before push")
-            return {"outcome": "verified"}
+            return {"outcome": "verified", **added}
         body = self.pr_body(s)
 
         def run():
@@ -497,7 +530,7 @@ class Pipeline:
             update["reviews_addressed"] = r.through
         self.db.update(self.task.id, **update)
         self._event("stage", f"pr_open: {self.pr_url}")
-        return {"outcome": "pr_open"}
+        return {"outcome": "pr_open", **added}
 
     def answer(self, s: State) -> State:
         """The builder's first attempt left the PR's head unchanged: nothing to push or re-review. The
@@ -523,12 +556,15 @@ class Pipeline:
     def pr_body(self, s: State) -> str:
         t = self.task
         flow = self.opts.flow
-        reviews = s.get("reviews", {})
         review_steps = [step for step in flow.steps if step.kind == "review"]
-        cleaned = {step.name: prbody.clean_report(reviews.get(step.name, ""), "## Acceptance criteria")
-                   for step in review_steps}
+        cleaned = self._cleaned_reviews(s)
         pointers = {step.name: f"factory show {t.id} --step {step.name}" for step in review_steps}
         tail = f"The planner's plan and every agent's full report: `factory show {t.id}`"
+        summary = s.get("summary")
+        if summary is None:                  # also make direct pr_body callers safe on a verify-less flow
+            summary = prbody.fallback_summary(t, self._changed_files(s), self._capped_reviews(cleaned))
+        changed = "\n".join(f"- {bullet}" for bullet in summary.changed)
+        check = "\n".join(f"- {bullet}" for bullet in summary.check) or "Nothing flagged."
 
         def review_block(step: flows.Step, limit: int) -> str:
             return (f"<details><summary>Reviewer report ({step.name})</summary>\n\n"
@@ -549,9 +585,8 @@ class Pipeline:
                    else "none left") + f". Previous candidate `{r.old_candidate[:12]}`."]
                   if (r := self.opts.resolution) else []),
                 *([KINDS[r.kind].body_line(r)] if (r := self.opts.rework) else []),
-                *(["## Verifier report\n\n" + prbody.cap(
-                    prbody.clean_report(s.get("verify", "")), prbody.BLOCK_LIMIT,
-                    f"factory show {t.id} --step {self.verify_step.name}")] if self.verify_step else []),
+                "## What changed\n\n" + changed,
+                "## What to check\n\n" + check,
                 "## Gates\n\n" + s.get("gates_pr", ""),
                 *blocks.values(),
                 *([tail] if with_tail else []),

@@ -9,6 +9,7 @@ import yaml
 
 from factory import config as C
 from factory import contracts
+from factory import prbody
 from factory.agents import ROLE_FILES, load_role, missing_keys, parse_verdict, prompt_source, role_models
 from factory.cli import main
 from factory.scaffold import BEGIN, END, SKILLS
@@ -227,6 +228,18 @@ def test_a_repository_can_override_a_prompt_and_set_models(repo):
 def test_bad_role_settings_are_rejected(data, error):
     with pytest.raises(C.ConfigError, match=error):
         C.parse(data)
+
+
+def test_verifier_prompt_asks_for_the_fixed_shape(repo):
+    meta, body = load_role(repo, "verify")
+    assert meta == {"model": "openrouter:deepseek/deepseek-v4-flash-0731", "max_steps": 30}
+    assert body.startswith("You are the VERIFIER")
+    for text in ("TITLE: ", "## What changed", "## What to check", "1 to 5 bullets", "0 to 6 bullets"):
+        assert text in body
+    examples = re.findall(r"```markdown\n(.*?)\n```", body, re.S)
+    assert len(examples) == 1
+    summary = prbody.parse_summary(examples[0])
+    assert summary is not None and summary.title and summary.changed and summary.check
 
 
 def test_reviewer_prompt_matches_verdict_parser(repo):

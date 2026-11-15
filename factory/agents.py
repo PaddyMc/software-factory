@@ -43,6 +43,7 @@ class Ctx:
     plan: str = ""
     feedback: str = ""
     gates: str = ""
+    reviews: dict[str, str] = field(default_factory=dict)  # verify only: cleaned, capped reports by step name
     resolution: str = ""                    # resolve only: the conflict brief (see pipeline.replay_worktree)
     review_brief: str = ""                  # review only: the review-rework brief, whose requests are in scope
     earlier: tuple[str, ...] = ()           # build steps after the first: the earlier build steps' final messages
@@ -305,7 +306,11 @@ class LangChainRoles:
         if step.kind == "verify":
             tools = (read_tools(ctx.worktree, guard) + diff_tool(ctx.worktree, ctx.base_sha)
                      + run_tool(ctx.sandbox, ToolLog(), self.cfg.denied_commands))
-            return tools, f"All gates passed for task {ctx.task.id}. Write the PR report.\n\n# Gates\n\n{ctx.gates}", None
+            msg = f"All gates passed for task {ctx.task.id}. Write the PR report.\n\n# Gates\n\n{ctx.gates}"
+            if ctx.reviews:
+                msg += "\n\n# Reviewer reports\n\n" + "\n\n".join(
+                    f"## {name}\n\n{report}" for name, report in ctx.reviews.items())
+            return tools, msg, None
         raise ValueError(f"step {step.name}: kind {step.kind!r} has no agent (gates run outside the agents)")
 
     @staticmethod
