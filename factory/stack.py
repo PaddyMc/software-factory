@@ -16,12 +16,18 @@ before the PR is updated. A PR whose CI failed (`ci_failed`) is restacked the sa
 back to `pr_open` for CI to judge, since the failure may have come from the dependency. A PR whose
 reviewer requested changes (`changes_requested`) is moved the same way and keeps its status — the
 request still applies to the moved commits.
+
+A stacked PR merged on GitHub before refresh retargeted it lands in its dependency's branch, not the
+trunk. `landing` says whether that branch's own PR carries it on: merged later, it took the changes with
+it; still open, it will; merged (or closed) first, nothing will, and the task is not merged.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 from .db import DB
@@ -44,6 +50,42 @@ def edit_pr(root: Path, pr_url: str, **fields: str) -> bool:
 def retarget(root: Path, pr_url: str, base: str) -> bool:
     """Point a PR at another base branch."""
     return edit_pr(root, pr_url, base=base)
+
+
+def landing(prs: list[dict], pr: dict, _hops: int = 0) -> str:
+    """Where a merged PR's changes are, from GitHub's PRs (headRefName, baseRefName, state, mergedAt):
+    "trunk" when it merged into a branch that isn't a factory branch, or into one whose own PR merged after it
+    and reached the trunk; "waiting" while such a branch's PR is still open; "lost" when that PR merged or
+    closed first, so nothing carries the changes to the trunk."""
+    base = pr["baseRefName"]
+    if not base.startswith("factory/"):
+        return "trunk"
+    merged_at = pr.get("mergedAt") or ""
+    found = set()
+    for carrier in prs if _hops < 20 else ():
+        if carrier["headRefName"] != base:
+            continue
+        if carrier["state"] == "OPEN":
+            found.add("waiting")
+        elif carrier["state"] == "MERGED" and merged_at and (carrier.get("mergedAt") or "") > merged_at:
+            found.add(landing(prs, carrier, _hops + 1))
+    return "trunk" if "trunk" in found else "waiting" if "waiting" in found else "lost"
+
+
+def on_trunk(root: Path, old_base: str, candidate: str, ref: str) -> bool:
+    """Whether a task's change (old_base..candidate) is already in `ref`, however it got there: it applies
+    to `ref` in reverse. Checked in a scratch index; nothing in the checkout changes."""
+    diff = subprocess.run(["git", "diff", "--binary", "--full-index", old_base, candidate], cwd=root,
+                          capture_output=True)
+    if diff.returncode != 0:
+        return False
+    with tempfile.TemporaryDirectory() as scratch:
+        env = os.environ | {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
+        if subprocess.run(["git", "read-tree", ref], cwd=root, env=env, capture_output=True).returncode != 0:
+            return False
+        return not diff.stdout.strip() or subprocess.run(
+            ["git", "apply", "--cached", "--check", "-R"], cwd=root, env=env, input=diff.stdout,
+            capture_output=True).returncode == 0
 
 
 def comment(root: Path, pr_url: str, body: str) -> bool:

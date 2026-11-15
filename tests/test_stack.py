@@ -117,3 +117,42 @@ def test_replay_without_conflicts_and_with_nothing_left(tmp_path, repo, fake_gh)
     with pytest.raises(PipelineError, match="demo-t02's change is already on main"):
         replay_worktree(repo, tmp_path, "demo-t02", dep, dep, main, "main")
     assert not (tmp_path / "worktrees/demo-t02").exists()
+
+
+def _merged_pr(task, base, state="MERGED", at=None):
+    return {"headRefName": f"factory/{task}", "url": f"https://github.test/pr/{task}", "baseRefName": base,
+            "state": state, "mergedAt": at}
+
+
+def test_landing_follows_a_merged_pr_through_the_branches_that_carried_it():
+    t01 = _merged_pr("demo-t01", "main", at="2026-11-14T22:39:05Z")
+    late = _merged_pr("demo-t02", "factory/demo-t01", at="2026-11-14T22:59:25Z")
+    assert stack.landing([t01, late], late) == "lost"           # demo-t01 had merged: nothing carries it on
+    early = _merged_pr("demo-t02", "factory/demo-t01", at="2026-11-14T22:00:00Z")
+    assert stack.landing([t01, early], early) == "trunk"        # demo-t01's merge took it along
+    t03 = _merged_pr("demo-t03", "factory/demo-t02", at="2026-11-14T21:00:00Z")
+    assert stack.landing([t01, early, t03], t03) == "trunk"     # a stack merged top-down
+    assert stack.landing([_merged_pr("demo-t01", "main", state="OPEN"), early], early) == "waiting"
+    assert stack.landing([_merged_pr("demo-t01", "main", state="CLOSED"), early], early) == "lost"
+    assert stack.landing([t01, _merged_pr("demo-t02", "factory/demo-t01")], late) == "lost"   # no time, no carrier
+    assert stack.landing([], t01) == "trunk" and stack.landing([], _merged_pr("x", "develop")) == "trunk"
+
+
+def test_on_trunk_finds_a_change_however_it_got_there(repo):
+    (repo / "AGENTS.md").write_text("# Demo repo\nmore\n")
+    (repo / "new.bin").write_bytes(b"\x00\x01binary\n")
+    git(repo, "checkout", "-q", "-b", "task")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "task")
+    git(repo, "checkout", "-q", "main")
+    base, task = git(repo, "rev-parse", "main"), git(repo, "rev-parse", "task")
+    assert not stack.on_trunk(repo, base, task, "main")
+    (repo / "other.txt").write_text("other\n")                 # the trunk moves on
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "other")
+    assert not stack.on_trunk(repo, base, task, "main")
+    git(repo, "cherry-pick", task)                              # landed by hand, as another commit
+    assert git(repo, "rev-parse", "main") != task and stack.on_trunk(repo, base, task, "main")
+    assert stack.on_trunk(repo, task, task, "main")             # an empty change is trivially there
+    assert not stack.on_trunk(repo, base, "no-such-commit", "main")
+    assert git(repo, "status", "--porcelain") == ""             # the checkout and its index are untouched

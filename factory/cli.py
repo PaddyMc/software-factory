@@ -378,17 +378,23 @@ def _pr_state(url: str) -> dict:
     return pr
 
 
-def _factory_prs(root: Path) -> dict[str, dict]:
-    """Every factory PR on GitHub by task id: {"url", "state", "baseRefName"}, an open one ahead of a merged one.
-    Closed PRs are left out (a board reset leaves old ones behind). {} when gh fails."""
-    p = subprocess.run(["gh", "pr", "list", "--state", "all", "--limit", "1000", "--json", "headRefName,url,state,baseRefName"],
-                       cwd=root, capture_output=True, text=True)
+def _factory_pr_list(root: Path) -> list[dict] | None:
+    """Every factory PR on GitHub, closed ones too: {"headRefName", "url", "state", "baseRefName", "mergedAt"}.
+    None when gh fails."""
+    p = subprocess.run(["gh", "pr", "list", "--state", "all", "--limit", "1000", "--json",
+                        "headRefName,url,state,baseRefName,mergedAt"], cwd=root, capture_output=True, text=True)
     try:
-        prs = json.loads(p.stdout) if p.returncode == 0 else []
+        prs = json.loads(p.stdout) if p.returncode == 0 else None
     except json.JSONDecodeError:
-        return {}
+        return None
+    return None if prs is None else [pr for pr in prs if pr["headRefName"].startswith("factory/")]
+
+
+def _factory_prs(prs: list[dict] | None) -> dict[str, dict]:
+    """The factory PRs by task id, an open one ahead of a merged one. Closed PRs are left out (a board reset
+    leaves old ones behind)."""
     found: dict[str, dict] = {}
-    for pr in prs:
+    for pr in prs or []:
         task_id = pr["headRefName"].removeprefix("factory/")
         if task_id != pr["headRefName"] and pr["state"] in ("OPEN", "MERGED") and \
                 found.get(task_id, {}).get("state") != "OPEN":
@@ -402,16 +408,25 @@ def _adopt(db, root: Path, remote: str = "origin") -> None:
     working from the same GitHub repo sees the same board. Holds (abandoned) and running tasks are left alone."""
     from . import reviews
     from .pipeline import PipelineError, branch_name, git
+    from .stack import landing
     waiting = [r for r in db.tasks() if r["status"] in ("queued", "failed") and not r["pr_url"]]
-    prs = _factory_prs(root) if waiting else {}
+    listed = _factory_pr_list(root) if waiting else None
+    prs = _factory_prs(listed)
     for row in waiting:
         pr = prs.get(row["id"])
         if pr is None:
             continue
         branch = branch_name(row["id"])
         if pr["state"] == "MERGED":
-            db.update(row["id"], status="merged", branch=branch, pr_url=pr["url"], note=None, progress=None)
-            print(f"{row['id']}: merged in {pr['url']} (taken up from GitHub)", file=sys.stderr)
+            # Another board's merge is history this board can't judge: a PR merged into a factory branch
+            # may still have reached the trunk some other way. It is taken up, with a warning.
+            where = landing(listed, pr)
+            then = "has yet to merge" if where == "waiting" else "had merged or closed first"
+            note = None if where == "trunk" else \
+                f"{pr['url']} merged into {pr['baseRefName']}, which {then}: check its changes reached the trunk"
+            db.update(row["id"], status="merged", branch=branch, pr_url=pr["url"], note=note, progress=None)
+            print(f"{row['id']}: merged in {pr['url']} (taken up from GitHub)" + (f"; but {note}" if note else ""),
+                  file=sys.stderr)
             continue
         base = pr["baseRefName"]
         try:            # the task's own changes are those after where its branch left its base
@@ -436,10 +451,52 @@ def _adopt(db, root: Path, remote: str = "origin") -> None:
               + " (taken up from GitHub)", file=sys.stderr)
 
 
+def _merged(db, row, prs: list[dict] | None) -> None:
+    """The task's PR merged. The task is merged once the PR's changes reached the trunk: a stacked PR merged
+    before refresh retargeted it lands in its dependency's branch, and only that branch's own PR, merged
+    later, carries it on. Merged after that PR, its changes are stranded: the task becomes `conflict`, and
+    running it replays them onto the trunk in a new PR. Changes on the trunk by other means count."""
+    from .pipeline import PipelineError, git
+    from .stack import landing, on_trunk
+    tid, url = row["id"], row["pr_url"]
+    pr = next((p for p in prs or [] if p["url"] == url), None)
+    if pr is None:          # gh can't list the PRs now: a PR on the trunk is merged, a stacked one waits
+        if not (row["base_ref"] or "").startswith("factory/"):
+            db.update(tid, status="merged")
+        return
+    where = landing(prs, pr)
+    if where == "trunk":
+        db.update(tid, status="merged")
+        return
+    root, base, trunk = repo_root(), pr["baseRefName"], row["trunk"] or "main"
+    try:
+        git(root, "fetch", "-q", "origin", trunk)
+    except PipelineError:
+        pass                # judge against the trunk as last fetched; the next refresh looks again
+    if row["base_sha"] and row["candidate_sha"] and \
+            on_trunk(root, row["base_sha"], row["candidate_sha"], f"origin/{trunk}"):
+        db.update(tid, status="merged", note=f"{url} merged into {base}, not {trunk}, but its changes are on {trunk}")
+        print(f"{tid}: merged ({url} merged into {base}, and its changes are on {trunk})", file=sys.stderr)
+        return
+    if where == "waiting":
+        note = f"{url} merged into {base}: it reaches {trunk} when the PR of {base} merges"
+        if row["note"] != note:
+            db.update(tid, note=note)
+            print(f"{tid}: {note}", file=sys.stderr)
+        return
+    note = (f"{url} merged into {base} after the PR of {base} had merged or closed, so its changes never "
+            f"reached {trunk}: `factory run {tid}` replays them onto {trunk} in a new PR")
+    if row["status"] != "conflict" or row["note"] != note:
+        db.update(tid, status="conflict", base_ref=trunk, note=note)
+        print(f"{tid}: not merged: {note}", file=sys.stderr)
+
+
 def _refresh(db) -> None:
     from . import ci
     from . import reviews
     _adopt(db, repo_root())
+    prs: list[dict] | None = None
+    listed = False
     for row in db.tasks():
         if row["status"] in ACTIVE and row["pid"] and not pid_alive(row["pid"]):
             db.update(row["id"], status="failed", progress=None,
@@ -449,7 +506,9 @@ def _refresh(db) -> None:
             is_open = row["status"] in ("pr_open", "ci_failed", "changes_requested")
             status_now = row["status"]
             if pr.get("state") == "MERGED":
-                db.update(row["id"], status="merged")
+                if not listed:      # once per refresh, and only when something merged
+                    prs, listed = _factory_pr_list(repo_root()), True
+                _merged(db, row, prs)
             elif pr.get("state") == "CLOSED":
                 db.update(row["id"], status="abandoned", note="PR closed without merge")
             # A stacked PR is checked against its dependency by restack below, not by GitHub.
