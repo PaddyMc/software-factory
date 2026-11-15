@@ -48,7 +48,7 @@ class App:
         return status, headers + (extra or []), body
 
     def _error(self, status: int, title: str, message: str,
-               extra: list[tuple[str, str]] | None = None, back=("/", "Back to the board")):
+               extra: list[tuple[str, str]] | None = None, back=("Back to the board", "/")):
         page = views.error_page(self.project, self.home, self.port, title, message, back).encode()
         return self._response(status, "text/html; charset=utf-8", page, extra)
 
@@ -89,14 +89,11 @@ class App:
             try:
                 if db.task(task_id) is None:
                     return self._error(404, "Page not found.", f"{task_id} isn't on this board")
-                try:
-                    number = int(run_id)
-                except ValueError:
-                    number = None
-                run = next((row for row in db.runs(task_id) if row["id"] == number), None)
+                run = views.run_of(db, task_id, run_id)
                 if run is None:
-                    back = (f"/tasks/{quote(task_id, safe='')}", "Back to the task")
-                    return self._error(404, "Page not found.", f"Run {run_id} isn't a run of {task_id}", back=back)
+                    back = (f"Back to {task_id}", f"/tasks/{quote(task_id, safe='')}")
+                    return self._error(404, "Page not found.",
+                                       f"Run {run_id} isn't one of {task_id}'s runs", back=back)
                 page = views.transcript(db, self.home, self.project, self.port, task_id, run).encode()
             finally:
                 db.close()

@@ -525,6 +525,15 @@ def _role_word(run) -> str:
     return ROLE_WORDS.get(run["role"]) or run["step"] or run["role"]
 
 
+def run_of(db: DB, task_id: str, run_text: str):
+    """Find a run only within its task; a run id from another task is not a match."""
+    try:
+        run_id = int(run_text)
+    except (TypeError, ValueError):
+        return None
+    return next((run for run in db.runs(task_id) if run["id"] == run_id), None)
+
+
 def _tokens(count: int) -> str:
     return f"{count:,}" if count < 1000 else f"{count / 1000:,.0f}k"
 
@@ -532,11 +541,13 @@ def _tokens(count: int) -> str:
 def _events(path: Path) -> list[dict]:
     events = []
     for line in path.read_text(errors="replace").splitlines():
+        if not line.strip():
+            continue
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(event, dict):
+        if isinstance(event, dict) and event.get("type"):
             events.append(event)
     return events
 
@@ -555,42 +566,53 @@ def _step_groups(events: list[dict]) -> list[tuple[dict, list[dict]]]:
     return groups
 
 
-def _result(content: str, step: int, index: int) -> str:
+def _result(content: str, step: int, index: int | None) -> str:
+    content = str(content)
     refused = " refused" if content.startswith("refused") else ""
     result = f'<pre class="result{refused}">{esc(content)}</pre>'
-    if len(content) <= 2000:
+    if index is None or len(content) <= 2000:
         return result
-    return (f'<details class="fold" id="t-{step}-{index}"><summary>Result, {len(content):,} characters</summary>'
+    fold_id = esc(f"t-{step}-{index}")
+    return (f'<details class="fold" id="{fold_id}"><summary>Result, {len(content):,} characters</summary>'
             f'{result}</details>')
 
 
 def _step(ai: dict, results: list[dict], row: dict) -> str:
-    model = "-" if row["model_s"] is None else f"{row['model_s']:.1f}s"
-    timing = f"{model} thinking"
+    timing = ""
+    if row["model_s"] is not None:
+        timing = f"{row['model_s']:.1f}s thinking"
     if row["tools_s"] >= 1.0:
-        timing += f", {observe.human_secs(row['tools_s'])} in tools"
-    facts = [timing, f"{_tokens(row['ctx_in'])} in, {_tokens(row['out'])} out"]
+        tools = f"{observe.human_secs(row['tools_s'])} in tools"
+        timing = f"{timing}, {tools}" if timing else tools
+    facts = []
+    if timing:
+        facts.append(timing)
+    facts.append(f"{_tokens(row['ctx_in'])} in, {_tokens(row['out'])} out")
     if row["cost"] is not None:
         facts.append(f"${row['cost']:.3f}")
     facts_html = "<br>".join(esc(fact) for fact in facts)
 
     says = f'<p class="says">{esc(ai["text"])}</p>' if ai.get("text") else ""
     calls = []
-    for index, call in enumerate(ai.get("tool_calls", [])):
-        args = ", ".join(f"{key}={value}" for key, value in call.get("args", {}).items() if key != "content")
+    call_events = ai.get("tool_calls", []) or []
+    for index, call in enumerate(call_events):
+        args = ", ".join(f"{key}={value}" for key, value in (call.get("args", {}) or {}).items()
+                         if key != "content")
         result = ""
         if index < len(results):
-            result = _result(str(results[index].get("content", "")), row["step"], index)
+            result = _result(results[index].get("content", ""), row["step"], index)
         calls.append(f"""<div class="call">
-  <div class="call-name"><b>{esc(call['name'])}</b>({esc(args)})</div>
+  <div class="call-name"><b>{esc(call.get('name', ''))}</b>({esc(args)})</div>
   {result}
 </div>""")
+    surplus = "".join(_result(result.get("content", ""), row["step"], None)
+                      for result in results[len(call_events):])
     return f"""<div class="step">
   <div>
     <div class="step-n">Step {esc(row['step'])}</div>
     <div class="step-facts">{facts_html}</div>
   </div>
-  <div>{says}{''.join(calls)}</div>
+  <div>{says}{''.join(calls)}{surplus}</div>
 </div>"""
 
 
@@ -639,6 +661,7 @@ def transcript(db: DB, home: Path, project: str, port: int | None, task_id: str,
         if mix:
             facts.append(("tools", ", ".join(f"{name} {count}" for name, count in mix.most_common())))
     facts_html = "".join(f"<div><dt>{esc(name)}</dt><dd>{esc(value)}</dd></div>" for name, value in facts)
+    facts_block = f'<dl class="facts">{facts_html}</dl>' if facts_html else ""
 
     content = f"""<div class="page-head">
   <ol class="crumbs">
@@ -649,13 +672,13 @@ def transcript(db: DB, home: Path, project: str, port: int | None, task_id: str,
   </ol>
   <div class="task-id"><span>{esc(label)}</span>{_outcome_span(run)}</div>
   <h1 class="task-goal">{esc(title)}</h1>
-  <dl class="facts">{facts_html}</dl>
+  {facts_block}
 </div>
 """
-    refresh = 2 if run["ended_at"] is None else None
+    refresh = 2 if not run["ended_at"] else None
     if events is None:
         content += (f'<p class="fine">No transcript was recorded for this run. '
-                    f'<a href="{task_href}">Back to the task</a>.</p>\n')
+                    f'<a href="{task_href}">Back to {esc(task_id)}</a>.</p>\n')
         return _page(f"{task_id}, {label}", project, home, port, content, refresh=refresh)
 
     system = next((event for event in events if event.get("type") == "system"), None)
@@ -672,7 +695,7 @@ def transcript(db: DB, home: Path, project: str, port: int | None, task_id: str,
     groups = _step_groups(events)
     steps = "".join(_step(ai, results, row) for (ai, results), row in zip(groups, rows))
     stopped = next((event for event in events if event.get("type") == "stopped"), None)
-    stopped_html = f'<p class="fine">Stopped: {esc(stopped.get("reason", ""))}.</p>' if stopped else ""
+    stopped_html = f'<p class="stopped">Stopped: {esc(stopped.get("reason", ""))}</p>' if stopped else ""
     content += f"""<section class="block" aria-labelledby="h-steps">
   <h2 id="h-steps">Steps <span class="count">{len(rows)}</span></h2>
   {''.join(folds)}
@@ -752,10 +775,10 @@ def task(db: DB, home: Path, project: str, port: int | None, task_id: str) -> st
 
 
 def error_page(project: str, home: Path, port: int | None, title: str, message: str,
-               back=("/", "Back to the board")) -> str:
+               back=("Back to the board", "/")) -> str:
     content = f"""<div class="page-head">
   <h1 class="lede">{esc(title)}</h1>
 </div>
-<p class="fine">{esc(message)} <a href="{esc(back[0])}">{esc(back[1])}</a>.</p>
+<p class="fine">{esc(message)} <a href="{esc(back[1])}">{esc(back[0])}</a>.</p>
 """
     return _page(title, project, home, port, content)

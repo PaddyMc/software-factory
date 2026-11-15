@@ -577,19 +577,22 @@ def test_long_results_are_folded_and_refusals_flagged(home, repo):
     run = db.start_run("fold-t01", "build", 1)
     long = "<script>alert(1)</script>" + "x" * 2000
     long_refused = "refused: " + "y" * 2000
+    boundary = "b" * 2000
     events = [
         _ai(1, 0, calls=[
             ("run", {"command": "long"}), ("run", {"command": "short"}),
             ("run", {"command": "refused"}), ("run", {"command": "long-refused"}),
+            ("run", {"command": "boundary"}),
         ], cost=None),
         _tool(1, "run", long),
         _tool(2, "run", "ok"),
         _tool(3, "run", "refused: denied"),
         _tool(4, "run", long_refused),
-        {"type": "stopped", "at": _at(5), "reason": "step limit", "steps": 1},
+        _tool(5, "run", boundary),
+        {"type": "stopped", "at": _at(6), "reason": "step limit", "steps": 1},
     ]
     _write_transcript(db, home, "fold-t01", run, events)
-    db.finish_run(run, "stopped")
+    db.finish_run(run, "committed (step limit)")
     db.close()
 
     status, _, body = _get(App(home, repo), f"/tasks/fold-t01/runs/{run}")
@@ -603,7 +606,11 @@ def test_long_results_are_folded_and_refusals_flagged(home, repo):
     assert f"<summary>Result, {len(long_refused):,} characters</summary>" in refused_fold
     assert f'<pre class="result refused">{html.escape(long_refused, quote=True)}</pre>' in refused_fold
     assert 'id="t-1-1"' not in body and 'id="t-1-2"' not in body
-    assert "<p class=\"fine\">Stopped: step limit.</p>" in body
+    assert f'<pre class="result">{boundary}</pre>' in body
+    assert "Result, 2,000 characters" not in body
+    assert 'id="t-1-4"' not in body
+    assert '<p class="stopped">Stopped: step limit</p>' in body
+    assert '<span class="outcome o-good">committed (step limit)</span>' in body
     assert "<script>alert(1)</script>" not in body
     assert html.escape("<script>alert(1)</script>", quote=True) in body
 
@@ -636,12 +643,15 @@ def test_a_half_written_transcript_line_is_skipped(home, repo):
     events = [
         _system(0, "prompt"),
         _human(0.5, "task"),
+        "not an event object",
+        {"at": _at(0.6)},
         _ai(1, 2, "Still working", [("run", {"command": "first"}), ("run", {"command": "second"})]),
         _tool(3, "run", result),
     ]
     path = _write_transcript(db, home, "partial-t01", run, events)
+    filler = "half-written filler " * 110
     with path.open("a") as transcript:
-        transcript.write('{"type": "tool", "name": "run", "cont')
+        transcript.write('{"type": "tool", "name": "run", "content": "' + filler)
     db.close()
 
     status, _, body = _get(App(home, repo), f"/tasks/partial-t01/runs/{run}")
@@ -651,6 +661,7 @@ def test_a_half_written_transcript_line_is_skipped(home, repo):
     assert body.count('<div class="call">') == 2
     assert f'<summary>Result, {len(result):,} characters</summary>' in body
     assert result in body
+    assert filler not in body
     assert body.count('id="t-1-') == 1
 
 
@@ -670,28 +681,36 @@ def test_a_run_of_another_task_or_without_a_transcript(home, repo):
     for requested in (str(foreign), "999999", "not-a-number"):
         status, _, body = _get(app, f"/tasks/owner-t01/runs/{requested}")
         assert status == 404
-        message = html.escape(f"Run {requested} isn't a run of owner-t01", quote=True)
+        message = html.escape(f"Run {requested} isn't one of owner-t01's runs", quote=True)
         assert message in body
-        assert '<a href="/tasks/owner-t01">Back to the task</a>' in body
+        assert '<a href="/tasks/owner-t01">Back to owner-t01</a>' in body
 
     for run in (without_path, missing_file):
         status, _, body = _get(app, f"/tasks/owner-t01/runs/{run}")
         assert status == 200
         assert "No transcript was recorded for this run." in body
-        assert '<a href="/tasks/owner-t01">Back to the task</a>' in body
+        assert '<a href="/tasks/owner-t01">Back to owner-t01</a>' in body
+        assert '<dl class="facts">' not in body
         assert "<dt>steps</dt>" not in body
+
+    status, _, body = _get(app, "/tasks/missing-t01/runs/1")
+    assert status == 404
+    assert "missing-t01 isn&#x27;t on this board" in body
+    assert '<a href="/">Back to the board</a>' in body
 
 
 def test_task_page_links_runs_to_their_transcripts(home, repo):
     db = _board(home, [_contract("links-t01")])
     recorded = db.start_run("links-t01", "build", 1)
     gates = db.start_run("links-t01", "verify", 1, step="gates")
+    without_path = db.start_run("links-t01", "review", 1)
     _write_transcript(db, home, "links-t01", recorded, [_system(0, "prompt"), _ai(1, 1, "done")])
     db.conn.execute("UPDATE runs SET transcript=? WHERE id=?",
                     (str(home / "transcripts" / "links-t01" / "gates.jsonl"), gates))
     db.conn.commit()
     db.finish_run(recorded, "committed")
     db.finish_run(gates, "pass")
+    db.finish_run(without_path, "APPROVE")
     db.close()
 
     status, _, body = _get(App(home, repo), "/tasks/links-t01")
@@ -701,8 +720,11 @@ def test_task_page_links_runs_to_their_transcripts(home, repo):
     items = re.findall(r'<li class="run">(.*?)</li>', body, re.S)
     recorded_item = next(item for item in items if f'id="run-{recorded}-report"' in item)
     gates_item = next(item for item in items if f'id="run-{gates}-report"' in item)
+    without_item = next(item for item in items if f'id="run-{without_path}-report"' in item)
     assert f'<a class="run-link" href="{href}">Read the transcript</a>' in recorded_item
+    assert recorded_item.index(f'id="run-{recorded}-report"') < recorded_item.index("Read the transcript")
     assert "Read the transcript" not in gates_item
+    assert "Read the transcript" not in without_item
 
 
 def test_task_page_next_step_follows_the_status(home, repo):
