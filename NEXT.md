@@ -17,7 +17,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 10 | Managing the factory takes many terminal commands. Planned as a web page: [webui](docs/plans/webui.md) | medium | — |
 | ✓ | Factory PR descriptions are long and hard to read. Done: [Pull requests](docs/architecture.md#pull-requests) | — | — |
 | 12 | The models' reasoning is thrown away. Planned: [thoughts](docs/plans/thoughts.md) | small | 10 (its web task) |
-| 13 | You can't tell which factory version is running. Planned: [version](docs/plans/version.md) | small | — |
+| ✓ | You can't tell which factory version is running. Done: [Commands](docs/reference.md#commands) | — | — |
 
 ## 1. Act on human PR review comments
 

@@ -15,6 +15,7 @@ Statuses change while runs proceed, so never answer from memory. From the reposi
 factory status [PLAN]            # board grouped by plan, task counters, what each task waits for
 factory show TASK                # status, branch, base, PR, note (failure reason), every agent report
 factory config                   # this repository's settings: plans, gates, models, board location
+factory version                  # which factory code is running (an editable install runs whatever its checkout holds)
 pgrep -af "factory run" | grep -v pgrep   # runs active right now
 ```
 
