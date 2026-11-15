@@ -184,6 +184,7 @@ Use `factory init --no-skills` to skip the skills, and `factory init --force` to
 |---|---|
 | `factory init [--force] [--no-skills] [--session-log DIR \| --no-session-log]` | Set the repository up: config, skills, session log, starter plan, guidance section |
 | `factory config` | Print the effective project settings, the state directory and the GitHub identity |
+| `factory version` / `factory --version` | Print the installed version. From a git checkout of the factory (an editable install), it also adds that checkout's `git describe` — for `v0.1.0-25-ge5f6b95-dirty`, the last release tag is `v0.1.0`, the code is 25 commits past it at commit `e5f6b95`, and `-dirty` means uncommitted edits to tracked files. A checkout that hasn't fetched its tags shows an older tag or just the commit; run `git fetch --tags` |
 | `factory prompt ROLE\|STEP [--flow F]` | Print a role's or flow step's prompt as the agents get it, with its model and step limit. A step name resolves within `--flow`, defaulting to the config's `flow` |
 | `factory validate-plan [PLAN…]` | Check contracts |
 | `factory sync` | Load every contract from the plans into the db (statuses kept) |
