@@ -111,17 +111,22 @@ def _cost(row) -> str:
     return f"${row['cost_usd']:.2f}" if row["cost_usd"] is not None else "-"
 
 
-def recent_events(home: Path, task_ids: list[str], limit: int) -> list[str]:
-    """Last `limit` log lines across the given tasks, prefixed with the task and ordered by time."""
-    lines: list[tuple[str, int, str]] = []
+def recent_lines(home: Path, task_ids: list[str], limit: int) -> list[tuple[str, str, str]]:
+    """Last `limit` raw log lines across tasks, with their time and task, ordered by time."""
+    lines: list[tuple[str, int, str, str]] = []
     for tid in task_ids:
         path = home / "logs" / f"{tid}.log"
         if not path.is_file():
             continue
         tail = path.read_text(errors="replace").splitlines()[-limit:]
-        lines += [(l[:8], i, f"{tid:<30} {l}") for i, l in enumerate(tail)]
+        lines += [(line[:8], i, tid, line) for i, line in enumerate(tail)]
     lines.sort(key=lambda x: (x[0], x[1]))
-    return [l for _, _, l in lines[-limit:]]
+    return [(time, tid, line) for time, _, tid, line in lines[-limit:]]
+
+
+def recent_events(home: Path, task_ids: list[str], limit: int) -> list[str]:
+    """Last `limit` log lines across the given tasks, prefixed with the task and ordered by time."""
+    return [f"{tid:<30} {line}" for _, tid, line in recent_lines(home, task_ids, limit)]
 
 
 def render_top(db: DB, home: Path, width: int | None = None, events: int = 12, plan: str | None = None) -> str:
