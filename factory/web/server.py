@@ -30,14 +30,15 @@ STATIC_TYPES = {
 }
 QUICK_WAIT = 15.0
 MAX_FORM_BODY = 16 * 1024
-ACTIONS = {"sync", "status", "abandon", "requeue", "clean", "stop"}
+ACTIONS = {"sync", "status", "abandon", "requeue", "clean", "stop", "run"}
 
 
 class App:
     def __init__(self, home: Path, root: Path, launch=None):
         self.home = home
         self.root = root
-        self.project = config.load(root).name
+        self.config = config.load(root)
+        self.project = self.config.name
         self.port: int | None = None
         self.token = secrets.token_urlsafe(32)
         self.launch = launch or jobs.default_launch
@@ -174,6 +175,74 @@ class App:
             return ["stop", target], f"factory stop {target}", "stop", target
         raise ValueError(action)
 
+    def _post_run(self, form: dict[str, list[str]]):
+        target = self._field(form, "target")
+        db = open_db(self.home, readonly=True)
+        try:
+            rows = db.tasks()
+            plan_rows = [row for row in rows if target in (row["plan"], observe.plan_name(row["plan"]))]
+            if plan_rows:
+                kind = "plan"
+                name = observe.plan_name(plan_rows[0]["plan"])
+                back = (f"Back to {name}", f"/#plan-{quote(name, safe='')}")
+            else:
+                row = db.task(target)
+                if row is None:
+                    return self._error(409, "Run refused.",
+                                       f"{target} is neither a task on the board nor a plan")
+                kind = "task"
+                name = target
+                back = self._task_back(target)
+            items, reason = views.what_runs(db, self.config, kind, target)
+            if not items:
+                return self._error(409, "Run refused.", reason, back=back)
+
+            cap = self._field(form, "max_cost").strip()
+            parallel = self._field(form, "parallel", "3").strip() or "3"
+            attempts = self._field(form, "max_attempts", "3").strip() or "3"
+            flow = self._field(form, "flow", self.config.flow).strip() or self.config.flow
+            if kind == "task":
+                parallel = "3"
+            values = {"max_cost": cap, "parallel": parallel, "max_attempts": attempts, "flow": flow}
+            errors = {}
+            if not cap:
+                errors["max_cost"] = "The cost cap is required."
+            else:
+                try:
+                    valid_cap = 0 < float(cap) <= 1000
+                except ValueError:
+                    valid_cap = False
+                if not valid_cap:
+                    errors["max_cost"] = "Enter a number above 0 and at most 1000."
+            if kind == "plan":
+                try:
+                    valid_parallel = 1 <= int(parallel) <= 8
+                except ValueError:
+                    valid_parallel = False
+                if not valid_parallel:
+                    errors["parallel"] = "Enter a whole number from 1 to 8."
+            try:
+                valid_attempts = 1 <= int(attempts) <= 5
+            except ValueError:
+                valid_attempts = False
+            if not valid_attempts:
+                errors["max_attempts"] = "Enter a whole number from 1 to 5."
+            if flow not in self.config.flows:
+                errors["flow"] = "Pick a flow from the list."
+            if errors:
+                page = views.run_page(db, self.config, self.home, self.root, self.port, self.token,
+                                      kind, target, items, values, errors).encode()
+                return self._response(400, "text/html; charset=utf-8", page)
+        finally:
+            db.close()
+
+        flags = views.run_flags(kind, target, cap, parallel, attempts, flow, self.config)
+        command = f"factory run {' '.join([target, *flags])}"
+        argv = [sys.executable, "-m", "factory.cli", "run", target, *flags]
+        notice = f"Started the {name} plan." if kind == "plan" else f"Started {target}."
+        job_id = jobs.start(self.home, self.root, argv, command, "run", target, self.launch, notice=notice)
+        return self._redirect(f"/activity?job={job_id}")
+
     def _post(self, action: str, headers: dict[str, str], body: bytes):
         if not self._origin_allowed(headers):
             return self._error(403, "Forbidden.", "This form came from another origin.")
@@ -190,6 +259,8 @@ class App:
             return self._error(403, "Forbidden.", "This form was not served by this factory web server.")
         if action not in ACTIONS:
             return self._error(404, "Page not found.", "That action isn't served by factory web.")
+        if action == "run":
+            return self._post_run(form)
 
         target = self._field(form, "target")
         db = open_db(self.home, readonly=True)
@@ -249,7 +320,7 @@ class App:
         if path == "/":
             db = open_db(self.home, readonly=True)
             try:
-                page = views.board(db, self.home, self.project, self.port, self.token,
+                page = views.board(db, self.config, self.home, self.port, self.token,
                                    self._notice_job(request_path)).encode()
             finally:
                 db.close()
@@ -271,6 +342,39 @@ class App:
                 db.close()
             page = views.confirm(self.project, self.home, self.port, self.token,
                                  action, target, applies, why, back).encode()
+            return self._response(200, "text/html; charset=utf-8", page)
+        if path == "/run":
+            query = self._query(request_path)
+            plan = self._field(query, "plan")
+            task = self._field(query, "task")
+            kind = "plan" if plan else "task" if task else ""
+            if not kind:
+                return self._error(404, "Page not found.", "That page isn't served by factory web.")
+            target = plan if kind == "plan" else task
+            db = open_db(self.home, readonly=True)
+            try:
+                if kind == "plan":
+                    rows = [row for row in db.tasks()
+                            if target in (row["plan"], observe.plan_name(row["plan"]))]
+                    if not rows:
+                        return self._error(404, "Page not found.", f"{target} isn't a plan on this board")
+                    name = observe.plan_name(rows[0]["plan"])
+                    back = (f"Back to {name}", f"/#plan-{quote(name, safe='')}")
+                    lede = f"Run the {name} plan."
+                else:
+                    row = db.task(target)
+                    if row is None:
+                        return self._error(404, "Page not found.", f"{target} isn't on this board")
+                    back = self._task_back(target)
+                    lede = f"Run {target}."
+                items, reason = views.what_runs(db, self.config, kind, target)
+                if not items:
+                    page = views.error_page(self.project, self.home, self.port, lede, reason, back).encode()
+                else:
+                    page = views.run_page(db, self.config, self.home, self.root, self.port, self.token,
+                                          kind, target, items).encode()
+            finally:
+                db.close()
             return self._response(200, "text/html; charset=utf-8", page)
         run_match = re.fullmatch(r"/tasks/([^/]+)/runs/([^/]+)", path)
         if run_match:

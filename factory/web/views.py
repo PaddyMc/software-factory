@@ -6,13 +6,16 @@ import datetime as dt
 import html
 import importlib.metadata
 import json
+import math
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
-from .. import observe
+from .. import observe, scheduler
+from ..config import Config
 from ..db import ACTIVE, DB, pid_alive, seconds_since
 from ..log import log_path
 from . import jobs
@@ -91,11 +94,18 @@ def confirm_link(action: str, target: str, label: str, title: str, btn: str = "b
             f'{esc(label)}</a>')
 
 
+def _run_again(task_id: str) -> str:
+    href = f"/run?task={quote(task_id, safe='')}"
+    return f'<a class="btn btn-primary" href="{esc(href)}">Run again</a>'
+
+
 def notice(job: jobs.Job | None) -> str:
     if job is None:
         return ""
     outcome = job.outcome
-    if outcome == "done":
+    if job.notice:
+        wording, class_ = job.notice, "notice-ok"
+    elif outcome == "done":
         wording, class_ = f"Done: {job.command}", "notice-ok"
     elif outcome == "running":
         wording, class_ = f"Still running: {job.command}", "notice-ok"
@@ -167,6 +177,8 @@ def _needs_next(db: DB, row, info: Status) -> tuple[str, str]:
 def _needs_row(db: DB, row, info: Status, token: str) -> str:
     next_step, why = _needs_next(db, row, info)
     actions = []
+    if info.kind in ("failed", "conflict", "ci_failed", "changes_requested"):
+        actions.append(_run_again(row["id"]))
     if info.kind == "gone":
         actions.append(action_form("status", token, "/", "Check GitHub", "factory status --refresh"))
     elif info.kind == "failed":
@@ -245,18 +257,30 @@ def _counts(rows, infos) -> tuple[str, str]:
     return text, ", ".join(aria_counts)
 
 
-def _plan(db: DB, name: str, rows, open_: bool) -> str:
+def board_plan(db: DB, cfg: Config, name: str, rows) -> scheduler.Plan:
+    """The scheduler's view of one board plan, including work it must leave to a human."""
+    from .. import gates
+
+    manual = {row["id"]: why for row in rows
+              if (why := gates.manual_reason(db.contract(row["id"]), cfg))}
+    return scheduler.Plan(name=name, tasks=[row["id"] for row in rows], manual=manual)
+
+
+def _plan(db: DB, cfg: Config, name: str, rows, open_: bool) -> str:
     infos = [status(db, row) for row in rows]
     counts, aria = _counts(rows, infos)
     squares = "".join(f'<i class="{info.css}"></i>' for info in infos)
     tasks = "".join(_plan_task_row(db, row, info) for row, info in zip(rows, infos))
     open_attr = " open" if open_ else ""
+    plan = board_plan(db, cfg, name, rows)
+    run = (f'<a class="btn" href="/run?plan={quote(name, safe="")}">Run plan</a>'
+           if any(scheduler.startable(db, plan, row["id"], set()) for row in rows) else "")
     return f"""<details class="plan" id="plan-{esc(name)}"{open_attr}>
   <summary>
     <span class="plan-name">{esc(name)}</span>
     <span class="strip" role="img" aria-label="{esc(aria)}">{squares}</span>
     <span class="plan-counts">{esc(counts)}</span>
-    <span class="plan-end"><span class="num">{esc(_plan_cost(rows))}</span></span>
+    <span class="plan-end"><span class="num">{esc(_plan_cost(rows))}</span>{run}</span>
   </summary>
   <ul class="rows">{tasks}</ul>
 </details>"""
@@ -336,7 +360,214 @@ def _page(title: str, project: str, home: Path, port: int | None, content: str,
 """
 
 
-def board(db: DB, home: Path, project: str, port: int | None, token: str = "",
+@dataclass(frozen=True)
+class RunItem:
+    row: object
+    info: Status
+    what: str
+    now: bool = False
+    later: bool = False
+
+
+def _waiting_run(db: DB, task_id: str) -> str:
+    _, unmet = db.deps(db.contract(task_id))
+    dependencies = [item.rsplit(" (", 1)[0] for item in unmet]
+    verb = "has" if len(dependencies) == 1 else "have"
+    return f"Starts when {', '.join(dependencies)} {verb} a pull request."
+
+
+def _run_item(db: DB, plan: scheduler.Plan, row) -> RunItem:
+    info = status(db, row)
+    task_id = row["id"]
+    if row["status"] in ACTIVE:
+        return RunItem(row, info, "Running already; this run leaves it alone.")
+    if scheduler.startable(db, plan, task_id, set()):
+        what = {
+            "conflict": "Starts now, to resolve the conflict with its base.",
+            "ci_failed": "Starts now, to fix the failing checks on its pull request.",
+            "changes_requested": "Starts now, to address the review.",
+        }.get(row["status"], "Starts now, with a fresh build.")
+        return RunItem(row, info, what, now=True)
+    return RunItem(row, info, _waiting_run(db, task_id), later=True)
+
+
+def what_runs(db: DB, cfg: Config, kind: str, target: str) -> tuple[list[RunItem], str]:
+    """List the work a run may take on, or explain why that run would do nothing."""
+    if kind == "plan":
+        groups = observe.plan_groups(db, db.tasks())
+        match = next(((name, rows) for name, rows in groups
+                      if target == name or any(row["plan"] == target for row in rows)), None)
+        if match is None:
+            return [], f"{target} isn't a plan on this board"
+        name, rows = match
+        plan = board_plan(db, cfg, name, rows)
+        items = [_run_item(db, plan, row) for row in rows
+                 if row["status"] not in ("merged", "abandoned", "pr_open")
+                 and row["id"] not in plan.manual]
+        reason = "" if items else f"Every task of {name} is merged, on hold or has a pull request."
+        return items, reason
+
+    row = db.task(target)
+    if row is None:
+        return [], f"{target} isn't on this board"
+    state = row["status"]
+    if state in ACTIVE:
+        if pid_alive(row["pid"]):
+            return [], f"{target} is {state}; it is already running"
+        return [], f"{target} is {state} but its process is gone; check GitHub first, then run it again"
+    if state == "merged":
+        return [], f"{target} is merged; nothing to run"
+    if state == "pr_open":
+        return [], f"{target} has an open pull request; nothing to run"
+    if state == "abandoned":
+        return [], f"{target} is on hold; take it off hold first, then run it"
+    name = observe.plan_name(row["plan"])
+    plan = board_plan(db, cfg, name, [row])
+    if target in plan.manual:
+        return [], f"{target}: {plan.manual[target]}"
+    if db.deps(db.contract(target))[1]:
+        return [], f"{target} {db.readiness(target)}: each dependency needs a merged or an open PR"
+    item = _run_item(db, plan, row)
+    if not item.now:
+        return [], f"{target} is {state}; nothing to run"
+    return [item], ""
+
+
+def run_flags(kind: str, target: str, cap: str, parallel: str, attempts: str,
+              flow: str, cfg: Config) -> list[str]:
+    """The one flag order used by the server preview, its JavaScript and the job argv."""
+    flags = ["--max-cost", cap]
+    if kind == "plan":
+        flags += ["--parallel", parallel]
+    flags += ["--max-attempts", attempts]
+    if flow != cfg.flow:
+        flags += ["--flow", flow]
+    if kind == "task":
+        flags.append("--quiet")
+    return flags
+
+
+def last_cap(home: Path) -> str:
+    for job in jobs.load(home):
+        if job.kind != "run":
+            continue
+        match = re.search(r"--max-cost (\S+)", job.command)
+        return match.group(1) if match else "5.00"
+    return "5.00"
+
+
+def run_page(db: DB, cfg: Config, home: Path, root: Path, port: int | None, token: str,
+             kind: str, target: str, items: list[RunItem], values: dict[str, str] | None = None,
+             errors: dict[str, str] | None = None) -> str:
+    from ..agents import flow_models, missing_keys
+
+    errors = errors or {}
+    if values is None:
+        values = {"max_cost": last_cap(home), "parallel": "3", "max_attempts": "3", "flow": cfg.flow}
+    first = items[0].row
+    plan_name = observe.plan_name(first["plan"])
+    name = plan_name if kind == "plan" else target
+    lede = f"Run the {name} plan." if kind == "plan" else f"Run {target}."
+    task_crumb = (f'<li><a href="/tasks/{quote(target, safe="")}">{esc(target)}</a></li>'
+                  if kind == "task" else "")
+
+    rows = "".join(f"""<li class="row">
+  {status_html(item.info)}
+  <a class="id" href="/tasks/{quote(item.row['id'], safe='')}">{esc(item.row['id'])}</a>
+  <div class="what"><div class="next">{esc(item.what)}</div></div>
+  <div class="end"></div>
+</li>""" for item in items)
+    now = sum(item.now for item in items)
+    later = sum(item.later for item in items)
+    count = f' <span class="count">{now} now, {later} later</span>' if kind == "plan" else ""
+
+    def error(field: str) -> str:
+        return f'<span class="error">{esc(errors[field])}</span>' if field in errors else ""
+
+    parallel = ""
+    if kind == "plan":
+        parallel = f"""<div class="field">
+  <label for="parallel">Tasks at once</label>
+  <input id="parallel" name="parallel" inputmode="numeric" value="{esc(values['parallel'])}">{error('parallel')}
+  <span class="hint">Independent tasks run side by side.</span>
+</div>"""
+    options = "".join(f'<option{" selected" if name == values["flow"] else ""}>{esc(name)}</option>'
+                      for name in sorted(cfg.flows))
+    quiet = '<input type="checkbox" name="quiet" checked hidden>' if kind == "task" else ""
+    flags = run_flags(kind, target, values["max_cost"], values["parallel"], values["max_attempts"],
+                      values["flow"], cfg)
+    command = f"factory run {' '.join([target, *flags])}"
+    try:
+        cap = float(values["max_cost"])
+        if not math.isfinite(cap) or cap <= 0:
+            cap = 0.0
+    except (TypeError, ValueError):
+        cap = 0.0
+    total_tasks = now + later
+    cost = (f"Agents call your model provider, which costs money: at most ${cap:.2f} for each of "
+            f"{total_tasks} tasks, ${cap * total_tasks:.2f} in all. The run keeps going if you close this page. "
+            "Stop it from the board.")
+    flow = cfg.flows.get(values["flow"], cfg.flows[cfg.flow])
+    missing = missing_keys(flow_models(root, flow, cfg), os.environ)
+    keys = ""
+    if missing:
+        key_list = ", ".join(missing)
+        pronoun = "it" if len(missing) == 1 else "them"
+        keys = (f'<p class="fine">Set {esc(key_list)} first: the {esc(values["flow"])} flow\'s models '
+                f'need {pronoun}.</p>')
+    disabled = " disabled" if missing else ""
+    cancel = "/" if kind == "plan" else f"/tasks/{quote(target, safe='')}"
+
+    content = f"""<div class="page-head">
+  <ol class="crumbs">
+    <li><a href="/">Board</a></li>
+    <li><a href="/#plan-{quote(plan_name, safe='')}">{esc(plan_name)}</a></li>
+    {task_crumb}
+    <li>Run</li>
+  </ol>
+  <h1 class="lede">{esc(lede)}</h1>
+</div>
+<form method="post" action="/actions/run">
+  <input type="hidden" name="token" value="{esc(token)}">
+  <input type="hidden" name="target" value="{esc(target)}">{quiet}
+  <section class="block" aria-labelledby="h-what">
+    <h2 id="h-what">What will run{count}</h2>
+    <ul class="rows">{rows}</ul>
+  </section>
+  <section class="block" aria-labelledby="h-limits">
+    <h2 id="h-limits">Limits</h2>
+    <div class="fields">
+      <div class="field">
+        <label for="max-cost">Cost cap per task, in USD</label>
+        <input id="max-cost" name="max_cost" inputmode="decimal" value="{esc(values['max_cost'])}" required>{error('max_cost')}
+        <span class="hint">A task stops once it has spent this much.</span>
+      </div>
+      {parallel}
+      <div class="field">
+        <label for="attempts">Builds per task</label>
+        <input id="attempts" name="max_attempts" inputmode="numeric" value="{esc(values['max_attempts'])}">{error('max_attempts')}
+        <span class="hint">How often review or the gates may send it back.</span>
+      </div>
+      <div class="field">
+        <label for="flow">Agent flow</label>
+        <select id="flow" name="flow">{options}</select>{error('flow')}
+        <span class="hint">From .factory/config.yaml.</span>
+      </div>
+    </div>
+  </section>
+  <section class="block" aria-labelledby="h-cmd">
+    <h2 id="h-cmd">This runs</h2>
+    <div class="cmd" data-preview><code>{esc(command)}</code><button class="copy" type="button" hidden>Copy</button></div>
+    <p class="fine">{esc(cost)}</p>
+    {keys}<button class="btn btn-primary"{disabled}>Start run</button>
+    <a class="btn btn-quiet" href="{esc(cancel)}">Cancel</a>
+  </section>
+</form>
+"""
+    return _page(f"Run {name}", cfg.name, home, port, content)
+
+
+def board(db: DB, cfg: Config, home: Path, port: int | None, token: str = "",
           job: jobs.Job | None = None) -> str:
     rows = db.tasks()
     infos = {row["id"]: status(db, row) for row in rows}
@@ -389,10 +620,10 @@ def board(db: DB, home: Path, project: str, port: int | None, token: str = "",
             finished.append((name, rs))
         else:
             remaining.append((name, rs))
-    plans = "".join(_plan(db, name, rs, True) for name, rs in live)
-    plans += "".join(_plan(db, name, rs, False) for name, rs in remaining)
+    plans = "".join(_plan(db, cfg, name, rs, True) for name, rs in live)
+    plans += "".join(_plan(db, cfg, name, rs, False) for name, rs in remaining)
     if finished:
-        finished_plans = "".join(_plan(db, name, rs, False) for name, rs in finished)
+        finished_plans = "".join(_plan(db, cfg, name, rs, False) for name, rs in finished)
         label = "1 finished plan" if len(finished) == 1 else f"{len(finished)} finished plans"
         plans += f'<details class="finished" id="finished"><summary>{esc(label)}</summary>{finished_plans}</details>'
     content += f"""<section class="block" aria-labelledby="h-plans">
@@ -402,7 +633,7 @@ def board(db: DB, home: Path, project: str, port: int | None, token: str = "",
 """
     top_end = (action_form("sync", token, "/", "Load plans", "factory sync")
                + action_form("status", token, "/", "Check GitHub", "factory status --refresh"))
-    return _page("Board", project, home, port, content, refresh=2, current="board", top_end=top_end)
+    return _page("Board", cfg.name, home, port, content, refresh=2, current="board", top_end=top_end)
 
 
 def _next_step(db: DB, row, info: Status, contract, actions: str = "") -> str:
@@ -793,6 +1024,8 @@ def task(db: DB, home: Path, project: str, port: int | None, task_id: str, token
     task_href = f"/tasks/{quote(task_id, safe='')}"
     running = row["status"] in ACTIVE and pid_alive(row["pid"])
     actions = []
+    if row["status"] in ("failed", "conflict", "ci_failed", "changes_requested"):
+        actions.append(_run_again(task_id))
     if row["status"] in ("queued", "failed") and not running:
         command = f'factory abandon {task_id} --note "put on hold from factory web"'
         actions.append(action_form("abandon", token, task_href, "Put on hold", command, task_id))

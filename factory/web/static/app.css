@@ -220,6 +220,7 @@ form.inline { display: inline; }
 .field { display: grid; gap: 0.4rem; align-content: start; }
 .field label { font-size: 0.875rem; color: var(--text-bright); }
 .field .hint { font-size: 0.8125rem; color: var(--text-secondary); }
+.field .error { font-size: 0.8125rem; color: var(--bad); }
 .field input, .field select { font: 400 0.875rem var(--font-mono); color: var(--text-bright); background: var(--bg-elevated);
   border: 1px solid var(--border-accent); padding: 0.55rem 0.7rem; width: 100%; border-radius: 0; }
 .field input:focus, .field select:focus { border-color: var(--text-bright); outline: none; }
