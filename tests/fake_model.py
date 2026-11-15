@@ -27,7 +27,9 @@ def scripts(review_verdicts: list[str], greeting: str = "hello") -> dict[str, li
             AIMessage("Wrote the greeting and e2e test.\nRESULT: DONE"),
         ],
         "REVIEWER": [call("git_diff", stat=True), "VERDICT"],
-        "VERIFIER": [call("read_file", path="src/greet.txt"), AIMessage("**Summary**\n- adds greeting\n")],
+        "VERIFIER": [call("read_file", path="src/greet.txt"), AIMessage(
+            "TITLE: Adds the greeting\n\n## What changed\n- src/greet.txt says hello\n\n"
+            "## What to check\n- the greeting is the one the contract asks for\n")],
         "_verdicts": list(review_verdicts),
         "_calls": [],
     }
