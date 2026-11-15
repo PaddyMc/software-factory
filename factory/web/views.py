@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import html
 import importlib.metadata
+import json
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -478,13 +479,18 @@ def _run_facts(run) -> str:
     return f'<div class="run-facts">{", ".join(facts)}</div>' if facts else ""
 
 
-def _run_html(run, newest: bool) -> str:
+def _outcome_span(run) -> str:
     ended_at = run["ended_at"]
     outcome = run["outcome"] or ("running" if not ended_at else "finished")
     first = outcome.split(maxsplit=1)[0] if outcome else ""
     outcome_class = ("o-live" if not ended_at else "o-good" if first in GOOD_OUTCOMES else
                      "o-bad" if first in BAD_OUTCOMES else "")
     class_ = f" {outcome_class}" if outcome_class else ""
+    return f'<span class="outcome{class_}">{esc(outcome)}</span>'
+
+
+def _run_html(run, newest: bool, task_id: str) -> str:
+    ended_at = run["ended_at"]
     started = dt.datetime.fromisoformat(run["started_at"])
     ended = dt.datetime.fromisoformat(ended_at) if ended_at else None
     duration = (ended - started).total_seconds() if ended else seconds_since(run["started_at"])
@@ -492,20 +498,189 @@ def _run_html(run, newest: bool) -> str:
     live = " is-live" if not ended_at else ""
     open_attr = " open" if newest else ""
     report = f'<pre class="report">{esc(run["report"])}</pre>' if run["report"] else ""
+    transcript_link = ""
+    if run["transcript"] and Path(run["transcript"]).is_file():
+        href = f"/tasks/{quote(task_id, safe='')}/runs/{run['id']}"
+        transcript_link = f'\n  <a class="run-link" href="{href}">Read the transcript</a>'
     return f"""<li class="run{live}">
-  <div class="run-head"><span class="run-name">{esc(_run_name(run))}</span><span class="outcome{class_}">{esc(outcome)}</span><span class="quiet"><time datetime="{esc(run['started_at'])}" title="{esc(run['started_at'])}">{esc(relative)}</time> ago, took {esc(observe.human_secs(duration))}</span></div>
+  <div class="run-head"><span class="run-name">{esc(_run_name(run))}</span>{_outcome_span(run)}<span class="quiet"><time datetime="{esc(run['started_at'])}" title="{esc(run['started_at'])}">{esc(relative)}</time> ago, took {esc(observe.human_secs(duration))}</span></div>
   {_run_facts(run)}
-  <details id="run-{run['id']}-report"{open_attr}><summary>Report</summary>{report}</details>
+  <details id="run-{run['id']}-report"{open_attr}><summary>Report</summary>{report}</details>{transcript_link}
 </li>"""
 
 
-def _runs_block(runs) -> str:
-    items = "".join(_run_html(run, index == 0) for index, run in enumerate(runs))
+def _runs_block(runs, task_id: str) -> str:
+    items = "".join(_run_html(run, index == 0, task_id) for index, run in enumerate(runs))
     return f"""<section class="block" aria-labelledby="h-runs">
   <h2 id="h-runs">Runs <span class="count">{esc(len(runs))}</span> <span class="aside">Newest first</span></h2>
   <p class="runs-head">Each line is one agent, or one pass of the gates.</p>
   <ol class="runs">{items}</ol>
 </section>"""
+
+
+ROLE_WORDS = {"plan": "planner", "build": "builder", "review": "reviewer", "verify": "verifier"}
+
+
+def _role_word(run) -> str:
+    return ROLE_WORDS.get(run["role"]) or run["step"] or run["role"]
+
+
+def _tokens(count: int) -> str:
+    return f"{count:,}" if count < 1000 else f"{count / 1000:,.0f}k"
+
+
+def _events(path: Path) -> list[dict]:
+    events = []
+    for line in path.read_text(errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _step_groups(events: list[dict]) -> list[tuple[dict, list[dict]]]:
+    groups = []
+    for index, event in enumerate(events):
+        if event.get("type") != "ai":
+            continue
+        results = []
+        for following in events[index + 1:]:
+            if following.get("type") != "tool":
+                break
+            results.append(following)
+        groups.append((event, results))
+    return groups
+
+
+def _result(content: str, step: int, index: int) -> str:
+    refused = " refused" if content.startswith("refused") else ""
+    result = f'<pre class="result{refused}">{esc(content)}</pre>'
+    if len(content) <= 2000:
+        return result
+    return (f'<details class="fold" id="t-{step}-{index}"><summary>Result, {len(content):,} characters</summary>'
+            f'{result}</details>')
+
+
+def _step(ai: dict, results: list[dict], row: dict) -> str:
+    model = "-" if row["model_s"] is None else f"{row['model_s']:.1f}s"
+    timing = f"{model} thinking"
+    if row["tools_s"] >= 1.0:
+        timing += f", {observe.human_secs(row['tools_s'])} in tools"
+    facts = [timing, f"{_tokens(row['ctx_in'])} in, {_tokens(row['out'])} out"]
+    if row["cost"] is not None:
+        facts.append(f"${row['cost']:.3f}")
+    facts_html = "<br>".join(esc(fact) for fact in facts)
+
+    says = f'<p class="says">{esc(ai["text"])}</p>' if ai.get("text") else ""
+    calls = []
+    for index, call in enumerate(ai.get("tool_calls", [])):
+        args = ", ".join(f"{key}={value}" for key, value in call.get("args", {}).items() if key != "content")
+        result = ""
+        if index < len(results):
+            result = _result(str(results[index].get("content", "")), row["step"], index)
+        calls.append(f"""<div class="call">
+  <div class="call-name"><b>{esc(call['name'])}</b>({esc(args)})</div>
+  {result}
+</div>""")
+    return f"""<div class="step">
+  <div>
+    <div class="step-n">Step {esc(row['step'])}</div>
+    <div class="step-facts">{facts_html}</div>
+  </div>
+  <div>{says}{''.join(calls)}</div>
+</div>"""
+
+
+def transcript(db: DB, home: Path, project: str, port: int | None, task_id: str, run) -> str:
+    label = _run_name(run)
+    title = f"What the {_role_word(run)} did, step by step."
+    task_row = db.task(task_id)
+    plan_name = observe.plan_name(task_row["plan"])
+    task_href = f"/tasks/{quote(task_id, safe='')}"
+
+    events = None
+    if run["transcript"]:
+        path = Path(run["transcript"])
+        if path.is_file():
+            try:
+                events = _events(path)
+            except FileNotFoundError:
+                pass
+
+    rows = observe.trace_rows(events) if events is not None else []
+    facts = []
+    if events is not None:
+        system = next((event for event in events if event.get("type") == "system"), {})
+        model = system.get("model") or run["model"]
+        if model:
+            facts.append(("model", str(model)))
+        facts.append(("steps", str(len(rows))))
+        if rows:
+            tokens_in = sum(row["ctx_in"] for row in rows)
+            tokens_out = sum(row["out"] for row in rows)
+            facts.append(("tokens", f"{_tokens(tokens_in)} in, {_tokens(tokens_out)} out"))
+        costs = [row["cost"] for row in rows if row["cost"] is not None]
+        if costs:
+            facts.append(("cost", f"${sum(costs):.2f}"))
+        if rows:
+            model_s = sum(row["model_s"] or 0 for row in rows)
+            tools_s = sum(row["tools_s"] for row in rows)
+            facts.append(("time", f"{observe.human_secs(model_s)} thinking, "
+                                  f"{observe.human_secs(tools_s)} in tools"))
+        mix = Counter()
+        for row in rows:
+            for call in row["calls"]:
+                name = call.split("(")[0]
+                if name:
+                    mix[name] += 1
+        if mix:
+            facts.append(("tools", ", ".join(f"{name} {count}" for name, count in mix.most_common())))
+    facts_html = "".join(f"<div><dt>{esc(name)}</dt><dd>{esc(value)}</dd></div>" for name, value in facts)
+
+    content = f"""<div class="page-head">
+  <ol class="crumbs">
+    <li><a href="/">Board</a></li>
+    <li><a href="/#plan-{esc(plan_name)}">{esc(plan_name)}</a></li>
+    <li><a href="{task_href}">{esc(task_id)}</a></li>
+    <li>{esc(label)}</li>
+  </ol>
+  <div class="task-id"><span>{esc(label)}</span>{_outcome_span(run)}</div>
+  <h1 class="task-goal">{esc(title)}</h1>
+  <dl class="facts">{facts_html}</dl>
+</div>
+"""
+    refresh = 2 if run["ended_at"] is None else None
+    if events is None:
+        content += (f'<p class="fine">No transcript was recorded for this run. '
+                    f'<a href="{task_href}">Back to the task</a>.</p>\n')
+        return _page(f"{task_id}, {label}", project, home, port, content, refresh=refresh)
+
+    system = next((event for event in events if event.get("type") == "system"), None)
+    human = next((event for event in events if event.get("type") == "human"), None)
+    folds = []
+    if system is not None:
+        prompt = str(system.get("content", ""))
+        folds.append(f'<details class="fold" id="t-system"><summary>What the agent was told '
+                     f'({len(prompt):,} characters)</summary><pre class="result">{esc(prompt)}</pre></details>')
+    if human is not None:
+        message = str(human.get("content", ""))
+        folds.append(f'<details class="fold" id="t-task"><summary>The task it was given '
+                     f'({len(message):,} characters)</summary><pre class="result">{esc(message)}</pre></details>')
+    groups = _step_groups(events)
+    steps = "".join(_step(ai, results, row) for (ai, results), row in zip(groups, rows))
+    stopped = next((event for event in events if event.get("type") == "stopped"), None)
+    stopped_html = f'<p class="fine">Stopped: {esc(stopped.get("reason", ""))}.</p>' if stopped else ""
+    content += f"""<section class="block" aria-labelledby="h-steps">
+  <h2 id="h-steps">Steps <span class="count">{len(rows)}</span></h2>
+  {''.join(folds)}
+  {steps}
+  {stopped_html}
+</section>
+"""
+    return _page(f"{task_id}, {label}", project, home, port, content, refresh=refresh)
 
 
 def _log_block(home: Path, task_id: str) -> str:
@@ -569,17 +744,18 @@ def task(db: DB, home: Path, project: str, port: int | None, task_id: str) -> st
 {_next_step(db, row, info, contract)}
 <div class="cols">
   {_contract_block(db, contract, needed_by)}
-  {_runs_block(runs)}
+  {_runs_block(runs, task_id)}
 </div>
 {_log_block(home, task_id)}
 """
     return _page(contract.goal, project, home, port, content, refresh=2)
 
 
-def error_page(project: str, home: Path, port: int | None, title: str, message: str) -> str:
+def error_page(project: str, home: Path, port: int | None, title: str, message: str,
+               back=("/", "Back to the board")) -> str:
     content = f"""<div class="page-head">
   <h1 class="lede">{esc(title)}</h1>
 </div>
-<p class="fine">{esc(message)} <a href="/">Back to the board</a>.</p>
+<p class="fine">{esc(message)} <a href="{esc(back[0])}">{esc(back[1])}</a>.</p>
 """
     return _page(title, project, home, port, content)

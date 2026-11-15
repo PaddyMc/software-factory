@@ -14,6 +14,7 @@ import sys
 import threading
 import urllib.request
 import webbrowser
+from collections import Counter
 from urllib.parse import quote
 from html.parser import HTMLParser
 
@@ -54,6 +55,40 @@ def _board(home, contracts=(), plan=PLAN):
     if contracts:
         _add(db, contracts, plan)
     return db
+
+
+def _at(seconds):
+    base = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    return (base + dt.timedelta(seconds=seconds)).isoformat(timespec="milliseconds")
+
+
+def _system(at, content, model="test/model"):
+    return {"type": "system", "at": _at(at), "model": model, "max_steps": 20, "content": content}
+
+
+def _human(at, content):
+    return {"type": "human", "at": _at(at), "content": content}
+
+
+def _ai(step, at, text="", calls=(), tokens=(100, 10), cost=0.001):
+    return {
+        "type": "ai", "at": _at(at), "step": step, "text": text,
+        "usage": {"in": tokens[0], "out": tokens[1], "cache_read": 0}, "cost_usd": cost,
+        "tool_calls": [{"name": name, "args": args} for name, args in calls],
+    }
+
+
+def _tool(at, name, content):
+    return {"type": "tool", "at": _at(at), "name": name, "content": content}
+
+
+def _write_transcript(db, home, task_id, run_id, events):
+    path = home / "transcripts" / task_id / f"{run_id:05d}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(event) + "\n" for event in events))
+    db.conn.execute("UPDATE runs SET transcript=? WHERE id=?", (str(path), run_id))
+    db.conn.commit()
+    return path
 
 
 def _dead_pid():
@@ -438,6 +473,236 @@ def test_task_page_lists_runs_newest_first_with_labels_outcomes_and_reports(home
     assert (f'<time datetime="{started[gates]}" title="{started[gates]}">6 minutes</time> ago, '
             "took 1m02s") in section
     assert "Read the transcript" not in body
+
+
+def test_transcript_page_shows_each_step_with_its_calls_and_results(home, repo):
+    db = _board(home, [_contract("trace-t01")])
+    run = db.start_run("trace-t01", "build", 3, "run/model")
+    prompt = "Follow the <rules> & build."
+    message = "Implement <trace-t01> & test it."
+    model = "openrouter:moonshotai/kimi-k3.1-pro"
+    events = [
+        _system(0, prompt, model),
+        _human(1, message),
+        _ai(1, 4.1, "I'll read the view first.", [
+            ("read_file", {"path": "factory/web/views.py", "content": "SHOULD_NOT_APPEAR"}),
+        ], (18000, 210), 0.004),
+        _tool(6.1, "read_file", "file contents"),
+        _ai(2, 10.0, "Now I'll test and inspect.", [
+            ("run", {"command": "uv run pytest -q"}),
+            ("read_file", {"path": "tests/test_web.py", "start": 1}),
+        ], (24000, 412), 0.006),
+        _tool(12.0, "run", "exit 0\n1 passed"),
+        _tool(50.0, "read_file", "test source"),
+        _ai(3, 53.2, "All done.", tokens=(25000, 388), cost=0.020),
+    ]
+    _write_transcript(db, home, "trace-t01", run, events)
+    db.finish_run(run, "committed")
+    db.close()
+
+    status, _, body = _get(App(home, repo), f"/tasks/trace-t01/runs/{run}")
+    assert status == 200
+    assert "<title>trace-t01, build 3 · demo</title>" in body
+    assert '<li><a href="/">Board</a></li>' in body
+    assert '<li><a href="/#plan-demo">demo</a></li>' in body
+    assert '<li><a href="/tasks/trace-t01">trace-t01</a></li>' in body
+    assert "<li>build 3</li>" in body
+    assert '<div class="task-id"><span>build 3</span><span class="outcome o-good">committed</span></div>' in body
+    assert '<h1 class="task-goal">What the builder did, step by step.</h1>' in body
+
+    rows = observe.trace_rows(events)
+
+    def tokens(count):
+        return f"{count:,}" if count < 1000 else f"{count / 1000:,.0f}k"
+
+    costs = [row["cost"] for row in rows if row["cost"] is not None]
+    mix = Counter()
+    for row in rows:
+        for call in row["calls"]:
+            name = call.split("(")[0]
+            if name:
+                mix[name] += 1
+    expected_facts = [
+        ("model", model),
+        ("steps", str(len(rows))),
+        ("tokens", f"{tokens(sum(row['ctx_in'] for row in rows))} in, "
+                   f"{tokens(sum(row['out'] for row in rows))} out"),
+        ("cost", f"${sum(costs):.2f}"),
+        ("time", f"{observe.human_secs(sum(row['model_s'] or 0 for row in rows))} thinking, "
+                 f"{observe.human_secs(sum(row['tools_s'] for row in rows))} in tools"),
+        ("tools", ", ".join(f"{name} {count}" for name, count in mix.most_common())),
+    ]
+    facts = re.search(r'<dl class="facts">(.*?)</dl>', body, re.S).group(1)
+    assert re.findall(r"<dt>([^<]+)</dt>", facts) == [name for name, _ in expected_facts]
+    for name, value in expected_facts:
+        assert f"<div><dt>{name}</dt><dd>{html.escape(value, quote=True)}</dd></div>" in facts
+    assert expected_facts[-1] == ("tools", "read_file 2, run 1")
+    assert "final answer" not in body
+
+    assert (f'<details class="fold" id="t-system"><summary>What the agent was told '
+            f'({len(prompt):,} characters)</summary><pre class="result">'
+            f'{html.escape(prompt, quote=True)}</pre></details>') in body
+    assert (f'<details class="fold" id="t-task"><summary>The task it was given '
+            f'({len(message):,} characters)</summary><pre class="result">'
+            f'{html.escape(message, quote=True)}</pre></details>') in body
+    assert re.findall(r'<div class="step-n">Step (\d+)</div>', body) == ["1", "2", "3"]
+    for row in rows:
+        model_time = "-" if row["model_s"] is None else f"{row['model_s']:.1f}s"
+        timing = f"{model_time} thinking"
+        if row["tools_s"] >= 1.0:
+            timing += f", {observe.human_secs(row['tools_s'])} in tools"
+        step_facts = [timing, f"{tokens(row['ctx_in'])} in, {tokens(row['out'])} out"]
+        if row["cost"] is not None:
+            step_facts.append(f"${row['cost']:.3f}")
+        assert f'<div class="step-facts">{"<br>".join(step_facts)}</div>' in body
+    for text in ("I'll read the view first.", "Now I'll test and inspect.", "All done."):
+        assert f'<p class="says">{html.escape(text, quote=True)}</p>' in body
+
+    ordered = [
+        "<b>read_file</b>(path=factory/web/views.py)",
+        '<pre class="result">file contents</pre>',
+        "<b>run</b>(command=uv run pytest -q)",
+        '<pre class="result">exit 0\n1 passed</pre>',
+        "<b>read_file</b>(path=tests/test_web.py, start=1)",
+        '<pre class="result">test source</pre>',
+    ]
+    positions = [body.index(fragment) for fragment in ordered]
+    assert positions == sorted(positions)
+    assert "SHOULD_NOT_APPEAR" not in body
+    assert '<div class="thinks">' not in body and 'class="thinks-' not in body
+
+
+def test_long_results_are_folded_and_refusals_flagged(home, repo):
+    db = _board(home, [_contract("fold-t01")])
+    run = db.start_run("fold-t01", "build", 1)
+    long = "<script>alert(1)</script>" + "x" * 2000
+    long_refused = "refused: " + "y" * 2000
+    events = [
+        _ai(1, 0, calls=[
+            ("run", {"command": "long"}), ("run", {"command": "short"}),
+            ("run", {"command": "refused"}), ("run", {"command": "long-refused"}),
+        ], cost=None),
+        _tool(1, "run", long),
+        _tool(2, "run", "ok"),
+        _tool(3, "run", "refused: denied"),
+        _tool(4, "run", long_refused),
+        {"type": "stopped", "at": _at(5), "reason": "step limit", "steps": 1},
+    ]
+    _write_transcript(db, home, "fold-t01", run, events)
+    db.finish_run(run, "stopped")
+    db.close()
+
+    status, _, body = _get(App(home, repo), f"/tasks/fold-t01/runs/{run}")
+    assert status == 200
+    fold = re.search(r'<details class="fold" id="t-1-0">(.*?)</details>', body, re.S).group(1)
+    assert f"<summary>Result, {len(long):,} characters</summary>" in fold
+    assert f'<pre class="result">{html.escape(long, quote=True)}</pre>' in fold
+    assert '<pre class="result">ok</pre>' in body
+    assert '<pre class="result refused">refused: denied</pre>' in body
+    refused_fold = re.search(r'<details class="fold" id="t-1-3">(.*?)</details>', body, re.S).group(1)
+    assert f"<summary>Result, {len(long_refused):,} characters</summary>" in refused_fold
+    assert f'<pre class="result refused">{html.escape(long_refused, quote=True)}</pre>' in refused_fold
+    assert 'id="t-1-1"' not in body and 'id="t-1-2"' not in body
+    assert "<p class=\"fine\">Stopped: step limit.</p>" in body
+    assert "<script>alert(1)</script>" not in body
+    assert html.escape("<script>alert(1)</script>", quote=True) in body
+
+
+def test_transcript_page_refreshes_only_while_its_run_is_running(home, repo):
+    db = _board(home, [_contract("live-t01")])
+    run = db.start_run("live-t01", "build", 2)
+    events = [_system(0, "prompt"), _ai(1, 2, "working")]
+    _write_transcript(db, home, "live-t01", run, events)
+    app = App(home, repo)
+
+    status, _, body = _get(app, f"/tasks/live-t01/runs/{run}")
+    assert status == 200
+    assert '<main class="wrap" data-refresh="2">' in body
+    assert '<span class="outcome o-live">running</span>' in body
+
+    db.finish_run(run, "committed")
+    db.close()
+    status, _, body = _get(app, f"/tasks/live-t01/runs/{run}")
+    assert status == 200
+    assert '<main class="wrap">' in body
+    assert "data-refresh" not in body
+    assert '<span class="outcome o-good">committed</span>' in body
+
+
+def test_a_half_written_transcript_line_is_skipped(home, repo):
+    db = _board(home, [_contract("partial-t01")])
+    run = db.start_run("partial-t01", "build", 1)
+    result = "z" * 2001
+    events = [
+        _system(0, "prompt"),
+        _human(0.5, "task"),
+        _ai(1, 2, "Still working", [("run", {"command": "first"}), ("run", {"command": "second"})]),
+        _tool(3, "run", result),
+    ]
+    path = _write_transcript(db, home, "partial-t01", run, events)
+    with path.open("a") as transcript:
+        transcript.write('{"type": "tool", "name": "run", "cont')
+    db.close()
+
+    status, _, body = _get(App(home, repo), f"/tasks/partial-t01/runs/{run}")
+    assert status == 200
+    assert '<p class="says">Still working</p>' in body
+    assert "<b>run</b>(command=first)" in body and "<b>run</b>(command=second)" in body
+    assert body.count('<div class="call">') == 2
+    assert f'<summary>Result, {len(result):,} characters</summary>' in body
+    assert result in body
+    assert body.count('id="t-1-') == 1
+
+
+def test_a_run_of_another_task_or_without_a_transcript(home, repo):
+    db = _board(home, [_contract("owner-t01"), _contract("owner-t02")])
+    without_path = db.start_run("owner-t01", "build", 1)
+    missing_file = db.start_run("owner-t01", "build", 2)
+    foreign = db.start_run("owner-t02", "build", 1)
+    db.conn.execute("UPDATE runs SET transcript=? WHERE id=?",
+                    (str(home / "transcripts" / "owner-t01" / "missing.jsonl"), missing_file))
+    db.conn.commit()
+    for run in (without_path, missing_file, foreign):
+        db.finish_run(run, "committed")
+    db.close()
+    app = App(home, repo)
+
+    for requested in (str(foreign), "999999", "not-a-number"):
+        status, _, body = _get(app, f"/tasks/owner-t01/runs/{requested}")
+        assert status == 404
+        message = html.escape(f"Run {requested} isn't a run of owner-t01", quote=True)
+        assert message in body
+        assert '<a href="/tasks/owner-t01">Back to the task</a>' in body
+
+    for run in (without_path, missing_file):
+        status, _, body = _get(app, f"/tasks/owner-t01/runs/{run}")
+        assert status == 200
+        assert "No transcript was recorded for this run." in body
+        assert '<a href="/tasks/owner-t01">Back to the task</a>' in body
+        assert "<dt>steps</dt>" not in body
+
+
+def test_task_page_links_runs_to_their_transcripts(home, repo):
+    db = _board(home, [_contract("links-t01")])
+    recorded = db.start_run("links-t01", "build", 1)
+    gates = db.start_run("links-t01", "verify", 1, step="gates")
+    _write_transcript(db, home, "links-t01", recorded, [_system(0, "prompt"), _ai(1, 1, "done")])
+    db.conn.execute("UPDATE runs SET transcript=? WHERE id=?",
+                    (str(home / "transcripts" / "links-t01" / "gates.jsonl"), gates))
+    db.conn.commit()
+    db.finish_run(recorded, "committed")
+    db.finish_run(gates, "pass")
+    db.close()
+
+    status, _, body = _get(App(home, repo), "/tasks/links-t01")
+    assert status == 200
+    href = f"/tasks/links-t01/runs/{recorded}"
+    assert re.findall(r'<a class="run-link" href="([^"]+)">Read the transcript</a>', body) == [href]
+    items = re.findall(r'<li class="run">(.*?)</li>', body, re.S)
+    recorded_item = next(item for item in items if f'id="run-{recorded}-report"' in item)
+    gates_item = next(item for item in items if f'id="run-{gates}-report"' in item)
+    assert f'<a class="run-link" href="{href}">Read the transcript</a>' in recorded_item
+    assert "Read the transcript" not in gates_item
 
 
 def test_task_page_next_step_follows_the_status(home, repo):
