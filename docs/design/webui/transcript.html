@@ -35,9 +35,9 @@
     <dl class="facts">
       <div><dt>model</dt><dd>openrouter:moonshotai/kimi-k3.1-pro</dd></div>
       <div><dt>steps</dt><dd>31</dd></div>
-      <div><dt>tokens</dt><dd>1,204k in, 14k out</dd></div>
+      <div><dt>tokens</dt><dd>1,204k in, 14k out (9,812 thinking)</dd></div>
       <div><dt>cost</dt><dd>$0.11</dd></div>
-      <div><dt>time</dt><dd>2m 40s thinking, 58s in tools</dd></div>
+      <div><dt>time</dt><dd>2m 40s in the model, 58s in tools</dd></div>
       <div><dt>tools</dt><dd>run 9, read_file 12, edit_file 7</dd></div>
     </dl>
   </div>
@@ -51,9 +51,13 @@
     <div class="step">
       <div>
         <div class="step-n">Step 1</div>
-        <div class="step-facts">4.1s thinking<br>18k in, 210 out<br>$0.004</div>
+        <div class="step-facts">4.1s in the model<br>18k in, 210 out<br>152 thinking<br>$0.004</div>
       </div>
       <div>
+        <div class="thinks">
+          <div class="thinks-head">Thought, 152 tokens</div>
+          <p>The test that fails compares two runs, and the assertion wants a line saying the build prompt changed. So the header has to compare prompt_sha per step, not per run. report.py builds the header, so start there and check how a run's steps are stored before touching anything.</p>
+        </div>
         <p class="says">The compare header is missing the per-step prompt_sha line. I'll read the report module first.</p>
         <div class="call">
           <div class="call-name"><b>read_file</b>(path=factory/bench/report.py)</div>
@@ -65,9 +69,18 @@
     <div class="step">
       <div>
         <div class="step-n">Step 2</div>
-        <div class="step-facts">6.8s thinking, 41s in tools<br>24k in, 96 out<br>$0.005</div>
+        <div class="step-facts">6.8s in the model, 41s in tools<br>24k in, 412 out<br>318 thinking<br>$0.005</div>
       </div>
       <div>
+        <div class="thinks">
+          <div class="thinks-head">Thought, 318 tokens</div>
+          <p>report.py keeps each run's steps as a list of dicts with name, model and prompt_sha, and compare_header only looks at the first one. That explains the missing line: when only the build prompt changes, the first step is the planner, whose prompt is the same, so nothing differs. I need to walk both runs' steps by name and report every step whose prompt_sha differs.
+
+Before editing, run the bench tests to see the failure as it stands. The second failing test, the interrupted run, raises KeyError: 'outcome', which looks like a different cause: cells that never ran have no outcome key. If the test…</p>
+          <details class="fold" id="t-2-thought"><summary>The rest of the thought, 246 characters</summary><p>run confirms both, fix the header first and handle missing outcomes as not run, rather than defaulting them to failed, because the contract counts cells not run separately.
+
+Committing between the two fixes would make the change easier to review.</p></details>
+        </div>
         <div class="call">
           <div class="call-name"><b>run</b>(command=uv run pytest -q tests/test_bench.py)</div>
           <pre class="result">exit 1
@@ -84,9 +97,13 @@ FAILED tests/test_bench.py::test_compare_flags_changed_cases_models_and_prompts
     <div class="step">
       <div>
         <div class="step-n">Step 3</div>
-        <div class="step-facts">3.2s thinking<br>25k in, 388 out<br>$0.005</div>
+        <div class="step-facts">3.2s in the model<br>25k in, 388 out<br>121 thinking<br>$0.005</div>
       </div>
       <div>
+        <div class="thinks">
+          <div class="thinks-head">Thought, 121 tokens</div>
+          <p class="thinks-none">The model didn't share its reasoning.</p>
+        </div>
         <p class="says">Understood, the factory commits for me. Adding the prompt_sha comparison to the header.</p>
         <div class="call">
           <div class="call-name"><b>edit_file</b>(path=factory/bench/report.py)</div>

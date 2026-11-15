@@ -288,6 +288,13 @@ form.inline { display: inline; }
 .step-n { font: 500 0.875rem var(--font-mono); color: var(--text-bright); }
 .step-facts { font: 400 0.75rem/1.6 var(--font-mono); color: var(--text-secondary); margin-top: 0.25rem; }
 .says { max-width: 72ch; white-space: pre-wrap; }
+/* What the model thought before it answered: quieter than what it said, behind a dashed rule */
+.thinks { max-width: 72ch; margin-bottom: 0.85rem; padding-left: 0.85rem; border-left: 1px dashed var(--border-accent);
+  color: var(--text-secondary); font-size: 0.875rem; line-height: 1.6; }
+.thinks-head { font: 400 0.75rem var(--font-mono); margin-bottom: 0.25rem; }
+.thinks p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.thinks .fold > summary { margin-top: 0.35rem; }
+.thinks .fold p { margin-top: 0.35rem; }
 .call { margin-top: 0.75rem; }
 .call-name { font: 400 0.8125rem var(--font-mono); color: var(--text-bright); }
 .call-name b { font-weight: 500; }
