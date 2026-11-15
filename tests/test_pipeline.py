@@ -17,7 +17,7 @@ from factory.db import open_db
 from langchain_core.messages import AIMessage
 
 from fake_model import E2E, ScriptedModel, call, scripts
-from conftest import DEMO_CONFIG, git
+from conftest import DEMO_CONFIG, git, plan_text
 
 SKIP = "unit_tests,e2e_tests"   # the toy repo has no Cargo workspace
 SANDBOX = [] if shutil.which("bwrap") else ["--no-sandbox"]
@@ -74,6 +74,27 @@ def test_run_ends_in_a_working_pr(factory_repo, home, fake_gh, monkeypatch, caps
     assert main(["status", "--refresh"]) == 0
     assert open_db(home).task("demo-t01")["status"] == "merged"
     assert "demo-t01" in capsys.readouterr().out
+
+
+def test_a_new_pr_is_titled_with_the_verifiers_title(factory_repo, home, fake_gh, monkeypatch):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    title = "demo-t01: Adds the greeting"
+    state = json.loads(fake_gh.read_text())
+    assert state["prs"]["factory/demo-t01"]["title"] == title
+    create = next(c for c in state["calls"] if c[:2] == ["pr", "create"])
+    assert create[create.index("--title") + 1] == title
+
+
+def test_without_a_summary_title_the_pr_is_titled_with_the_goal(factory_repo, home, fake_gh, monkeypatch):
+    plays = scripts(review_verdicts=["APPROVE"])
+    plays["VERIFIER"] = [AIMessage("## What changed\n- src/greet.txt says hello\n\n## What to check\n- nothing")]
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    pr = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]
+    assert pr["title"] == "demo-t01: Add the greeting module"
 
 
 def test_a_huge_review_still_opens_a_pr_that_fits(factory_repo, home, fake_gh, monkeypatch):
@@ -833,6 +854,36 @@ def _inline_comments(fake_gh, branch, *comments):
     fake_gh.write_text(json.dumps(state))
 
 
+def test_commit_subjects_fit_and_the_attempt_is_in_the_body(factory_repo, home, fake_gh, monkeypatch):
+    goal = ("Add the greeting module with a deliberately long goal that keeps going "
+            "until the commit subject must be shortened at a word boundary")
+    (factory_repo / "docs/plans/demo/demo.md").write_text(plan_text().replace("Add the greeting module", goal))
+    git(factory_repo, "add", "-A")
+    git(factory_repo, "commit", "-q", "-m", "long goal")
+    git(factory_repo, "push", "-q", "origin", "main")
+
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    build = open_db(home).task("demo-t01")["candidate_sha"]
+    prefix = "factory(demo-t01): "
+    subject = git(factory_repo, "log", "-1", "--format=%s", build)
+    assert subject == prefix + prbody.shorten(goal, 72 - len(prefix))
+    assert len(subject) <= 72 and subject.endswith("…")
+    assert git(factory_repo, "log", "-1", "--format=%B", build) == f"{subject}\n\nBuild attempt 1."
+
+    _ci_says(fake_gh, "factory/demo-t01", build, FMT, logs={"22": FMT_LOG})
+    assert main(["status", "--refresh"]) == 0
+    plays = scripts(review_verdicts=["APPROVE"])
+    plays["BUILDER"] = [call("write_file", path="src/greet.txt", content="hello, world\n"),
+                        AIMessage("Fixed the greeting CI expects.\nRESULT: DONE")]
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    rework = open_db(home).task("demo-t01")["candidate_sha"]
+    assert git(factory_repo, "log", "-1", "--format=%s", rework) == subject
+    assert git(factory_repo, "log", "-1", "--format=%B", rework) == f"{subject}\n\nFix CI, attempt 1."
+
+
 def test_failing_ci_is_fixed_on_the_pr_branch_then_reviewed_and_gated(factory_repo, home, fake_gh, monkeypatch, capsys):
     _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
     assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
@@ -866,7 +917,7 @@ def test_failing_ci_is_fixed_on_the_pr_branch_then_reviewed_and_gated(factory_re
     assert git(factory_repo, "show", f"{new}:src/greet.txt") == "hello, world"
     assert git(factory_repo, "show", f"{new}:crates/e2e/tests/greet.rs")  # the task's change is all still there
     assert git(factory_repo, "ls-remote", "origin", "refs/heads/factory/demo-t01").split()[0] == new
-    assert "(fix CI, attempt 1)" in git(factory_repo, "log", "-1", "--format=%s", new)
+    assert "Fix CI, attempt 1." in git(factory_repo, "log", "-1", "--format=%B", new)
 
     sent = open([r for r in db.runs("demo-t01") if r["role"] == "build"][-1]["transcript"]).read()
     assert "# Fix failing CI" in sent and "the greeting is `hello, world`" in sent and "# Plan" in sent
@@ -1197,7 +1248,7 @@ def test_requested_changes_are_addressed_on_the_pr_branch_then_reviewed_and_gate
     assert git(factory_repo, "rev-parse", f"{new}^") == old
     assert git(factory_repo, "show", f"{new}:src/greet.txt") == "hello, world"
     assert git(factory_repo, "ls-remote", "origin", "refs/heads/factory/demo-t01").split()[0] == new
-    assert "(address review, attempt 1)" in git(factory_repo, "log", "-1", "--format=%s", new)
+    assert "Address review, attempt 1." in git(factory_repo, "log", "-1", "--format=%B", new)
 
     # The brief and the inline comment reach the builder; the reviewer is told the requests are in scope.
     build_t = [r for r in db.runs("demo-t01") if r["role"] == "build"][-1]["transcript"]

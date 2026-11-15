@@ -72,7 +72,7 @@ class Rework:
 class Kind:
     """The kind-specific wording of one rework (see `KINDS`): looked up from `Rework.kind`."""
     entry_outcome: str
-    commit_suffix: object
+    commit_body: object                 # why this rework was committed, with its attempt number
     no_change: str
     comment: object
     body_line: object
@@ -83,7 +83,7 @@ class Kind:
 KINDS = {
     "ci": Kind(
         entry_outcome="failing",
-        commit_suffix=lambda attempt: f"(fix CI, attempt {attempt})",
+        commit_body=lambda attempt: f"Fix CI, attempt {attempt}.",
         no_change="The previous attempt produced no changes, so CI still fails. Fix the failures.",
         comment=lambda r, new_sha, msg: (
             f"CI failed on {r.old_candidate[:12]} ({', '.join(f'`{c}`' for c in r.what)}): fixed. Candidate "
@@ -101,7 +101,7 @@ KINDS = {
     ),
     "human_review": Kind(
         entry_outcome="changes_requested",
-        commit_suffix=lambda attempt: f"(address review, attempt {attempt})",
+        commit_body=lambda attempt: f"Address review, attempt {attempt}.",
         no_change="The previous attempt produced no changes, so the review's requests are still unanswered. "
                   "Address them, or answer them in your final message.",
         comment=lambda r, new_sha, msg: (
@@ -178,6 +178,19 @@ def git(cwd: Path, *args: str, check: bool = True) -> str:
 
 def branch_name(task_id: str) -> str:
     return f"factory/{task_id}"
+
+
+SUBJECT_LIMIT = 72
+
+
+def commit_message(task_id: str, goal: str, body: str) -> str:
+    """A word-cut goal subject that fits GitHub's subject limit, with the reason in the body."""
+    prefix = f"factory({task_id}): "
+    return prefix + prbody.shorten(goal, SUBJECT_LIMIT - len(prefix)) + "\n\n" + body
+
+
+def pr_title(task_id: str, goal: str, summary: prbody.Summary) -> str:
+    return f"{task_id}: " + (summary.title or prbody.shorten(goal, SUBJECT_LIMIT))
 
 
 def create_worktree(root: Path, home: Path, task_id: str, base_ref: str,
@@ -355,7 +368,7 @@ class Pipeline:
         A clean replay goes straight to the gates; a resolution is reviewed like any build."""
         r = self.opts.resolution
         plan = self.db.last_report(self.task.id, "plan", "done")
-        message = f"factory({self.task.id}): {self.task.goal[:60]} (on {r.onto})"
+        message = commit_message(self.task.id, self.task.goal, f"Rebuilt on {r.onto}.")
         if not r.conflicts:
             self.role("resolve", "building", 0, lambda: self._commit(Replayed(), message))
             sha = git(self.wt, "rev-parse", "HEAD")
@@ -388,8 +401,8 @@ class Pipeline:
         plan = s.get("plan", "")
         if not plan and self.plan_step is None:
             plan = "(This flow has no plan step: plan from the contract.)"
-        message = (f"factory({self.task.id}): {self.task.goal[:60]} "
-                   + (KINDS[r.kind].commit_suffix(attempt) if r else f"(attempt {attempt})"))
+        message = commit_message(self.task.id, self.task.goal,
+                                 KINDS[r.kind].commit_body(attempt) if r else f"Build attempt {attempt}.")
 
         earlier, out = [], None
         for step in self.build_steps:
@@ -503,6 +516,7 @@ class Pipeline:
             self._event("stage", "gates passed; --no-pr, stopping before push")
             return {"outcome": "verified", **added}
         body = self.pr_body(s)
+        title = pr_title(self.task.id, self.task.goal, s["summary"])
 
         def run():
             branch = branch_name(self.task.id)
@@ -519,7 +533,7 @@ class Pipeline:
                 edit_pr(self.wt, url, body=body)
             else:
                 p = subprocess.run(["gh", "pr", "create", "--base", self.opts.base_ref, "--head", branch,
-                                    "--title", f"{self.task.id}: {self.task.goal[:70]}", "--body", body],
+                                    "--title", title, "--body", body],
                                    cwd=self.wt, capture_output=True, text=True)
                 if p.returncode != 0:
                     raise PipelineError(f"gh pr create failed: {p.stderr.strip()}")
