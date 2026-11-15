@@ -1007,6 +1007,23 @@ def cmd_check_output(a) -> int:
     return 0 if outcome == PASS else 1
 
 
+def cmd_bench_run(a) -> int:
+    from .bench.run import BenchError, run_bench
+
+    try:
+        root = repo_root()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("factory bench run must be invoked in a git repository", file=sys.stderr)
+        return 1
+    try:
+        return run_bench(root, cases_dir=a.cases, case_ids=a.case_ids, flow_names=a.flow_names,
+                         models=a.models, repeat=a.repeat, max_cost=a.max_cost,
+                         max_attempts=a.max_attempts, dry_run=a.dry_run, no_sandbox=a.no_sandbox)
+    except BenchError as e:
+        print(e, file=sys.stderr)
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="factory", description="plan -> build -> review -> verify -> PR, per task; "
                                                          "`factory run <plan>` runs a whole plan")
@@ -1050,6 +1067,23 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--notify", action="store_true", help="desktop notification (notify-send) when the run ends")
     s.add_argument("--flow", help="the agent flow to run (a key of `flows`; default: the config's `flow`)")
     s.set_defaults(fn=cmd_run)
+
+    s = sub.add_parser("bench", help="evaluate agent flows and models on fixture cases")
+    bench_sub = s.add_subparsers(dest="bench_cmd", required=True)
+    s = bench_sub.add_parser("run", help="run every selected case under every variant")
+    s.add_argument("--case", dest="case_ids", action="append", metavar="ID",
+                   help="case to run (repeatable; default: every case)")
+    s.add_argument("--cases", metavar="DIR", help="load cases from DIR instead of the shipped suite")
+    s.add_argument("--flow", dest="flow_names", action="append", metavar="NAME",
+                   help="flow to run (repeatable; default: the config's flow)")
+    s.add_argument("--model", dest="models", action="append", metavar="SPEC",
+                   help="override every agent step's model (repeatable)")
+    s.add_argument("--repeat", type=int, default=1, metavar="N", help="repeat each variant and case N times")
+    s.add_argument("--max-cost", type=float, metavar="USD", help="required total budget in USD")
+    s.add_argument("--max-attempts", type=int, default=3, metavar="N", help="max build attempts per cell")
+    s.add_argument("--dry-run", action="store_true", help="print variants, keys and cells without running anything")
+    s.add_argument("--no-sandbox", action="store_true", help="run commands without bubblewrap (unsafe)")
+    s.set_defaults(fn=cmd_bench_run)
 
     s = sub.add_parser("stop", help="stop a running task, or a plan run and every task it started")
     s.add_argument("target", help="a task on the board, or a plan (path, or file name without .md)")
