@@ -793,7 +793,7 @@ def task(db: DB, home: Path, project: str, port: int | None, task_id: str, token
     task_href = f"/tasks/{quote(task_id, safe='')}"
     running = row["status"] in ACTIVE and pid_alive(row["pid"])
     actions = []
-    if row["status"] in ("queued", "failed") and not running and info.kind != "waiting":
+    if row["status"] in ("queued", "failed") and not running:
         command = f'factory abandon {task_id} --note "put on hold from factory web"'
         actions.append(action_form("abandon", token, task_href, "Put on hold", command, task_id))
     if row["status"] == "abandoned":
@@ -867,11 +867,13 @@ def _job_item(job: jobs.Job) -> str:
                 ended = ended.replace(tzinfo=dt.timezone.utc)
         except (TypeError, ValueError):
             ended = None
-    if outcome == "running":
-        timing = f"{time_html}started {esc(relative)}{close_time} ago"
-    elif started is not None and ended is not None:
+    if started is not None and ended is not None:
         duration = observe.human_secs(max(0, (ended - started).total_seconds()))
         timing = f"{time_html}{esc(relative)}{close_time} ago, took {esc(duration)}"
+    elif started is not None:
+        duration = observe.human_secs(elapsed)
+        suffix = f"running for {duration}" if outcome == "running" else f"{duration} since start"
+        timing = f"{time_html}started {esc(relative)}{close_time} ago, {esc(suffix)}"
     else:
         timing = f"{time_html}{esc(relative)}{close_time} ago"
     output = job.output(200)
@@ -924,7 +926,7 @@ def activity(home: Path, project: str, port: int | None, job: jobs.Job | None = 
 
 
 def confirm(project: str, home: Path, port: int | None, token: str, action: str, target: str,
-            applies: bool, why: str = "") -> str:
+            applies: bool, why: str = "", back=("Back to the board", "/")) -> str:
     stopping = action == "stop"
     title = f"Stop {target}?" if stopping else f"Remove {target}'s worktree?"
     command = f"factory {action} {target}"
@@ -933,17 +935,17 @@ def confirm(project: str, home: Path, port: int | None, token: str, action: str,
                        "It waits briefly, then kills a process that does not exit.")
         next_ = "/activity"
         label = "Stop"
-        back = ("Back to the board", "/")
+        return_to = ("Back to the board", "/")
     else:
         explanation = (f"{command} removes this task's worktree. Its board entry, branches and pull request "
                        "are left alone.")
         next_ = f"/tasks/{quote(target, safe='')}"
         label = "Remove worktree"
-        back = (f"Back to {target}", next_)
+        return_to = (f"Back to {target}", next_)
     if applies:
         detail = (f'<p class="fine">{esc(explanation)}</p>'
                   + action_form(action, token, next_, label, command, target, "btn btn-danger")
-                  + f' <a class="btn" href="{esc(back[1])}">{esc(back[0])}</a>')
+                  + f' <a class="btn" href="{esc(return_to[1])}">{esc(return_to[0])}</a>')
     else:
         detail = (f'<p class="fine">{esc(why)}</p>'
                   f'<a class="btn" href="{esc(back[1])}">{esc(back[0])}</a>')

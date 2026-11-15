@@ -9,7 +9,7 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from .. import config, observe
 from ..db import ACTIVE, open_db, pid_alive
@@ -215,8 +215,13 @@ class App:
                 break
             time.sleep(min(0.1, remaining))
         next_ = self._field(form, "next", "/")
-        if (not next_.startswith("/") or next_.startswith("//")
-                or any(ord(character) < 32 for character in next_)):
+        try:
+            destination = urlsplit(next_)
+        except ValueError:
+            destination = None
+        if (destination is None or destination.scheme or destination.netloc or destination.fragment
+                or not destination.path.startswith("/") or next_.startswith("//") or "\\" in next_
+                or "#" in next_ or any(ord(character) < 32 for character in next_)):
             next_ = "/"
         separator = "&" if "?" in next_ else "?"
         return self._redirect(f"{next_}{separator}job={job_id}")
@@ -260,11 +265,11 @@ class App:
                 return self._error(404, "Page not found.", "That confirmation page isn't served by factory web.")
             db = open_db(self.home, readonly=True)
             try:
-                applies, why, _ = self._validate(db, action, target)
+                applies, why, back = self._validate(db, action, target)
             finally:
                 db.close()
             page = views.confirm(self.project, self.home, self.port, self.token,
-                                 action, target, applies, why).encode()
+                                 action, target, applies, why, back).encode()
             return self._response(200, "text/html; charset=utf-8", page)
         run_match = re.fullmatch(r"/tasks/([^/]+)/runs/([^/]+)", path)
         if run_match:

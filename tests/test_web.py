@@ -837,13 +837,12 @@ def test_task_page_next_step_follows_the_status(home, repo):
         panel = re.search(r'<section class="next-step" aria-labelledby="h-next">(.*?)</section>', body, re.S).group(1)
         panels[task_id] = panel
         assert f'<h2 id="h-next">{heading}</h2>' in panel
-    for task_id in ("state-t01", "state-t07"):
+    for task_id in ("state-t01", "state-t07", "state-t08"):
         assert 'action="/actions/abandon"' in panels[task_id] and "Put on hold" in panels[task_id]
     assert 'action="/actions/requeue"' in panels["state-t10"] and "Take off hold" in panels["state-t10"]
     for task_id in ("state-t06", "state-t12"):
         assert f'href="/confirm?action=stop&amp;target={task_id}"' in panels[task_id]
-    for task_id in ("state-t02", "state-t03", "state-t04", "state-t05", "state-t08",
-                    "state-t09", "state-t11"):
+    for task_id in ("state-t02", "state-t03", "state-t04", "state-t05", "state-t09", "state-t11"):
         assert '<div class="acts">' not in panels[task_id] and "<form" not in panels[task_id]
     for task_id, note in notes.items():
         assert f"<pre>{html.escape(note, quote=True)}</pre>" in panels[task_id]
@@ -1109,6 +1108,10 @@ def test_stop_and_remove_worktree_ask_for_confirmation(home, repo):
     status, _, body = _get(app, "/confirm?action=stop&target=confirm-t03")
     assert status == 200 and "confirm-t03 is queued; nothing to stop" in body
     assert "<form" not in body
+    status, _, body = _get(app, "/confirm?action=clean&target=missing")
+    assert status == 200 and "missing isn&#x27;t on this board" in body
+    assert '<a class="btn" href="/">Back to the board</a>' in body
+    assert 'href="/tasks/missing"' not in body and "<form" not in body
     assert _get(app, "/confirm?action=nonsense&target=confirm-t03")[0] == 404
 
 
@@ -1137,13 +1140,16 @@ def test_quick_actions_return_to_their_page_with_a_notice(home, repo):
 
     recording.exit_code = 1
     recording.output = "sync failed\n"
-    for next_ in ("https://evil.example/", "//evil.example/", "tasks/quick-t01"):
+    for next_ in ("https://evil.example/", "//evil.example/", "///evil.example/", "tasks/quick-t01",
+                  "/\\evil.example/", "/tasks/quick-t01#fragment"):
         status, headers, _ = _post(app, "sync", {"next": next_})
         assert status == 303
         assert re.fullmatch(r"/\?job=\d{6}", headers["Location"])
     _, _, failed = _get(app, headers["Location"])
     assert '<div class="notice notice-bad" role="status">' in failed
     assert "Failed: factory sync" in failed and "sync failed" in failed
+    status, headers, _ = _post(app, "sync", {"next": "/?view=all"})
+    assert status == 303 and re.fullmatch(r"/\?view=all&job=\d{6}", headers["Location"])
 
     recording.exit_code = None
     recording.pid = os.getpid()
@@ -1229,7 +1235,9 @@ def test_activity_lists_jobs_newest_first_with_their_output(home, repo):
     failed = re.search(r'<details id="job-000002" open>(.*?)</details>', body, re.S).group(1)
     assert failed.count("line ") == 200
     assert "line 049" not in failed and "line 050" in failed and "line 249" in failed
-    assert "took 9s" in body and re.search(r"started \d+ (?:minutes|minute)</time> ago", body)
+    assert "took 9s" in body
+    assert re.search(r"started \d+ minutes</time> ago, running for \d+m\d\ds", body)
+    assert re.search(r"started \d+ minutes</time> ago, \d+m\d\ds since start", body)
     assert body.count("Stop this run") == 1
     assert 'title="factory stop demo" href="/confirm?action=stop&amp;target=demo"' in body
     assert '<main class="wrap" data-refresh="2">' in body
