@@ -1018,7 +1018,8 @@ def cmd_bench_run(a) -> int:
     try:
         return run_bench(root, cases_dir=a.cases, case_ids=a.case_ids, flow_names=a.flow_names,
                          models=a.models, repeat=a.repeat, max_cost=a.max_cost,
-                         max_attempts=a.max_attempts, dry_run=a.dry_run, no_sandbox=a.no_sandbox)
+                         max_attempts=a.max_attempts, dry_run=a.dry_run, no_sandbox=a.no_sandbox,
+                         parallel=a.parallel)
     except BenchError as e:
         print(e, file=sys.stderr)
         return 1
@@ -1144,6 +1145,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--repeat", type=int, default=1, metavar="N", help="repeat each variant and case N times")
     s.add_argument("--max-cost", type=float, metavar="USD", help="required total budget in USD")
     s.add_argument("--max-attempts", type=int, default=3, metavar="N", help="max build attempts per cell")
+    s.add_argument("--parallel", type=int, default=1, metavar="N",
+                   help="max cells running at once, each a child process (default 1: sequential)")
     s.add_argument("--dry-run", action="store_true", help="print variants, keys and cells without running anything")
     s.add_argument("--no-sandbox", action="store_true", help="run commands without bubblewrap (unsafe)")
     s.set_defaults(fn=cmd_bench_run)
