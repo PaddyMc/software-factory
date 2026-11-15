@@ -20,6 +20,8 @@ To work on the factory itself, install from a checkout so your edits apply strai
 uv tool install --editable /path/to/software-factory
 ```
 
+`factory version` shows what is installed. An editable install also shows the commit it runs, as its checkout's `git describe`.
+
 ## Set up a repository
 
 ```bash

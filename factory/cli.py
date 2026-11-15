@@ -13,7 +13,7 @@ import webbrowser
 from pathlib import Path
 
 from . import config as C
-from . import contracts, factory_home, github, repo_root
+from . import contracts, factory_home, github, repo_root, version
 from . import gates as G
 from . import sandbox as S
 from . import observe
@@ -1007,9 +1007,26 @@ def cmd_check_output(a) -> int:
     return 0 if outcome == PASS else 1
 
 
+def cmd_version(a) -> int:
+    print(version.line())
+    return 0
+
+
+class _VersionAction(argparse.Action):
+    """Compute the version only when --version is used, not while building the parser."""
+
+    def __init__(self, option_strings, dest="==SUPPRESS==", default="==SUPPRESS==", help=None):
+        super().__init__(option_strings=option_strings, dest=dest, nargs=0, default=default, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        print(version.line())
+        parser.exit()
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="factory", description="plan -> build -> review -> verify -> PR, per task; "
                                                          "`factory run <plan>` runs a whole plan")
+    p.add_argument("--version", action=_VersionAction, help="print the factory's version and exit")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("init", help="set this repository up: config, skills, starter plan, session log, guidance")
@@ -1137,6 +1154,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--exit", type=int, required=True)
     s.add_argument("log")
     s.set_defaults(fn=cmd_check_output)
+
+    s = sub.add_parser("version", help="print the factory's version (plus its checkout's git describe when installed editable)")
+    s.set_defaults(fn=cmd_version)
 
     a = p.parse_args(argv)
     return a.fn(a)

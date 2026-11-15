@@ -55,5 +55,7 @@ Install a specific release with:
 uv tool install git+https://github.com/PaddyMc/software-factory@v0.1.0
 ```
 
+`factory version` then prints that release's version (for example, `factory 0.1.0`).
+
 The wheel is also available on the GitHub release page. Releases are distributed
 through GitHub; publishing to PyPI would be a separate change.
