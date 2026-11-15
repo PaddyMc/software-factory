@@ -7,6 +7,7 @@ records, and the pointers in a capped body name the commands that print them.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 BODY_LIMIT = 60_000
@@ -200,3 +201,89 @@ def fallback_summary(task, files, reviews: dict[str, str]) -> Summary:
         changed=_bound_bullets(changed, 5, f"factory show {task.id}"),
         check=_bound_bullets(checks, 8, pointers),
     )
+
+
+@dataclass
+class Check:
+    name: str
+    ok: bool | None
+    commands: int | None = None
+    tests: int | None = None
+
+
+def checks_paragraph(checks: list[Check], reviews: list[tuple[str, str | None]], sha: str, attempts: int) -> str:
+    """One paragraph counting the candidate's gates, commands, tests and review outcomes."""
+    failed = any(check.ok is False for check in checks)
+    passed = sum(check.ok is not False for check in checks)
+    count = f"{passed} of {len(checks)}" if failed else f"All {len(checks)}"
+    sentences = [f"{count} gates passed on {sha[:12]} after {attempts} build "
+                 f"attempt{'' if attempts == 1 else 's'}."]
+    for check in checks:
+        if check.commands is None:
+            continue
+        commands = f"{check.commands} command{'' if check.commands == 1 else 's'}"
+        tests = "" if check.tests is None else (
+            f", {check.tests} test{'' if check.tests == 1 else 's'}")
+        sentences.append(f"{check.name}: {commands}{tests}.")
+    skipped = [check.name for check in checks if check.ok is None]
+    if skipped:
+        sentences.append(f"Skipped: {', '.join(skipped)}.")
+    sentences.extend(f"Reviewed by {name}: {outcome}." for name, outcome in reviews if outcome)
+    return " ".join(sentences)
+
+
+def demote(text: str) -> str:
+    """Move markdown headings down two levels, without touching fenced code."""
+    result = []
+    fenced = False
+    for line in text.splitlines(keepends=True):
+        if line.startswith("```"):
+            fenced = not fenced
+            result.append(line)
+            continue
+        match = re.match(r"^(\s{0,3})(#{1,6})(?=\s)", line) if not fenced else None
+        if match and _HEADING.match(line):
+            level = len(match.group(2))
+            at = match.start(2)
+            line = line[:at] + "#" * min(2, 6 - level) + line[at:]
+        result.append(line)
+    return "".join(result)
+
+
+def task_text(task) -> str:
+    """The task contract, with its list-valued fields rendered as markdown lists."""
+    def bullets(items: tuple[str, ...], code: bool = False) -> str:
+        if not items:
+            return "None."
+        return "\n".join(f"- `{item}`" if code else f"- {item}" for item in items)
+
+    return "\n\n".join([
+        f"**Goal**\n\n{task.goal}",
+        f"**Non-goals**\n\n{bullets(task.non_goals)}",
+        f"**Acceptance criteria**\n\n{bullets(task.acceptance)}",
+        f"**Verification commands**\n\n{bullets(task.verification, code=True)}",
+    ])
+
+
+def footer(task, flow, sha: str, base_ref: str, base_sha: str, cost: float | None = None) -> str:
+    """The PR's task, flow, candidate and optional recorded cost on one line."""
+    parts = [
+        f"Factory task `{task.id}` from `{task.plan}`",
+        f"**Flow** `{flow.name}`: " + ", ".join(step.name for step in flow.steps),
+        f"Candidate `{sha}` on base `{base_ref}` (`{base_sha[:12]}`)",
+    ]
+    if cost is not None:
+        parts.append(f"${cost:.2f}")
+    return " · ".join(parts)
+
+
+def fit(assemble: Callable[[], str], steps: Iterable[Callable[[], None]], limit: int,
+        last_resort: Callable[[], str]) -> str:
+    """Assemble after each shrink in order, stopping as soon as the body fits."""
+    body = assemble()
+    for shrink in steps:
+        if len(body) <= limit:
+            return body
+        shrink()
+        body = assemble()
+    return body if len(body) <= limit else last_resort()

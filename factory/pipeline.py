@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -155,7 +156,9 @@ class State(TypedDict, total=False):
     gates_ok: bool
     gates: str
     gates_pr: str           # gate details cut for the PR; `gates` stays whole for the verifier
+    checks: list[prbody.Check]  # gate results and command/test counts for the PR's Checks paragraph
     reviews: dict[str, str]  # review step name -> its report (one PR-body block per review step)
+    review_outcomes: dict[str, str]  # review step name -> its run's verdict, in this attempt
     verify: str
     summary: prbody.Summary
     outcome: str
@@ -404,7 +407,7 @@ class Pipeline:
                     "feedback": KINDS[r.kind].no_change
                     if r else "The previous attempt produced no changes. Implement the task."}
         self.db.update(self.task.id, candidate_sha=sha)
-        return {"attempt": attempt, "sha": sha, "reviews": {}}
+        return {"attempt": attempt, "sha": sha, "reviews": {}, "review_outcomes": {}}
 
     def review_step(self, step: flows.Step):
         """The graph node of one review step: the first CHANGES ends the attempt."""
@@ -419,6 +422,7 @@ class Pipeline:
             who = "Reviewer" if step.name == step.kind else f"Reviewer `{step.name}`"
             fb = "" if out.verdict == "APPROVE" else f"{who} requested changes:\n\n{out.text}"
             return {"verdict": out.verdict, "reviews": {**s.get("reviews", {}), step.name: out.text},
+                    "review_outcomes": {**s.get("review_outcomes", {}), step.name: out.verdict},
                     "feedback": fb}
         return node
 
@@ -432,7 +436,15 @@ class Pipeline:
         gs = self.role("verify", "verifying", s["attempt"], run, step="gates")
         table = G.table(gs)
         table_pr = G.table(gs, width=GATE_TABLE_WIDTH)
+        checks = []
         for g in gs:
+            commands = tests = None
+            if g.name in ("verification", "unit_tests", "e2e_tests") and g.ok is not None:
+                lines = [line for line in g.detail.splitlines() if line.startswith("[")]
+                counts = [int(match.group(1)) for line in lines
+                          for match in re.finditer(r"tests=(\d+)", line)]
+                commands, tests = len(lines), sum(counts) if counts else None
+            checks.append(prbody.Check(g.name, g.ok, commands, tests))
             self._event("gate", f"{g.mark:<4} {g.name}: {clip(g.detail, 200)}")
         if not G.passed(gs):
             bad = [g for g in gs if g.ok is False]
@@ -441,9 +453,10 @@ class Pipeline:
             stuck = sig == s.get("failure_sig")
             if stuck:
                 self._event("stage", "no progress: the same gates failed with the same output twice in a row")
-            return {"gates_ok": False, "gates": table, "gates_pr": table_pr, "failure_sig": sig, "stuck": stuck,
+            return {"gates_ok": False, "gates": table, "gates_pr": table_pr, "checks": checks,
+                    "failure_sig": sig, "stuck": stuck,
                     "feedback": f"Verification gates failed: {', '.join(g.name for g in bad)}\n\n{failed}"}
-        return {"gates_ok": True, "gates": table, "gates_pr": table_pr}
+        return {"gates_ok": True, "gates": table, "gates_pr": table_pr, "checks": checks}
 
     def _cleaned_reviews(self, s: State) -> dict[str, str]:
         """The flow's review reports in step order, using the same last-draft cleaning as the PR body."""
@@ -565,19 +578,30 @@ class Pipeline:
             summary = prbody.fallback_summary(t, self._changed_files(s), self._capped_reviews(cleaned))
         changed = "\n".join(f"- {bullet}" for bullet in summary.changed)
         check = "\n".join(f"- {bullet}" for bullet in summary.check) or "Nothing flagged."
+        outcomes = s.get("review_outcomes", {})
+        reviews = [(step.name, outcomes.get(step.name)) for step in review_steps]
+        checks = prbody.checks_paragraph(s.get("checks", []), reviews, s["sha"], s.get("attempt", 1))
+        row = self.db.task(t.id)
+        footer = prbody.footer(t, flow, s["sha"], self.opts.base_ref, self.base_sha,
+                               row["cost_usd"] if row else None)
 
         def review_block(step: flows.Step, limit: int) -> str:
+            # Cap first so the note's character counts still describe the agent's original report.
+            report = prbody.cap(cleaned[step.name], limit, pointers[step.name])
             return (f"<details><summary>Reviewer report ({step.name})</summary>\n\n"
-                    + prbody.cap(cleaned[step.name], limit, pointers[step.name]) + "\n\n</details>")
+                    + prbody.demote(report) + "\n\n</details>")
 
         blocks = {step.name: review_block(step, prbody.BLOCK_LIMIT) for step in review_steps}
+        gate_block = ("<details><summary>Gate table</summary>\n\n"
+                      + prbody.demote("## Gates\n\n" + s.get("gates_pr", "")) + "\n\n</details>")
+        task_report = prbody.cap(prbody.demote(prbody.task_text(t)), prbody.BLOCK_LIMIT, f"factory show {t.id}")
+        task_block = f"<details><summary>The task</summary>\n\n{task_report}\n\n</details>"
 
         def assemble(with_tail: bool = True) -> str:
+            # HTML closes a formatting element at the end of the document. Leaving `sub` open keeps
+            # the pointer in the footer while preserving t01's pin that it is the body's final text.
+            end = "<sub>" + footer + (" · " + tail if with_tail else "")
             return "\n\n".join([
-                f"Factory task **`{t.id}`** from `{t.plan}` — {t.goal}",
-                f"Candidate `{s['sha']}` on base `{self.opts.base_ref}` (`{self.base_sha[:12]}`), "
-                f"{s['attempt']} build attempt(s). Gates passed; merging is the human gate.",
-                f"**Flow** `{flow.name}`: " + ", ".join(step.name for step in flow.steps),
                 *([f"**Stacked** on {', '.join(self.opts.stacked_on)}: merge those first. This PR shows only "
                    f"`{t.id}`'s changes; after they merge, `factory status --refresh` moves it onto the trunk."]
                   if self.opts.stacked_on else []),
@@ -587,29 +611,39 @@ class Pipeline:
                 *([KINDS[r.kind].body_line(r)] if (r := self.opts.rework) else []),
                 "## What changed\n\n" + changed,
                 "## What to check\n\n" + check,
-                "## Gates\n\n" + s.get("gates_pr", ""),
+                "## Checks\n\n" + checks,
+                gate_block,
+                task_block,
                 *blocks.values(),
-                *([tail] if with_tail else []),
+                "---\n\n" + end,
             ])
 
-        body = assemble()
-        if len(body) <= prbody.BODY_LIMIT:
-            return body
         longest = sorted(review_steps, key=lambda step: len(cleaned[step.name]), reverse=True)
-        for step in longest:
+
+        def shrink(step: flows.Step) -> None:
             blocks[step.name] = review_block(step, SHRUNK_LIMIT)
-            body = assemble()
-            if len(body) <= prbody.BODY_LIMIT:
-                return body
-        for step in longest:
+
+        def replace(step: flows.Step) -> None:
             blocks[step.name] = f"Reviewer report ({step.name}): `{pointers[step.name]}`"
-            body = assemble()
-            if len(body) <= prbody.BODY_LIMIT:
-                return body
-        room = prbody.BODY_LIMIT - len(tail) - 2
-        if room < 0:                     # only a monkeypatched, impossibly small body limit
-            return (assemble(False) + "\n\n" + tail)[:max(0, prbody.BODY_LIMIT)]
-        return prbody.cap(assemble(False), room, f"factory show {t.id}") + "\n\n" + tail
+
+        def replace_task() -> None:
+            nonlocal task_block
+            task_block = f"The task: `factory show {t.id}`"
+
+        def replace_gates() -> None:
+            nonlocal gate_block
+            gate_block = f"Gate table: `factory show {t.id} --step gates`"
+
+        steps = [*(lambda step=step: shrink(step) for step in longest),
+                 *(lambda step=step: replace(step) for step in longest), replace_task, replace_gates]
+
+        def last_resort() -> str:
+            room = prbody.BODY_LIMIT - len(tail) - 2
+            if room < 0:                 # only a monkeypatched, impossibly small body limit
+                return (assemble(False) + "\n\n" + tail)[:max(0, prbody.BODY_LIMIT)]
+            return prbody.cap(assemble(False), room, f"factory show {t.id}") + "\n\n" + tail
+
+        return prbody.fit(assemble, steps, prbody.BODY_LIMIT, last_resort)
 
     # ------------------------------------------------------------ graph
 
