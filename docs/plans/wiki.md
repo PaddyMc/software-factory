@@ -54,6 +54,7 @@
   depends_on:
     - measure-t04
     - strict-flow-t08
+    - flow-tuning-t04
   non_goals:
     - "Any agent, ingest or lint run (wiki-t03 to t06)"
     - "Putting the wiki into task prompts, or the wiki_untouched gate (wiki-t02)"
@@ -192,9 +193,10 @@
   depends_on:
     - wiki-t06
     - strict-flow-t09
+    - flow-tuning-t05
   non_goals:
     - "Changing code, or tests beyond what tests/test_templates.py needs for the new template text"
-    - "Editing the installed skill copies under .claude/skills or .agents/skills, or this repository's AGENTS.md: `factory init --force` refreshes them"
+    - "Editing .claude/skills/ or this repository's AGENTS.md beyond copying the changed templates there (the factory-ops skill files, and the factory section of AGENTS.md), which tests/test_templates.py requires to match the templates"
     - "Turning the wiki on for this repository, or writing any page under docs/wiki/"
     - "Editing factory/prompts/*.md"
   acceptance:
@@ -493,6 +495,7 @@ The repository configures no `e2e` gate. `test_wiki_reading.py`, `test_wiki_inge
 - **Depends on:**
   - [measure](measure.md). `wiki-t01` depends on `measure-t04`, the end of that chain, because both plans change `agents.py`, `db.py`, `cli.py` and the same docs. t04's briefs read measure-t02's `merge` runs. Measure-t01's prompt version covers the wiki block, so `factory stats` compares runs with and without the wiki.
   - [strict-flow](strict-flow.md). `wiki-t01` depends on `strict-flow-t08` and `wiki-t07` on `strict-flow-t09`: that plan changes the same `agents.py`, `gates.py`, `tools.py` and docs, and the role pages should describe the loop the task crew then runs. It adds a `test` step kind, which gets a role page only if the wiki has one for it, and write tools limited to path globs, which wiki-t03's `PathGuard` change builds on.
+  - [flow-tuning](flow-tuning.md). `wiki-t01` depends on `flow-tuning-t04` and `wiki-t07` on `flow-tuning-t05`: that plan changes the same `agents.py`, `pipeline.py`, `config.py` and docs, and adds the `select` role, which gets a role page only if the wiki has one for it.
   - [agent-flows](agent-flows.md), through measure. wiki-t02 adds its block where `LangChainRoles.step` builds each step's prompt, and picks the role page by the step's kind.
   - [pr-review-rework](pr-review-rework.md), merged. t04's briefs read the `human_review` runs from its t04.
 - **Required by:** nothing planned. `factory bench` (NEXT.md item 3), when it's planned, could replay tasks with and without the wiki.

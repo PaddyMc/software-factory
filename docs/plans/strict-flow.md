@@ -1,6 +1,6 @@
 # Plan: A stricter agent flow
 
-**Status:** Planned (2026-11-13). Workstream scoped; awaiting kickoff: t01 starts once `measure-t03`, `bench-t05` and `pr-descriptions-t04` have PRs. Roadmap: [NEXT.md item 9](../../NEXT.md#9-a-stricter-agent-flow), which also closes most of [item 2](../../NEXT.md#2-the-builder-writes-the-test-that-judges-it).
+**Status:** Planned (2026-11-13). Workstream scoped; awaiting kickoff: t01 starts once `measure-t03`, `bench-t05`, `pr-descriptions-t04` and `flow-tuning-t01` have PRs. Roadmap: [NEXT.md item 9](../../NEXT.md#9-a-stricter-agent-flow), which also closes most of [item 2](../../NEXT.md#2-the-builder-writes-the-test-that-judges-it).
 
 ---
 
@@ -58,6 +58,7 @@
     - measure-t03
     - bench-t05
     - pr-descriptions-t04
+    - flow-tuning-t01
   non_goals:
     - "The loop values map, nudge and resume (strict-flow-t02, strict-flow-t03): `loop` accepts only `trim` after this task"
     - "Summarizing old steps with a model call, or changing what grep, run or git_diff return"
@@ -278,7 +279,7 @@
     - pr-descriptions-t05
   non_goals:
     - "Changing code, or tests beyond what tests/test_templates.py needs for the new template text"
-    - "Editing the installed skill copies under .claude/skills or .agents/skills: `factory init --force` refreshes them"
+    - "Editing .claude/skills/ beyond copying the changed factory-ops template files there, which tests/test_templates.py requires to match the templates"
     - "Rewriting sections unrelated to this plan, or editing README.md"
   acceptance:
     - "docs/architecture.md: the Agent flows section gives the order rule with the test step, a table of the step options (loop: trim, map, nudge, resume; prove), and a `### The strict flow` subsection that sets strict next to default with a diagram of one strict run (test, attempts that resume, gates, proving review, verify). `Inside one agent: the loop` describes trim, map and nudge with their limits. The Roles table has the tester, the Gates table has acceptance_untouched, and the handover table says what the builder gets from the test step"
@@ -632,13 +633,15 @@ Through the real CLI, pipeline, agents, git, bubblewrap and fake `gh`, with `Scr
   - [measure](measure.md). `strict-flow-t01` depends on `measure-t03`, the last task to change `agents.py`, `pipeline.py`, `db.py` and `cli.py` there, and `strict-flow-t09` on `measure-t04`, which edits the same docs. Its prompt version covers the proof rules, since they are part of the system prompt, and `factory stats` sees the `test` role and the `APPROVE (unproven)` outcome as new values.
   - [pr-descriptions](pr-descriptions.md). `strict-flow-t01` depends on `pr-descriptions-t04`, the last task there to change `factory/agents.py` and `factory/pipeline.py`, and `strict-flow-t09` on `pr-descriptions-t05`, which edits the same docs. This plan's PR-body criteria (t04's Acceptance tests block, t05's gate, t06's outcome) are written against its layout.
   - [bench](bench.md). `strict-flow-t01` depends on `bench-t05`, the last task to change `cli.py` there, `strict-flow-t08` changes its fixtures and results, and `strict-flow-t09` depends on `bench-t06`. Bench is how this plan's options are judged.
+  - [flow-tuning](flow-tuning.md). `strict-flow-t01` depends on `flow-tuning-t01`, which asks a review without a verdict once more and changes the same `factory/agents.py` and `factory/pipeline.py` first. t06's rule that a missing verdict counts as CHANGES applies after that re-ask.
 - **Required by:**
+  - [flow-tuning](flow-tuning.md). `flow-tuning-t02` (build candidates) depends on `strict-flow-t08`, so candidates are chosen against the locked tests and bench records step settings, and `flow-tuning-t05` on `strict-flow-t09`, which edits the same docs.
   - [wiki](wiki.md). `wiki-t01` depends on `strict-flow-t08` and `wiki-t07` on `strict-flow-t09`: wiki changes the same `agents.py`, `gates.py` and `tools.py`, and its role pages should describe the loop the task crew then runs. wiki-t03's `PathGuard` with writable prefixes builds on the glob-limited write tools t04 adds. A `test` step gets a role page only if the wiki has one for it.
   - [NEXT.md item 2](../../NEXT.md#2-the-builder-writes-the-test-that-judges-it), which t04 and t05 address.
 
 ## Notes / Out of Scope
 
-- **Parallel build candidates.** Several builders on one task, with the gates picking a winner, lifted one model from 70.9% to 77.6% on SWE-bench Verified ([arXiv 2604.16529](https://arxiv.org/abs/2604.16529)). It needs several worktrees and branches per task, so it gets its own plan once bench shows what strict still fails.
+- **Parallel build candidates.** Several builders on one task, with the gates picking a winner, lifted one model from 70.9% to 77.6% on SWE-bench Verified ([arXiv 2604.16529](https://arxiv.org/abs/2604.16529)). It needs several worktrees and branches per task, so it gets its own plan once bench shows what strict still fails. Planned since 2026-11-16: [flow-tuning](flow-tuning.md), after this plan's t08.
 - **A flow chosen by the contract's `risk`,** per task or per plan. agent-flows left a flow per task out; `--flow` and the config's `flow` stay the only ways to choose.
 - **A gate that runs the tests with the change taken out** (NEXT.md item 2's sketch). The red check at the test commit and the lock cover a tester's vacuous test, but not a builder that makes a locked test pass through a new fixture or helper under `test_paths`. That gate needs a scratch worktree and a sandbox for it, as bench's hidden scoring has.
 - **Holdout tests** the builder never sees. bench keeps them for scoring; in production the tests stay visible, so a builder can build to them.

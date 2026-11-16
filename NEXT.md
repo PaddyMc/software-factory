@@ -18,6 +18,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | ✓ | Factory PR descriptions are long and hard to read. Done: [Pull requests](docs/architecture.md#pull-requests) | — | — |
 | 12 | The models' reasoning is thrown away. Planned: [thoughts](docs/plans/thoughts.md) | small | 10 (its web task) |
 | ✓ | You can't tell which factory version is running. Done: [Commands](docs/reference.md#commands) | — | — |
+| 14 | A review without a verdict costs a rebuild, a task gets one build per attempt, and nothing picks the default flow from data. Planned: [flow-tuning](docs/plans/flow-tuning.md) | medium | 8, 9 |
 
 ## 1. Act on human PR review comments
 
@@ -184,3 +185,17 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 **Plan.** [docs/plans/version.md](docs/plans/version.md) (planned 2026-11-15, tasks `version-t01` and `t02`):
 - `factory version` and `factory --version` print the installed package version. When the factory runs from its own git checkout, as an editable install does, they add that checkout's `git describe`, for example `factory 0.1.0 (v0.1.0-25-ge5f6b95-dirty)`.
 - Runs, the board and PR bodies don't record the version, and the build and release process stay as they are.
+
+## 14. Tune the agent flow
+
+**Gap.** Three things are left once the flows run gates-first:
+- A review that ends without its `VERDICT:` line counts as CHANGES and sends the build back with the reviewer's unfinished reasoning as the rejection. On this repository's board, 4 of the 7 CHANGES verdicts were that.
+- A task gets one build per attempt, in one worktree.
+- bench compares flows, but nothing runs the comparison and acts on it.
+
+**Seen in.** Building several candidates and choosing one is the largest measured gain in recent work on coding agents: 70.9% to 77.6% on SWE-bench Verified for one model ([arXiv 2604.16529](https://arxiv.org/abs/2604.16529)), and 78.2% for an LLM verifier picking among three candidates whose mean was 76.1% ([arXiv 2607.05391](https://arxiv.org/abs/2607.05391)).
+
+**Plan.** [docs/plans/flow-tuning.md](docs/plans/flow-tuning.md) (planned 2026-11-16, tasks `flow-tuning-t01`…`t06`; t01 before [strict-flow](docs/plans/strict-flow.md), the rest after it):
+- A review without a verdict is asked once more in the same conversation. Still none counts as CHANGES, recorded as `CHANGES (no verdict)`, and the builder is told so.
+- A build step can set `candidates: N` (2 to 5). The first attempt builds N candidates one after another in their own worktrees, the gates judge each, and a selector agent picks among those that pass, falling back to the smallest diff.
+- bench records candidates, and a by-hand trial of six flows sets this repository's `flow:` by a fixed rule.
