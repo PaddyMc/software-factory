@@ -863,10 +863,35 @@ def _result(content: str, step: int, index: int | None) -> str:
             f'{result}</details>')
 
 
+def _thought(ai: dict, row: dict) -> str:
+    reasoning = str(ai.get("reasoning") or "")
+    thinking = row["thinking"]
+    if not reasoning and not thinking:
+        return ""
+    head = f"Thought, {thinking} tokens" if thinking else "Thought"
+    if not reasoning:
+        message = "The model didn't share its reasoning."
+        content = f'<p class="thinks-none">{esc(message)}</p>'
+    elif len(reasoning) <= 800:
+        content = f"<p>{esc(reasoning)}</p>"
+    else:
+        opening = reasoning[:600]
+        cut = next((index for index in range(len(opening) - 1, -1, -1)
+                    if opening[index].isspace()), -1)
+        if cut < 0:
+            cut = 600
+        rest = reasoning[cut:].lstrip()
+        fold_id = esc(f"t-{row['step']}-thought")
+        content = (f"<p>{esc(reasoning[:cut])}…</p>"
+                   f'<details class="fold" id="{fold_id}"><summary>The rest of the thought, '
+                   f'{len(rest):,} characters</summary><p>{esc(rest)}</p></details>')
+    return f'<div class="thinks"><div class="thinks-head">{esc(head)}</div>{content}</div>'
+
+
 def _step(ai: dict, results: list[dict], row: dict) -> str:
     timing = ""
     if row["model_s"] is not None:
-        timing = f"{row['model_s']:.1f}s thinking"
+        timing = f"{row['model_s']:.1f}s in the model"
     if row["tools_s"] >= 1.0:
         tools = f"{observe.human_secs(row['tools_s'])} in tools"
         timing = f"{timing}, {tools}" if timing else tools
@@ -874,10 +899,13 @@ def _step(ai: dict, results: list[dict], row: dict) -> str:
     if timing:
         facts.append(timing)
     facts.append(f"{_tokens(row['ctx_in'])} in, {_tokens(row['out'])} out")
+    if row["thinking"]:
+        facts.append(f"{row['thinking']} thinking")
     if row["cost"] is not None:
         facts.append(f"${row['cost']:.3f}")
     facts_html = "<br>".join(esc(fact) for fact in facts)
 
+    thought = _thought(ai, row)
     says = f'<p class="says">{esc(ai["text"])}</p>' if ai.get("text") else ""
     calls = []
     call_events = ai.get("tool_calls", []) or []
@@ -898,7 +926,7 @@ def _step(ai: dict, results: list[dict], row: dict) -> str:
     <div class="step-n">Step {esc(row['step'])}</div>
     <div class="step-facts">{facts_html}</div>
   </div>
-  <div>{says}{''.join(calls)}{surplus}</div>
+  <div>{thought}{says}{''.join(calls)}{surplus}</div>
 </div>"""
 
 
@@ -929,14 +957,17 @@ def transcript(db: DB, home: Path, project: str, port: int | None, task_id: str,
         if rows:
             tokens_in = sum(row["ctx_in"] for row in rows)
             tokens_out = sum(row["out"] for row in rows)
-            facts.append(("tokens", f"{_tokens(tokens_in)} in, {_tokens(tokens_out)} out"))
+            thinking = sum(row["thinking"] or 0 for row in rows)
+            thinking_note = (f" ({thinking:,} thinking)"
+                             if any(row["thinking"] is not None for row in rows) else "")
+            facts.append(("tokens", f"{_tokens(tokens_in)} in, {_tokens(tokens_out)} out{thinking_note}"))
         costs = [row["cost"] for row in rows if row["cost"] is not None]
         if costs:
             facts.append(("cost", f"${sum(costs):.2f}"))
         if rows:
             model_s = sum(row["model_s"] or 0 for row in rows)
             tools_s = sum(row["tools_s"] for row in rows)
-            facts.append(("time", f"{observe.human_secs(model_s)} thinking, "
+            facts.append(("time", f"{observe.human_secs(model_s)} in the model, "
                                   f"{observe.human_secs(tools_s)} in tools"))
         mix = Counter()
         for row in rows:
