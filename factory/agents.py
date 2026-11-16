@@ -5,6 +5,7 @@ its own .factory/agents/<step>.md, and set models and step limits in .factory/co
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 from importlib import resources
 import re
 from dataclasses import dataclass, field
@@ -57,6 +58,7 @@ class Ctx:
 class Output:
     text: str
     model: str = ""
+    prompt_version: str = ""
     verdict: str | None = None              # review only: APPROVE | CHANGES
     log: ToolLog = field(default_factory=ToolLog)
     steps: int = 0
@@ -133,6 +135,14 @@ def contract_block(task: Task) -> str:
         f"**Verification commands:**\n{_bullets(f'`{c}`' for c in task.verification)}",
         f"**Risk:** {task.risk}",
     ])
+
+
+def prompt_version(parts) -> str:
+    """First 12 hex characters of the SHA-256 of a step's system prompt without its per-task
+    parts (the contract block and the `Today: …` line). Everything else counts — the prompt
+    file as loaded, the project rules, the repository guidance, and any part added to the
+    system prompt later — so runs under the same instructions share a version."""
+    return hashlib.sha256("\n\n".join(p for p in parts if p).encode()).hexdigest()[:12]
 
 
 def _repo_guidance(worktree: Path, files: tuple[str, ...]) -> str:
@@ -231,10 +241,15 @@ class LangChainRoles:
         meta, instructions = load_step(self.root, step)
         spec = step_model(self.root, step, self.cfg, self.model_override)
         steps = step_limit(step, self.cfg, meta)
-        system = "\n\n".join(x for x in [
-            instructions.strip(), contract_block(ctx.task), project_rules(self.cfg),
-            f"Today: {dt.date.today().isoformat()}. Worktree root is the tools' working directory.",
-            _repo_guidance(ctx.worktree, self.cfg.guidance)] if x)
+        parts = [                                    # (text, per_task): per-task parts stay out of the version
+            (instructions.strip(), False),
+            (contract_block(ctx.task), True),
+            (project_rules(self.cfg), False),
+            (f"Today: {dt.date.today().isoformat()}. Worktree root is the tools' working directory.", True),
+            (_repo_guidance(ctx.worktree, self.cfg.guidance), False),
+        ]
+        system = "\n\n".join(text for text, _ in parts if text)
+        version = prompt_version(text for text, per_task in parts if text and not per_task)
         tools, default_message, log = self._kit(step, ctx)
         message = message if message is not None else default_message
         agent = create_agent(
@@ -248,7 +263,7 @@ class LangChainRoles:
             ctx.log(tag, f"⚠ {step.name}'s prompt has no VERDICT: line; every review will count as CHANGES")
         ctx.record({"type": "system", "model": spec, "max_steps": steps, "content": system})
         ctx.record({"type": "human", "content": message})
-        out = Output(text="", model=spec)
+        out = Output(text="", model=spec, prompt_version=version)
         # Each agent step runs 4 graph nodes (call-limit before_model, model, call-limit after_model,
         # tools). ModelCallLimitMiddleware enforces max_steps; the recursion limit is only a backstop
         # and must sit above 4 * steps or a run that finishes on its last step is killed.

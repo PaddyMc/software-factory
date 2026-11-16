@@ -60,7 +60,7 @@ MIGRATIONS = {
     "runs": [("steps", "INTEGER NOT NULL DEFAULT 0"), ("tokens_in", "INTEGER NOT NULL DEFAULT 0"),
              ("tokens_out", "INTEGER NOT NULL DEFAULT 0"), ("cost_usd", "REAL"),
              ("refused", "INTEGER NOT NULL DEFAULT 0"), ("transcript", "TEXT"),
-             ("flow", "TEXT"), ("step", "TEXT")],
+             ("flow", "TEXT"), ("step", "TEXT"), ("prompt_version", "TEXT")],
 }
 
 

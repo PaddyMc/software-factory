@@ -757,7 +757,8 @@ def cmd_show(a) -> int:
         stats += f", ${r['cost_usd']:.4f}" if r["cost_usd"] is not None else ""
         stats += f", {r['refused']} tool calls refused" if r["refused"] else ""
         print(f"\n## {r['role']} #{r['attempt']} — {r['outcome']} (flow {r['flow'] or '-'}, "
-              f"step {r['step'] or r['role']}, {r['model'] or '-'}, {r['started_at']}; {stats})")
+              f"step {r['step'] or r['role']}, {r['model'] or '-'}, prompt {r['prompt_version'] or '-'}, "
+              f"{r['started_at']}; {stats})")
         if r["transcript"]:
             hint = f"factory transcript {a.task_id} --role {r['role']} --attempt {r['attempt']}"
             if r["step"]:
