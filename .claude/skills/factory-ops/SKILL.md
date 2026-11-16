@@ -1,6 +1,6 @@
 ---
 name: factory-ops
-description: Operate the software factory (the `factory` CLI) in this repository. Covers starting runs of a plan or a task, watching them, explaining why a task failed, rerunning or requeuing tasks (including abandoned → queued), holding tasks, stopping a run, merging stacked factory PRs, loading new plans, and resetting the board. Use whenever the user asks how to run, start or kick off the factory or the backlog; asks what a run is doing or what's left; asks about a failed, stuck, queued, abandoned, conflict, ci_failed, changes_requested or DEAD task; pastes `factory` output or a factory error; asks about merging factory PRs; or asks what the factory will do. Not for writing plans (/plan-workstream) or judging a PR's content (/review-task).
+description: Operate the software factory (the `factory` CLI) in this repository. Covers starting runs of a plan or a task, watching them, explaining why a task failed, rerunning or requeuing tasks (including abandoned → queued), holding tasks, stopping a run, merging stacked factory PRs, loading new plans, and resetting the board. Use whenever the user asks how to run, start or kick off the factory or the backlog; asks what a run is doing or what's left; asks about a failed, stuck, queued, abandoned, conflict, ci_failed, changes_requested or DEAD task; pastes `factory` output or a factory error; asks about merging factory PRs; asks how to compare flows or models with `factory bench`; or asks what the factory will do. Not for writing plans (/plan-workstream) or judging a PR's content (/review-task).
 ---
 
 # Factory ops
@@ -67,6 +67,7 @@ These are read-only and safe to run, as are `top --once`, `logs`, `transcript`, 
 | Several people, one backlog | Each keeps their own board; never commit `factory.db`. `factory sync && factory status --refresh` takes up the open and merged `factory/*` PRs others opened. Nothing claims a task across boards, so agree who runs which plan |
 | Costs | `--max-cost USD` caps each task; `top` and `status` show spend. Keep the provider's credits topped up |
 | Models, step limits | `models:` and `max_steps:` per role (`plan`, `build`, `review`, `verify`) in `.factory/config.yaml`; one-off `--model provider:model` |
+| Compare flows or models | Compare flows with `factory bench run --flow A --flow B --repeat 3 --max-cost USD`; compare models by repeating `--model provider:model` on one flow. Then use `factory bench report` or `factory bench compare RUN_A RUN_B`. Fixture cases run in isolated cells without PRs, leaving the board and checkout untouched. A run spends real money, capped by `--max-cost`, so give the user the command rather than running it yourself |
 | Clean the board, start again | references/board.md |
 
 ## Diagnosing a failed task
