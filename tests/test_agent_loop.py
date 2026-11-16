@@ -138,6 +138,32 @@ def test_a_step_without_reasoning_records_none(tmp_path, monkeypatch):
     assert "done: 1 steps, 0 tokens in / 0 out" in logs
 
 
+def test_a_recorded_runs_thoughts_show_in_its_transcript_and_trace(tmp_path, monkeypatch):
+    reasoning = "Read the repository first so the plan names real files."
+    reply = AIMessage(
+        "the plan", additional_kwargs={"reasoning_content": reasoning},
+        usage_metadata={"input_tokens": 100, "output_tokens": 30, "total_tokens": 130,
+                        "output_token_details": {"reasoning": 25}})
+    plays = {"PLANNER": [reply], "_calls": [], "_verdicts": []}
+    monkeypatch.setattr(agents, "build_model", lambda spec: ScriptedModel(plays=plays))
+    events = []
+    _roles(tmp_path, 5).plan(_ctx(tmp_path, events))
+    transcript_path = tmp_path / "recorded-run.jsonl"
+    transcript_path.write_text("\n".join(json.dumps(e) for e in events))
+
+    transcript = observe.render_transcript(transcript_path)
+    lines = transcript.splitlines()
+    header = next(line for line in lines if "[agent step 1]" in line)
+    assert "100 in / 30 out (25 thinking)" in header
+    assert lines.index(header) < lines.index(f"thinks: {reasoning}") < lines.index("the plan")
+
+    trace = observe.render_trace(transcript_path, width=200)
+    row = next(line for line in trace.splitlines() if line.startswith("   1 "))
+    assert f"{30:>6} {25:>6}" in row
+    tokens = next(line for line in trace.splitlines() if line.lstrip().startswith("tokens "))
+    assert tokens.endswith("output 30 (25 thinking)")
+
+
 def test_trace_shows_context_growth_timing_and_largest_results(tmp_path):
     t = tmp_path / "run.jsonl"
     ev = [
