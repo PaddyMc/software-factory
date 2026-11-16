@@ -1,0 +1,12 @@
+## [21:50] stack-safety-t01: Refresh survives stacks merged out of order (by hand)
+
+- Why: `factory status --refresh` crashed with a traceback when it restacked `bench-t04`. #56 and #52 had been merged top-down into `factory/bench-t05` and `factory/bench-t04`, so `bench-t04`'s branch had moved past the board's candidate and the restack's leased push was refused (`stale info`). Refresh restacks tasks by id, so the crash also stopped every measure and thoughts PR from being moved. Separately, `pr-descriptions-t02` showed `failed`, although PR #38's merge commit `ec1fd40` is on `main`.
+- `factory/cli.py`:
+  - A PR merged into a factory branch whose own PR is still open now moves with that PR. When the branch only grew, refresh takes its head as that task's candidate (`_carry`), so restacks and conflict resolutions replay the merged changes too, and their leased push matches the branch. A PR merged into a branch like this isn't restacked itself.
+  - A merged PR whose merge commit is on the trunk counts as merged (`_merge_commit`, checked before the reverse-apply check), even when later work rewrote the same lines. A task whose last run failed after its PR merged is settled the same way. Only ever as merged, so a failed task's next run is unchanged otherwise.
+  - A restack that raises leaves that PR's head and status as they are, sets a note saying why, and lets refresh go on to the other tasks. The note clears once a later refresh moves the PR.
+  - A conflict, CI-fix or review rework run checks the PR branch on origin before any agent runs. If the branch isn't at the recorded candidate, the run stops and says to refresh (or `--force` to rebuild), since its push could only be refused.
+- `tests/test_pipeline.py`: `test_a_pr_merged_into_an_open_dependency_moves_with_it`, `test_refresh_reports_a_pr_it_cannot_restack_and_carries_on`, `test_a_pr_whose_merge_commit_reached_the_trunk_is_merged` (for `pr_open` and `failed`), `test_a_rework_whose_branch_moved_stops_before_any_agent`. All five fail on the code before this change.
+- Commands:
+  - `GIT_CONFIG_GLOBAL=/dev/null uv run pytest -q` — 392 passed, 1 skipped, on `main` at `7fa1b81` (after the measure stack merged; the only conflict, next to measure-t02's merge record in `_refresh`, keeps both). The global config is left out because this machine's `tag.gpgSign=true` makes `tests/test_version.py`'s lightweight tag fail, on `main` as well.
+  - `git diff --check` — clean.

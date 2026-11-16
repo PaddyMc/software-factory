@@ -742,6 +742,141 @@ def test_a_stacked_pr_merged_into_an_open_dependency_waits_for_it(factory_repo, 
     assert db.task("demo-t01")["status"] == "merged" and db.task("demo-t02")["status"] == "merged"
 
 
+def _push_commit(repo, branch, onto, path, text):
+    """One commit writing `path` on top of `onto`, pushed as `branch`; the checkout goes back to main."""
+    git(repo, "checkout", "-q", "--detach", onto)
+    (repo / path).write_text(text)
+    git(repo, "add", path)
+    git(repo, "commit", "-q", "-m", f"{branch}: {path}")
+    new = git(repo, "rev-parse", "HEAD")
+    git(repo, "push", "-q", "-f", "origin", f"{new}:refs/heads/{branch}")
+    git(repo, "checkout", "-q", "main")
+    return new
+
+
+def _merge_into(repo, branch, onto, sha, message):
+    """GitHub's squash merge of `sha` into `branch`, whose head is `onto`: one new commit on top, pushed."""
+    git(repo, "checkout", "-q", "--detach", onto)
+    git(repo, "merge", "-q", "--squash", sha)
+    git(repo, "commit", "-q", "-m", message)
+    new = git(repo, "rev-parse", "HEAD")
+    git(repo, "push", "-q", "origin", f"{new}:refs/heads/{branch}")
+    git(repo, "checkout", "-q", "main")
+    return new
+
+
+def test_a_pr_merged_into_an_open_dependency_moves_with_it(factory_repo, home, fake_gh, monkeypatch, capsys):
+    t01, t02 = _open_stack(monkeypatch, home)
+    # demo-t02's PR is squash-merged into factory/demo-t01 while demo-t01's PR is open: a stack merged top-down.
+    carried = _merge_into(factory_repo, "factory/demo-t01", t01, t02, "demo-t02 (#2)")
+    _github_says(fake_gh, "factory/demo-t02", state="MERGED", mergedAt="2026-11-14T22:00:00Z")
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    err = capsys.readouterr().err
+    assert (f"demo-t01: its branch carries demo-t02's merged PR (https://github.test/pr/2): candidate "
+            f"{t01[:12]} → {carried[:12]}") in err
+    db = open_db(home)
+    assert db.task("demo-t01")["candidate_sha"] == carried
+    assert db.task("demo-t02")["status"] == "pr_open"                   # it waits for demo-t01's PR
+    assert "demo-t02: rebased" not in err                                # a merged PR isn't restacked
+    calls = json.loads(fake_gh.read_text())["calls"]
+    assert not any(c[0] == "api" and c[1].endswith("/issues/2/comments") for c in calls)
+    assert main(["status", "--refresh"]) == 0 and "demo-t01:" not in capsys.readouterr().err    # idempotent
+
+    # main moves and demo-t01's PR conflicts with it. Resolving replays both tasks' changes, and its push
+    # replaces exactly the head that carries demo-t02's merge.
+    (factory_repo / "elsewhere.txt").write_text("main moved\n")
+    git(factory_repo, "add", "elsewhere.txt")
+    git(factory_repo, "commit", "-q", "-m", "main moves")
+    git(factory_repo, "push", "-q", "origin", "main")
+    _github_says(fake_gh, "factory/demo-t01", mergeable="CONFLICTING")
+    assert main(["status", "--refresh"]) == 0
+    assert open_db(home).task("demo-t01")["status"] == "conflict"
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    row = open_db(home).task("demo-t01")
+    assert row["status"] == "pr_open" and row["pr_url"] == "https://github.test/pr/1"
+    git(factory_repo, "fetch", "-q", "origin")
+    assert git(factory_repo, "rev-parse", "origin/factory/demo-t01") == row["candidate_sha"]
+    assert git(factory_repo, "rev-parse", f"{row['candidate_sha']}^") == git(factory_repo, "rev-parse", "origin/main")
+    changed = git(factory_repo, "diff", "--name-only", f"origin/main..{row['candidate_sha']}").split()
+    assert "crates/e2e/tests/second.rs" in changed                      # demo-t02's change came along
+
+
+def test_refresh_reports_a_pr_it_cannot_restack_and_carries_on(factory_repo, home, fake_gh, monkeypatch, capsys):
+    t01, t02 = _open_stack(monkeypatch, home)
+    # demo-t01's PR moves, as a conflict resolution moves it, and someone pushes to factory/demo-t02.
+    moved = _push_commit(factory_repo, "factory/demo-t01", t01, "more.txt", "demo-t01, resolved\n")
+    open_db(home).update("demo-t01", candidate_sha=moved)
+    theirs = _push_commit(factory_repo, "factory/demo-t02", t02, "theirs.txt", "pushed by hand\n")
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    captured = capsys.readouterr()
+    note = ("refresh couldn't restack its PR: factory/demo-t02 has moved since the factory last pushed it, so the "
+            "rebased commits were not pushed. Check its branch, then `factory status --refresh` again")
+    assert f"demo-t02: {note}" in captured.err
+    assert "demo-t02" in captured.out                                    # the board is still printed
+    row = open_db(home).task("demo-t02")
+    assert row["status"] == "pr_open" and row["candidate_sha"] == t02 and row["note"] == note
+    assert git(factory_repo, "ls-remote", "origin", "refs/heads/factory/demo-t02").split()[0] == theirs
+
+    # With the branch back where the factory left it, the next refresh moves the PR and clears the note.
+    git(factory_repo, "push", "-q", "-f", "origin", f"{t02}:refs/heads/factory/demo-t02")
+    assert main(["status", "--refresh"]) == 0
+    assert "demo-t02: rebased onto demo-t01" in capsys.readouterr().err
+    row = open_db(home).task("demo-t02")
+    assert row["note"] is None and row["base_sha"] == moved
+
+
+@pytest.mark.parametrize("status", ["pr_open", "failed"])
+def test_a_pr_whose_merge_commit_reached_the_trunk_is_merged(factory_repo, home, fake_gh, monkeypatch, capsys,
+                                                              status):
+    t01, t02 = _open_stack(monkeypatch, home)
+    git(factory_repo, "merge", "-q", "--no-ff", "-m", "demo-t01 (#1)", t01)
+    git(factory_repo, "push", "-q", "origin", "main")
+    _github_says(fake_gh, "factory/demo-t01", state="MERGED", mergedAt="2026-11-14T22:39:05Z")
+    # demo-t02's PR merged into factory/demo-t01 after demo-t01's PR had merged, so no PR carries it. Its merge
+    # commit reached main anyway, and later work rewrote the lines it added, so its diff no longer reverse-applies.
+    merge = _merge_into(factory_repo, "factory/demo-t01", t01, t02, "demo-t02 (#2)")
+    git(factory_repo, "merge", "-q", "--no-ff", "-m", "bring demo-t02 along", merge)
+    (factory_repo / "crates/e2e/tests/second.rs").write_text("// rewritten later\n")
+    git(factory_repo, "add", "-A")
+    git(factory_repo, "commit", "-q", "-m", "later work")
+    git(factory_repo, "push", "-q", "origin", "main")
+    _github_says(fake_gh, "factory/demo-t02", state="MERGED", mergedAt="2026-11-14T22:59:25Z")
+    if status == "failed":              # e.g. a replay that was stopped
+        open_db(home).update("demo-t02", status="failed", note="stopped by factory stop")
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0               # gh can't say where its merge commit is yet
+    assert open_db(home).task("demo-t02")["status"] == ("conflict" if status == "pr_open" else "failed")
+
+    _github_says(fake_gh, "factory/demo-t02", mergeCommit={"oid": merge})
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    assert "demo-t02: merged (https://github.test/pr/2 merged into factory/demo-t01, and its merge commit is on " \
+           "main)" in capsys.readouterr().err
+    assert open_db(home).task("demo-t02")["status"] == "merged"
+
+
+def test_a_rework_whose_branch_moved_stops_before_any_agent(factory_repo, home, fake_gh, monkeypatch, capsys):
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    t01 = open_db(home).task("demo-t01")["candidate_sha"]
+    pushed = _push_commit(factory_repo, "factory/demo-t01", t01, "theirs.txt", "pushed by hand\n")
+    _github_says(fake_gh, "factory/demo-t01", mergeable="CONFLICTING")
+    assert main(["status", "--refresh"]) == 0 and open_db(home).task("demo-t01")["status"] == "conflict"
+    runs = len(open_db(home).runs("demo-t01"))
+    calls = _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    capsys.readouterr()
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 1
+    err = capsys.readouterr().err
+    assert (f"demo-t01: factory/demo-t01 is at {pushed[:12]}, not at the candidate {t01[:12]} the board recorded, "
+            f"so this run's push would be refused") in err
+    assert calls == [] and len(open_db(home).runs("demo-t01")) == runs
+    row = open_db(home).task("demo-t01")
+    assert row["status"] == "conflict" and row["candidate_sha"] == t01
+
+
 def test_another_boards_stranded_merge_is_taken_up_with_a_warning(factory_repo, home, fake_gh, capsys):
     fake_gh.write_text(json.dumps({"calls": [], "prs": {
         "factory/demo-t01": {"url": "https://github.test/pr/5", "state": "MERGED", "base": "main",

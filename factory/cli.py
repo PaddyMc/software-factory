@@ -175,6 +175,10 @@ def cmd_run_one(a) -> int:
         print(f"{task.id} waits for {', '.join(unmet)}: each dependency needs a merged or an open PR "
               f"(use --force to override)", file=sys.stderr)
         return 1
+    if row["status"] in ("conflict", "ci_failed", "changes_requested") and not a.force and \
+            (moved := _branch_moved(root, row)):
+        print(f"{task.id}: {moved}", file=sys.stderr)       # before any agent: its push could only be refused
+        return 1
     old_wt = home / "worktrees" / task.id
     if old_wt.exists() and not (row["status"] in ACTIVE and pid_alive(row["pid"])):
         git(root, "worktree", "remove", "--force", str(old_wt))      # a finished run's leftovers
@@ -451,17 +455,59 @@ def _adopt(db, root: Path, remote: str = "origin") -> None:
               + " (taken up from GitHub)", file=sys.stderr)
 
 
-def _merged(db, row, prs: list[dict] | None) -> None:
+def _merge_commit(url: str) -> str | None:
+    """The commit a merged PR's merge made on its base, or None when gh can't say."""
+    p = subprocess.run(["gh", "pr", "view", url, "--json", "mergeCommit"], capture_output=True, text=True)
+    try:
+        commit = json.loads(p.stdout).get("mergeCommit") if p.returncode == 0 else None
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    return (commit or {}).get("oid") if isinstance(commit, dict) else None
+
+
+def _is_ancestor(root: Path, sha: str, ref: str) -> bool:
+    return subprocess.run(["git", "merge-base", "--is-ancestor", sha, ref], cwd=root,
+                          capture_output=True).returncode == 0
+
+
+# Statuses of a task whose open PR the board still moves: its candidate is what a restack or a rework replays.
+CARRIERS = ("pr_open", "conflict", "ci_failed", "changes_requested")
+
+
+def _carry(db, root: Path, tid: str, url: str, base: str) -> None:
+    """`tid`'s PR merged into `base`, a factory branch whose own PR is still open, so that PR now carries its
+    changes. When the branch only grew, its head becomes that task's candidate: restacks and conflict resolutions
+    then move the merged changes along, instead of replaying the old candidate and having their push refused."""
+    from .pipeline import PipelineError, git
+    parent = db.task(base.removeprefix("factory/"))
+    if not parent or parent["status"] not in CARRIERS or not parent["candidate_sha"]:
+        return
+    try:
+        git(root, "fetch", "-q", "origin", base)
+        head = git(root, "rev-parse", f"origin/{base}")
+    except PipelineError:
+        return              # the next refresh looks again
+    old = parent["candidate_sha"]
+    if head == old or not _is_ancestor(root, old, head):
+        return              # unchanged, or rewritten by someone else: not the board's to take
+    db.update(parent["id"], candidate_sha=head)
+    print(f"{parent['id']}: its branch carries {tid}'s merged PR ({url}): candidate {old[:12]} → {head[:12]}",
+          file=sys.stderr)
+
+
+def _merged(db, row, prs: list[dict] | None, settle_only: bool = False) -> None:
     """The task's PR merged. The task is merged once the PR's changes reached the trunk: a stacked PR merged
     before refresh retargeted it lands in its dependency's branch, and only that branch's own PR, merged
-    later, carries it on. Merged after that PR, its changes are stranded: the task becomes `conflict`, and
-    running it replays them onto the trunk in a new PR. Changes on the trunk by other means count."""
+    later, carries it on (the board then takes that branch's head as its task's candidate). Merged after that
+    PR, its changes are stranded: the task becomes `conflict`, and running it replays them onto the trunk in a
+    new PR. A merge commit on the trunk, or the changes on the trunk by other means, count as merged.
+    `settle_only` only ever marks the task merged, for a task whose last run failed after its PR merged."""
     from .pipeline import PipelineError, git
     from .stack import landing, on_trunk
     tid, url = row["id"], row["pr_url"]
     pr = next((p for p in prs or [] if p["url"] == url), None)
     if pr is None:          # gh can't list the PRs now: a PR on the trunk is merged, a stacked one waits
-        if not (row["base_ref"] or "").startswith("factory/"):
+        if not (row["base_ref"] or "").startswith("factory/") and not settle_only:
             db.update(tid, status="merged")
         return
     where = landing(prs, pr)
@@ -473,12 +519,20 @@ def _merged(db, row, prs: list[dict] | None) -> None:
         git(root, "fetch", "-q", "origin", trunk)
     except PipelineError:
         pass                # judge against the trunk as last fetched; the next refresh looks again
-    if row["base_sha"] and row["candidate_sha"] and \
+    how = None
+    if (merge := _merge_commit(url)) and _is_ancestor(root, merge, f"origin/{trunk}"):
+        how = "its merge commit is on"          # exact, even when later changes rewrote the same lines
+    elif row["base_sha"] and row["candidate_sha"] and \
             on_trunk(root, row["base_sha"], row["candidate_sha"], f"origin/{trunk}"):
-        db.update(tid, status="merged", note=f"{url} merged into {base}, not {trunk}, but its changes are on {trunk}")
-        print(f"{tid}: merged ({url} merged into {base}, and its changes are on {trunk})", file=sys.stderr)
+        how = "its changes are on"
+    if how:
+        db.update(tid, status="merged", note=f"{url} merged into {base}, not {trunk}, but {how} {trunk}")
+        print(f"{tid}: merged ({url} merged into {base}, and {how} {trunk})", file=sys.stderr)
+        return
+    if settle_only:
         return
     if where == "waiting":
+        _carry(db, root, tid, url, base)
         note = f"{url} merged into {base}: it reaches {trunk} when the PR of {base} merges"
         if row["note"] != note:
             db.update(tid, note=note)
@@ -497,11 +551,12 @@ def _refresh(db) -> None:
     _adopt(db, repo_root())
     prs: list[dict] | None = None
     listed = False
+    landed: set[str] = set()        # PRs merged into a branch that still has to reach the trunk: not restacked
     for row in db.tasks():
         if row["status"] in ACTIVE and row["pid"] and not pid_alive(row["pid"]):
             db.update(row["id"], status="failed", progress=None,
                       note=f"process {row['pid']} exited mid-run (killed or crashed); `factory clean` then rerun")
-        if row["status"] in ("pr_open", "conflict", "ci_failed", "changes_requested") and row["pr_url"]:
+        if row["status"] in CARRIERS and row["pr_url"]:
             pr = _pr_state(row["pr_url"])
             is_open = row["status"] in ("pr_open", "ci_failed", "changes_requested")
             status_now = row["status"]
@@ -512,6 +567,8 @@ def _refresh(db) -> None:
                 if row["candidate_sha"] and db.task(row["id"])["status"] == "merged":
                     from . import merges
                     merges.record(db, repo_root(), row, pr.get("headRefOid"))
+                elif db.task(row["id"])["status"] != "merged":
+                    landed.add(row["id"])
             elif pr.get("state") == "CLOSED":
                 db.update(row["id"], status="abandoned", note="PR closed without merge")
             # A stacked PR is checked against its dependency by restack below, not by GitHub.
@@ -562,12 +619,57 @@ def _refresh(db) -> None:
                     elif red == [] and status_now == "ci_failed":
                         db.update(row["id"], status="pr_open", note=None)
                         print(f"{row['id']}: CI no longer fails", file=sys.stderr)
+        elif row["status"] == "failed" and row["pr_url"]:
+            # A rework or replay that failed after its PR had merged after all: settle it if it reached the trunk.
+            if _pr_state(row["pr_url"]).get("state") == "MERGED":
+                if not listed:
+                    prs, listed = _factory_pr_list(repo_root()), True
+                _merged(db, row, prs, settle_only=True)
     from .stack import restack
     for row in db.tasks():          # by id, so a plan's stack moves bottom-up
-        if row["status"] in ("pr_open", "ci_failed", "changes_requested") and row["stacked_on"]:
-            msg = restack(db, repo_root(), factory_home(), row["id"])
+        if row["status"] in ("pr_open", "ci_failed", "changes_requested") and row["stacked_on"] \
+                and row["id"] not in landed:
+            try:
+                msg = restack(db, repo_root(), factory_home(), row["id"])
+            except Exception as e:          # one PR that can't be moved must not stop the others
+                note = _restack_failure(row["id"], e)
+                db.update(row["id"], note=note)
+                print(f"{row['id']}: {note}", file=sys.stderr)
+                continue
+            if (db.task(row["id"])["note"] or "").startswith(RESTACK_FAILED):
+                db.update(row["id"], note=None)         # it moved this time
             if msg:
                 print(msg, file=sys.stderr)
+
+
+RESTACK_FAILED = "refresh couldn't restack its PR"
+
+
+def _restack_failure(tid: str, e: Exception) -> str:
+    """The task's note when its restack raised: the PR keeps its head and status until a refresh moves it."""
+    from .pipeline import branch_name
+    text = str(e)
+    if "stale info" in text or "[rejected]" in text:
+        why = (f"{branch_name(tid)} has moved since the factory last pushed it, so the rebased commits were not "
+               f"pushed")
+    else:
+        why = (text.strip().splitlines() or [type(e).__name__])[-1]
+    return f"{RESTACK_FAILED}: {why}. Check its branch, then `factory status --refresh` again"
+
+
+def _branch_moved(root: Path, row) -> str | None:
+    """Why a rework of the task's open PR would end in a refused push: its branch on origin isn't at the candidate
+    the board recorded. None when it is, or when origin can't say."""
+    from .pipeline import branch_name
+    branch = row["branch"] or branch_name(row["id"])
+    p = subprocess.run(["git", "ls-remote", "origin", f"refs/heads/{branch}"], cwd=root, capture_output=True,
+                       text=True)
+    head = p.stdout.split()[0] if p.returncode == 0 and p.stdout.split() else None
+    if not head or not row["candidate_sha"] or head == row["candidate_sha"]:
+        return None
+    return (f"{branch} is at {head[:12]}, not at the candidate {row['candidate_sha'][:12]} the board recorded, so "
+            f"this run's push would be refused. `factory status --refresh` takes up a PR merged into that branch; "
+            f"if someone pushed to it, `factory run {row['id']} --force` rebuilds the task from scratch")
 
 
 def _detail(db, r) -> str:
