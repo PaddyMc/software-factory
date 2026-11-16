@@ -685,15 +685,18 @@ def cmd_sync(a) -> int:
         print("contracts invalid (fix, then sync):\n  " + "\n  ".join(errs), file=sys.stderr)
         return 1
     db = _db()
-    added, updated, orphaned = db.sync(tasks)
-    print(f"synced {len(tasks)} tasks from the plans: {len(added)} added, {len(updated)} updated")
-    for t in orphaned:
-        print(f"  note: {t} is in the db but no longer in any plan")
-    ready = [r["id"] for r in db.tasks() if r["status"] == "queued" and db.ready(r["id"])]
-    print("ready to run: " + (", ".join(ready) if ready else "none"))
-    print("run a whole plan: factory run <plan>   (e.g. factory run "
-          + contracts.plan_name(next(iter(tasks.values())).plan) + ")" if tasks else "")
-    return 0
+    try:
+        added, updated, orphaned = db.sync(tasks)
+        print(f"synced {len(tasks)} tasks from the plans: {len(added)} added, {len(updated)} updated")
+        for t in orphaned:
+            print(f"  note: {t} is in the db but no longer in any plan")
+        ready = [r["id"] for r in db.tasks() if r["status"] == "queued" and db.ready(r["id"])]
+        print("ready to run: " + (", ".join(ready) if ready else "none"))
+        print("run a whole plan: factory run <plan>   (e.g. factory run "
+              + contracts.plan_name(next(iter(tasks.values())).plan) + ")" if tasks else "")
+        return 0
+    finally:
+        db.close()
 
 
 def cmd_logs(a) -> int:
@@ -1034,10 +1037,74 @@ def cmd_bench_run(a) -> int:
     try:
         return run_bench(root, cases_dir=a.cases, case_ids=a.case_ids, flow_names=a.flow_names,
                          models=a.models, repeat=a.repeat, max_cost=a.max_cost,
-                         max_attempts=a.max_attempts, dry_run=a.dry_run, no_sandbox=a.no_sandbox)
+                         max_attempts=a.max_attempts, dry_run=a.dry_run, no_sandbox=a.no_sandbox,
+                         parallel=a.parallel)
     except BenchError as e:
         print(e, file=sys.stderr)
         return 1
+
+
+def cmd_bench_report(a) -> int:
+    from .bench import report as R
+
+    try:
+        run_dir = R.resolve(factory_home(), a.run)
+        results = R.load(run_dir)
+    except R.ReportError as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(R.header(results))
+    print()
+    print(R.summary(results))
+    if a.cells:
+        print()
+        lines = R.cell_lines(results, run_dir)
+        if lines:
+            print("\n".join(lines))
+    return 0
+
+
+def cmd_bench_compare(a) -> int:
+    from .bench import report as R
+
+    try:
+        a_dir = R.resolve(factory_home(), a.run_a)
+        a_results = R.load(a_dir)
+        b_dir = R.resolve(factory_home(), a.run_b)
+        b_results = R.load(b_dir)
+    except R.ReportError as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(R.compare(a.run_a, a_results, a.run_b, b_results))
+    return 0
+
+
+def cmd_bench_list(a) -> int:
+    from .bench import report as R
+
+    rows = []
+    for run_dir in reversed(R.runs(factory_home())):
+        try:
+            results = R.load(run_dir)
+        except R.ReportError as e:
+            print(e, file=sys.stderr)
+            continue
+        rows.append(R.list_row(run_dir.name, results))
+    print("\n".join(rows) if rows else "no bench runs yet")
+    return 0
+
+
+def cmd_bench_cases(a) -> int:
+    from .bench import cases
+
+    try:
+        loaded = cases.load_cases([a.cases] if a.cases else None)
+    except cases.CaseError as e:
+        print(e, file=sys.stderr)
+        return 1
+    for case in loaded:
+        print(f"{case.id:<18} {case.kind:<12} {case.title}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1098,9 +1165,28 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--repeat", type=int, default=1, metavar="N", help="repeat each variant and case N times")
     s.add_argument("--max-cost", type=float, metavar="USD", help="required total budget in USD")
     s.add_argument("--max-attempts", type=int, default=3, metavar="N", help="max build attempts per cell")
+    s.add_argument("--parallel", type=int, default=1, metavar="N",
+                   help="max cells running at once, each a child process (default 1: sequential)")
     s.add_argument("--dry-run", action="store_true", help="print variants, keys and cells without running anything")
     s.add_argument("--no-sandbox", action="store_true", help="run commands without bubblewrap (unsafe)")
     s.set_defaults(fn=cmd_bench_run)
+
+    s = bench_sub.add_parser("report", help="one run's scores per variant and case (default: the newest run)")
+    s.add_argument("run", nargs="?", metavar="RUN")
+    s.add_argument("--cells", action="store_true", help="list every cell and its directory")
+    s.set_defaults(fn=cmd_bench_report)
+
+    s = bench_sub.add_parser("compare", help="compare two runs' scores and setups")
+    s.add_argument("run_a", metavar="RUN_A")
+    s.add_argument("run_b", metavar="RUN_B")
+    s.set_defaults(fn=cmd_bench_compare)
+
+    s = bench_sub.add_parser("list", help="list past runs, newest first")
+    s.set_defaults(fn=cmd_bench_list)
+
+    s = bench_sub.add_parser("cases", help="list the available bench cases")
+    s.add_argument("--cases", metavar="DIR", help="load cases from DIR instead of the shipped suite")
+    s.set_defaults(fn=cmd_bench_cases)
 
     s = sub.add_parser("stop", help="stop a running task, or a plan run and every task it started")
     s.add_argument("target", help="a task on the board, or a plan (path, or file name without .md)")

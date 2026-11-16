@@ -89,6 +89,7 @@ Dotted lines are observability data, not control flow.
 | State | `db.py` | SQLite `tasks` (status, branch, SHAs, PR, pid, heartbeat, activity, cost) and `runs` (every role step: outcome, report, steps, tokens, cost, refused calls, transcript path) |
 | Observability | `observe.py`, `log.py`, `prices.py` | Dashboard, merged logs, traces, transcripts, liveness, OpenRouter cost |
 | Web | `factory/web/` | `factory web`: the board, task, transcript, activity and run-form pages, served on 127.0.0.1 only. Reads the board through per-request read-only connections; every change is a `factory` command started as a detached job (see [The web page](#the-web-page)) |
+| Bench | `factory/bench/` — `cases.py`, `run.py`, `report.py` | Fixture cases: load, materialize to a deterministic base commit, score hidden tests; `bench run`: variants, isolated cells, budget, `results.json`; `report`, `compare`, `list`, `cases` |
 
 ---
 
@@ -462,6 +463,80 @@ The effective flow has exactly one gates step: when omitted, one is inserted aft
 
 ---
 
+## Evaluating flows (factory bench)
+
+`factory bench` compares flows, models and prompt overrides on a fixed suite of fixture cases, isolated from your board and checkout. Real tasks are not comparable — every task differs — and their gates grade tests written by the same builder, whereas bench scores every candidate against the same hidden tests. For example:
+
+```bash
+factory bench run --flow default --flow lean --repeat 2 --max-cost 12
+```
+
+A **variant** is a flow, optionally with one model on every agent step (`FLOW` or `FLOW@MODEL`). Repeating `--model` makes one variant per flow and model. Flows, `models`, `max_steps` and prompt overrides resolve from the invoking repository just as they do for `factory run`. The [reference](reference.md#bench) lists every flag and the case format.
+
+```text
+cases (shipped fixtures, or --cases DIR)     variants: --flow × --model        × --repeat
+            │                                          │
+            └──────────────────┬───────────────────────┘
+                               ▼
+            cell = (variant, case, repeat)   $FACTORY_HOME/bench/RUN/cells/…   (a factory home)
+            ┌──────────────────────────────────────────────────────────────────────────────┐
+            │ materialize the case → repo/ (fixed base commit, no hidden/ or solution/)      │
+            │ Pipeline: the variant's flow and model, the case's gates, no PR               │
+            │   verified ──► lay hidden/ over the candidate ──► hidden commands in sandbox  │
+            │                    pass: solved          fail: false_pass                     │
+            │   failed / cost limit / exception ──► failed / stopped / error                │
+            └──────────────────────────────────────────────────────────────────────────────┘
+                               ▼
+            results.json (rewritten after every cell) ──► report · compare · list
+```
+
+**Cells.** Each started `(variant, case, repeat)` cell gets its own factory home at `$FACTORY_HOME/bench/RUN/cells/…`, containing `factory.db`, `repo/`, `worktrees/`, `logs/`, `transcripts/` and, after hidden scoring, `hidden.log`. Inspect one with `FACTORY_HOME=<cell> factory show <case id>-t01`, or use the same prefix with `factory trace` or `factory transcript`. The cell's repository has no remote. A run never writes the invoking repository's `factory.db`, creates branches or worktrees there, pushes, or calls `gh`.
+
+### Cell outcomes
+
+| Outcome | Meaning | Counted in solved rate |
+|---|---|---|
+| `solved` | The pipeline ended `verified` and the hidden tests passed | Yes, as a solve |
+| `false_pass` | The pipeline ended `verified`, but the hidden tests failed: the builder's own tests missed the defect | Yes, but not as a solve |
+| `failed` | The pipeline failed, for example after exhausting its build attempts | Yes, but not as a solve |
+| `stopped` | The cell hit its cost limit | No |
+| `error` | An exception, interruption or crashed child process | No |
+| `skipped` | The cell never started because the budget was spent | No |
+
+The solved rate is therefore `solved / (solved + false_pass + failed)`, not the fraction of all requested cells. Hidden tests run on the commit the gates passed, in a scratch git worktree with `hidden/` laid over it. A test command that selects zero tests is inconclusive, never a pass. Reports also show cells absent from an interrupted run's records as **`not run`**; they do not enter the solved-rate denominator or the cost, attempt and time means.
+
+### Keeping the hidden tests hidden
+
+| Path to the answers | Guard |
+|---|---|
+| The repository the agents work in | Materialization never copies `hidden/` or `solution/` into the case repository. Scoring lays `hidden/` over a scratch worktree only after the pipeline ends |
+| Files visible to sandboxed commands | Shipped cases bind nothing from `$HOME` (`ro_binds`, `rw_binds` and `path` are empty). Before a run, preflight tries to read every hidden and solution file **from inside each case's sandbox** and refuses the run if any is readable |
+| The agents' file tools | Preflight also refuses a case whose `dependency_sources` contain its hidden or solution directory |
+| `--no-sandbox` | Allowed but unsafe: it is recorded in `results.json`, and report and comparison headers warn `unsandboxed: agents could read the hidden tests` |
+
+### Budget
+
+Bench runs spend real money, so `--max-cost USD` is required except with `--dry-run`; without it the run refuses with `--max-cost is required (bench runs spend real money); pass --dry-run to preview`. Each cell's pipeline receives the budget left when it starts as its own cost limit. Once the run's recorded cost reaches `--max-cost`, no later cell starts and the remaining cells are recorded `skipped`.
+
+With `--parallel N`, in-flight cells share the remaining budget and can overshoot the total by what they spend before their own limits stop them. A model with no known price produces a warning that `--max-cost` cannot limit it. The command exits 0 only when no cell ended `error`, `stopped` or `skipped`; otherwise it exits 1.
+
+### What `results.json` records
+
+`$FACTORY_HOME/bench/RUN/results.json` has four top-level keys:
+
+- **`run`:** run id, UTC start and end, factory version, whether the sandbox was on, total maximum cost, per-cell maximum attempts and repeat count. The end stays null until the run finishes.
+- **`cases`:** per case, its kind, deterministic base commit sha once materialized, and `fixture_sha`, a hash of every file and relative path in the case directory.
+- **`variants`:** per variant, its flow and model override, then every agent step's name, kind, resolved model, step limit and `prompt_sha` (a hash of the whole resolved prompt file, including frontmatter).
+- **`cells`:** per cell, variant, case and repeat; outcome, attempts, cost, seconds, model calls, input and output tokens, reviewer `CHANGES` verdicts, step-limit stops, failing gates from the last gates report and its run-relative directory.
+
+The file is atomically rewritten after every cell, so an interrupted run retains every finished cell and can still be reported or compared.
+
+### Reading results
+
+`factory bench report [RUN] --cells` shows one run and its individual cells, `factory bench compare RUN_A RUN_B` shows A → B scores while flagging changed cases, models and prompts, and `factory bench list` finds past run ids. Five cases and one repeat make comparisons noisy: use at least `--repeat 3` before acting on a difference, and read counts and means rather than a single percentage. The [reference](reference.md#bench) explains the columns and comparison checks.
+
+---
+
 ## Gates
 
 They run in the sandbox against the exact candidate commit, in this order. Gates marked *configured* exist only when the project sets them up:
@@ -516,6 +591,7 @@ The agent interface is a single seam: a role receives a `Ctx` with `log`, `progr
 ## Known limitations and next steps
 
 - **The default flow reviews before the gates**, so its reviewer can approve builds that then fail mechanical checks. A flow can put the gates first; see [Agent flows](#agent-flows).
+- **A few cases and repeats make bench comparisons noisy.** Five cases and one repeat can't tell two good flows apart; use `--repeat` (3 or more) and read counts and means, not a single percentage. See [Evaluating flows](#evaluating-flows-factory-bench).
 - **Context cost:** whole files stay in context for every later step. Planned: capped tool output, a slimmer system prompt, summarizing old steps.
 - **The builder re-explores what the planner already read.** Planned: the planner hands over exact files and line ranges.
 - **Conflicts and CI failures are found on refresh, not live.** GitHub computes `mergeable` lazily, so a PR that just started conflicting may show up one `status --refresh` later.
