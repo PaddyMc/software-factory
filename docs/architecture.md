@@ -88,6 +88,7 @@ Dotted lines are observability data, not control flow.
 | Isolation | `sandbox.py` | bubblewrap: read-only host, empty `$HOME`/`/tmp`/`/run`, cleared environment, no network unless asked |
 | State | `db.py` | SQLite `tasks` (status, branch, SHAs, PR, pid, heartbeat, activity, cost) and `runs` (every role step: outcome, report, steps, tokens, cost, refused calls, transcript path) |
 | Observability | `observe.py`, `log.py`, `prices.py` | Dashboard, merged logs, traces, transcripts, liveness, OpenRouter cost |
+| Web | `factory/web/` | `factory web`: the board, task, transcript, activity and run-form pages, served on 127.0.0.1 only. Reads the board through per-request read-only connections; every change is a `factory` command started as a detached job (see [The web page](#the-web-page)) |
 
 ---
 
@@ -341,6 +342,31 @@ Factory task commits have subject `factory(ID): GOAL`, with GOAL shortened at a 
 **Put the PR title on the trunk.** In the repository's settings (Settings → Pull Requests), set the squash-merge default commit message to the pull request title. A squash merge then lands the verifier's title, prefixed by the task id, instead of the less descriptive commit subject. Without that setting, GitHub uses the commit subject for a one-commit PR's squash merge. The factory cannot put the verifier's title into the candidate commit itself: commits are made before the verifier runs, and rewriting one afterwards would push a commit the gates never saw.
 
 **The full material.** The planner's plan is the plan run's report. `factory show TASK` prints it and every agent's full report; `factory show TASK --step STEP` prints one step's report, and the transcripts show exactly what the model saw and did. The task page served by `factory web` also shows every run's full report. Nothing is lost when the PR body cleans, caps or omits a report.
+
+---
+
+## The web page
+
+`factory web [--port N] [--no-open]` binds 127.0.0.1 only, on port 8765 by default. If 8765 is busy and no port was given it picks a free one; a busy explicit `--port` exits 1. It reuses `observe`, `db.readiness` and `scheduler.startable`, so the page and `factory top` never disagree, and every page works without JavaScript. It serves six pages:
+
+- `/` — the board: what needs you, counts, running tasks and every plan;
+- `/tasks/TASK` — the next step and note, contract, runs with reports, and the last 200 log lines;
+- `/tasks/TASK/runs/RUN` — one agent run's transcript;
+- `/activity` — commands from the page with their output, and every task's log merged;
+- `/run?plan=…` and `/run?task=…` — what will run, the required cost cap and other limits, the exact command and the cost warning;
+- `/confirm` — the consequences of Stop or Remove worktree before the command is run.
+
+**The server only reads the board and every change is a `factory` command run as a job.** After the CLI's one startup migration open, each request reads through its own `file:PATH?mode=ro` SQLite connection, so the web application cannot write the board. Every change is `factory sync`, `factory status --refresh`, `factory abandon`, `factory requeue`, `factory clean`, `factory stop` or `factory run`, started detached in its own session. The command, output and result are recorded under `$FACTORY_HOME/web/jobs/NNNNNN/`. Jobs survive the server stopping, a restart finds them, and only the newest 200 directories are kept. The activity page lists the newest 50 of those retained commands with their output.
+
+Safeguards mirror the fact that this is a local control surface, not a general web service:
+
+- **Host check.** The Host header's name, without its port, must be `127.0.0.1` or `localhost`; anything else gets 403. This blocks DNS rebinding while letting an SSH tunnel through on any local port.
+- **Token and origin checks.** POST requires the server's random startup token from a hidden field only its own pages carry. `Origin`, when present, must be the server's own origin, and `Sec-Fetch-Site`, when present, must be `same-origin`. The wrong content type gets 415 and a body over 16 KB gets 413. A run additionally needs the form's cost cap.
+- **Response headers.** Every response has a `Content-Security-Policy` allowing no inline scripts or styles, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `Cache-Control: no-store`; no CORS headers are sent. Only a fixed list of static files is served. One escaping helper handles every dynamic value, and externally supplied URLs become links only for http/https.
+
+**Loopback only.** There is no `--host` option. To reach another machine's board, tunnel with `ssh -L 8765:127.0.0.1:8765 HOST`, then open `http://127.0.0.1:8765/`.
+
+**WAL mode.** The board opens in WAL mode with a 30-second busy timeout, so the page's 2-second refreshes read alongside parallel runs without `database is locked`. Heartbeats and progress writes that still can't get the lock are skipped rather than ending a run. WAL needs a local filesystem, so `$FACTORY_HOME` must not live on a network share.
 
 ---
 

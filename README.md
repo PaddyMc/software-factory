@@ -49,7 +49,10 @@ factory status                  # the board: ready / waiting / running / PR open
 factory run <plan>              # every task in a plan, one PR each (a plan's file name or path)
 factory run <task-id>           # one task, in the foreground
 factory top                     # live dashboard, in another terminal
+factory web                     # the board as a page on 127.0.0.1:8765, with a button per command
 ```
+
+`factory web` opens a page that says what needs you, where every button runs the `factory` command you'd type ([the web page](docs/reference.md#the-web-page)); `factory stop <task>` stops one running task.
 
 A task whose dependency isn't merged yet is built on top of the dependency's open PR, so one run covers the whole plan. Merge from the bottom of each stack up, and after each merge run:
 
