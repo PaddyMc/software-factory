@@ -86,8 +86,8 @@ Dotted lines are observability data, not control flow.
 | Checks | `gates.py`, `verification.py` | Conflict markers, plan untouched, and the configured session-log, e2e, unit and verification checks. Zero tests selected counts as failed |
 | GitHub | `github.py` | Which identity: a `GH_TOKEN`/`GITHUB_TOKEN` when set (`gh` reads it; git's github.com fetches and pushes go over HTTPS with it), else the gh login and git's own credentials |
 | Isolation | `sandbox.py` | bubblewrap: read-only host, empty `$HOME`/`/tmp`/`/run`, cleared environment, no network unless asked |
-| State | `db.py` | SQLite `tasks` (status, branch, SHAs, PR, pid, heartbeat, activity, cost) and `runs` (every role step: outcome, report, steps, tokens, cost, refused calls, transcript path) |
-| Observability | `observe.py`, `log.py`, `prices.py` | Dashboard, merged logs, traces, transcripts, liveness, OpenRouter cost |
+| State | `db.py` | SQLite `tasks` (status, branch, SHAs, PR, pid, heartbeat, activity, cost) and `runs` (every role step: outcome, report, steps, tokens, cost, refused calls, transcript path, model and `prompt_version`) |
+| Observability | `observe.py`, `log.py`, `prices.py`, `merges.py`, `stats.py` | Dashboard, merged logs, traces, transcripts, liveness, OpenRouter cost, merge records and cross-task statistics |
 | Web | `factory/web/` | `factory web`: the board, task, transcript, activity and run-form pages, served on 127.0.0.1 only. Reads the board through per-request read-only connections; every change is a `factory` command started as a detached job (see [The web page](#the-web-page)) |
 | Bench | `factory/bench/` — `cases.py`, `run.py`, `report.py` | Fixture cases: load, materialize to a deterministic base commit, score hidden tests; `bench run`: variants, isolated cells, budget, `results.json`; `report`, `compare`, `list`, `cases` |
 
@@ -463,6 +463,55 @@ The effective flow has exactly one gates step: when omitted, one is inserted aft
 
 ---
 
+## Measuring the factory
+
+The board records not only what each run did, but which instructions it ran under and what eventually merged. `factory stats` turns those records into a cross-task view; the [reference](reference.md#measuring-the-factory) has every flag and metric definition.
+
+### Prompt versions
+
+Every agent run records a 12-hex `prompt_version`: the first 12 hexadecimal characters of the SHA-256 of its system prompt with the per-task parts left out. The hash covers:
+
+- the step's prompt file **as loaded**: its own `.factory/agents/<step>.md` for a custom step name, else its kind's override, else the shipped prompt;
+- the **Project rules** block generated from `.factory/config.yaml`;
+- the repository guidance from the first existing file in `guidance`; and
+- anything else later added to the system prompt.
+
+The contract block and the `Today: …` line do not count. Two runs under the same instructions therefore share a version, while an edit to a prompt, the project rules or the guidance makes a new one. Runs with no agent — `pr`, `ci`, `human_review`, the gates step and a clean conflict replay — record no version. The full system prompt stays in each agent run's transcript, so the text behind two versions can be compared with `factory transcript`; `factory show` prints the version beside the model.
+
+### Merge records
+
+When `factory status --refresh` marks a task with a candidate as merged, it records one `merge` run at attempt 0, with the PR's final head as its SHA. A task gets at most one. A PR taken up from GitHub as already merged has no candidate to compare, so it gets no merge run.
+
+| PR's final head | Outcome | Report |
+|---|---|---|
+| The candidate | `as_built` | Merged at the factory's candidate |
+| The candidate's descendant, and a first-parent, no-merges `git log candidate..head` is empty | `as_built` | Only merges of the base followed the candidate, such as GitHub's *Update branch* |
+| That log is non-empty | `edited` | The log with `--stat -p`: the human's commits and their diffs |
+| The candidate is not an ancestor of the head (a force-push) | `edited` | A note that the head was rewritten, plus `git diff --stat candidate head` |
+| Missing or unreadable | No run | The task is still marked merged; a note on stderr says why |
+
+The first-parent, `--no-merges` walk is what distinguishes a person's commits from a merge of the base into the PR: the base-update merge itself is not a human edit. Reports are capped at 20,000 characters. To read the head, refresh fetches the task's branch, falling back to `refs/pull/<number>/head` when GitHub has deleted the branch. `factory show TASK --role merge` shows the record.
+
+### `factory stats`
+
+```text
+factory stats [--since DATE] [--until DATE] [--plan P] [--json]
+```
+
+Stats reads `factory.db` without writing to it, calling GitHub or calling a model. Over the selected window it reports:
+
+- task, PR, merged and failed counts; first-attempt pass rate; attempts per PR; cost per merged PR, with merges containing unpriced agent runs counted apart; reviewer `CHANGES` rate; step-limit stops by step; conflict, CI and review rework shares; and the human-edit share;
+- gate failures by gate, read from the `FAIL` rows in failed verify runs' gate tables; and
+- **one row per (flow, step, model, prompt version)** over agent runs: runs, mean model calls, step-limit stops, refused tool calls, cost, outcome counts and the version's first-seen date.
+
+A prompt, rules or guidance change therefore appears as a new version with its own rows rather than being averaged into the old one. Runs recorded before flows show flow `-` and their role as the step; runs without a recorded version show `-`. First-seen dates span the whole database, not just the selected window.
+
+### Known limitations
+
+Before/after comparisons by prompt version are **confounded by the task mix**. Later tasks differ from earlier ones, and few runs share a version, so a version-over-version delta is a signal, not proof that a prompt or model change helped. Run counts and first-seen dates make small samples visible. The controlled comparison is `factory bench` ([its own plan](plans/bench.md)): fixed cases replayed under different prompts and models. Until it exists, stats cannot separate a change's effect from the tasks that happened to run.
+
+Including repository guidance in the version is deliberate: every `AGENTS.md` edit starts a new version because it changes what every agent is told.
+
 ## Evaluating flows (factory bench)
 
 `factory bench` compares flows, models and prompt overrides on a fixed suite of fixture cases, isolated from your board and checkout. Real tasks are not comparable — every task differs — and their gates grade tests written by the same builder, whereas bench scores every candidate against the same hidden tests. For example:
@@ -600,6 +649,7 @@ The agent interface is a single seam: a role receives a `Ctx` with `log`, `progr
 - **Two boards can run the same task at once.** Nothing claims a task across boards. Planned: a draft PR as the claim.
 - **A PR stacked on several dependencies is taken up as stacked on the one it targets**, since the others are merged into its branch and the PR doesn't name them.
 - **A PR taken up from GitHub treats the reviews that existed at take-up as addressed**; a watermarked review before the take-up never triggers a rework.
+- **Before/after comparisons by prompt version are confounded by the task mix.** Later tasks differ and few runs share a version, so `factory stats` gives signals, not proof, until `factory bench` replays fixed cases under different prompts and models; see [Measuring the factory](#measuring-the-factory).
 - **Linux only**: the sandbox is bubblewrap.
 - **Branch protection** on your default branch is a GitHub setting; the factory and CI report, they don't enforce merges.
 

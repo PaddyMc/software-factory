@@ -7,7 +7,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | ✓ | Read CI on open PRs and fix failures. Done: [CI failures](docs/architecture.md#ci-failures) | — | — |
 | ✓ | Act on human PR review comments. Done: [Review comments](docs/architecture.md#review-comments) | — | — |
 | 2 | The builder writes the test that judges it. Planned as a test step: [strict-flow](docs/plans/strict-flow.md) | small | — |
-| 3 | Nothing measures the factory itself. `factory stats` planned: [measure](docs/plans/measure.md); [`factory bench`](#8-compare-flows-and-setups) built | medium | — |
+| ✓ | Nothing measures the factory itself. Done: `factory stats` ([Measuring the factory](docs/architecture.md#measuring-the-factory)) and `factory bench` ([Evaluating flows](docs/architecture.md#evaluating-flows-factory-bench)) | — | — |
 | 4 | Learn from feedback. Planned as a knowledge crew: [wiki](docs/plans/wiki.md) | medium | 1, 3 |
 | 5 | Steer a running agent | small | — |
 | 6 | Runs need this machine | large | a shared board |
@@ -72,9 +72,7 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
   Break it down by role model. The one thing missing is whether the human changed a PR before merging it; record that at refresh by comparing the merged tree with the candidate.
 - **`factory bench`**: replay a fixed set of merged tasks from their original bases with `--no-pr`, in a throwaway `FACTORY_HOME`, with a given `--model`, `models:` setting or prompt override. Compare gate results, attempts and cost against a stored baseline. Run it before merging changes to role prompts.
 
-**Plan.** [docs/plans/measure.md](docs/plans/measure.md) (planned 2026-11-02, tasks `measure-t01`…`t04`, after [agent-flows](docs/plans/agent-flows.md)) covers `factory stats`. It goes beyond this sketch:
-- Every agent run records a prompt version: a hash of its system prompt without the contract and the date. Stats breaks runs down by flow step, model and version, so a change to a prompt, AGENTS.md or the wiki can be compared before and after on real runs.
-- Refresh records whether the human changed a PR before merging it as a `merge` run: the commits pushed after the candidate, ignoring merges from the base. It does not compare trees.
+**Plan.** The [measure](docs/plans/measure.md) plan (tasks `measure-t01`…`t04`, after [agent-flows](docs/plans/agent-flows.md)) landed: every agent run records a prompt version, refresh records whether the human changed a PR before merging it as a `merge` run, and `factory stats` reports those records by flow, step, model and version. See [Measuring the factory](docs/architecture.md#measuring-the-factory).
 
 `factory bench` is built: [item 8](#8-compare-flows-and-setups). It is the controlled comparison stats can't give.
 

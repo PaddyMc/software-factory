@@ -188,7 +188,7 @@ Use `factory init --no-skills` to skip the skills, and `factory init --force` to
 | `factory prompt ROLE\|STEP [--flow F]` | Print a role's or flow step's prompt as the agents get it, with its model and step limit. A step name resolves within `--flow`, defaulting to the config's `flow` |
 | `factory validate-plan [PLAN…]` | Check contracts |
 | `factory sync` | Load every contract from the plans into the db (statuses kept) |
-| `factory status [PLAN] [--refresh] [--json]` | The board, grouped by plan with a task counter. `--refresh` picks up merged or closed PRs (a stacked PR merged into a dependency's branch counts once that branch's PR carries it to the trunk; one stranded there becomes `conflict`), takes up open or merged PRs opened from another board, moves stacked PRs whose dependencies merged, marks PRs that conflict with their base `conflict`, marks PRs a review requests changes on `changes_requested` and clears them when the request is approved or dismissed, and marks PRs whose CI fails `ci_failed`, and fails dead runs. Conflicts come first, then requested changes, then CI |
+| `factory status [PLAN] [--refresh] [--json]` | The board, grouped by plan with a task counter. `--refresh` picks up merged or closed PRs (a stacked PR merged into a dependency's branch counts once that branch's PR carries it to the trunk; one stranded there becomes `conflict`), takes up open or merged PRs opened from another board, moves stacked PRs whose dependencies merged, marks PRs that conflict with their base `conflict`, marks PRs a review requests changes on `changes_requested` and clears them when the request is approved or dismissed, and marks PRs whose CI fails `ci_failed`, and fails dead runs. For each task with a candidate whose PR merged, it records a `merge` run when the final head can be read: `as_built`, or `edited` with the human's commits. Conflicts come first, then requested changes, then CI |
 | `factory run PLAN [--flow NAME] [--parallel N] [--network-for T1,T2] [flags]` | Every task of the plan without a PR, one PR each, dependents stacked on open dependency PRs; PRs in `conflict` get their conflicts resolved, PRs in `ci_failed` get their CI fixed, and PRs in `changes_requested` get the review addressed. `--flow NAME` runs every child under that flow instead of the config's `flow` |
 | `factory run TASK [--flow NAME] [flags]` | Run one task in the foreground (stacked the same way) under `--flow NAME` instead of the config's `flow` when given. On a `conflict` task it resolves the conflicts, on a `ci_failed` task it fixes CI, and on a `changes_requested` task it addresses the review; `--force` rebuilds any of them from scratch instead |
 | `factory stop TARGET [--wait SECONDS]` | Stop a running task, or a running plan and every task it started: SIGTERM, then SIGKILL after SECONDS (default 10). TARGET is a task id or a plan name/path. A stopped task ends `failed` with a note saying it was stopped; its worktree and branch are kept |
@@ -198,7 +198,8 @@ Use `factory init --no-skills` to skip the skills, and `factory init --force` to
 | `factory logs TASK [-f] [-n N]` / `factory logs --all -f` | One task's log, or every task's log merged |
 | `factory trace TASK [--role R] [--step S] [--attempt N] [--all]` | Per-step model time, tool time, context size, cached tokens, output, cost, calls, largest results; `--step` filters by flow step |
 | `factory transcript TASK [--role R] [--step S] [--attempt N] [--all] [--full]` | Exactly what the model saw and did; `--step` filters by flow step |
-| `factory show TASK [--role R] [--step S]` | Every step's report and stats, labelled with its flow and step; `--step` filters by flow step. `--role human_review` shows the review brief a `changes_requested` rework gave the builder |
+| `factory show TASK [--role R] [--step S]` | Every step's report and stats, labelled with its flow, step, model and prompt version; `--step` filters by flow step. `--role human_review` shows the review brief a `changes_requested` rework gave the builder. `factory show TASK --role merge` shows a merged task's merge record |
+| `factory stats [--since DATE] [--until DATE] [--plan P] [--json]` | How the factory is doing over a window: outcomes, attempts, cost, gate failures, reworks, human edits and per-step measurements by flow, model and prompt version. See [Measuring the factory](#measuring-the-factory) |
 | `factory gates TASK [--ref R] [--base B] [--skip …]` | Deterministic gates only, in a throwaway worktree. The base defaults to the PR a stacked task is built on, else the default branch |
 | `factory requeue TASK…` | Put `failed` or `abandoned` tasks back to `queued` so the next plan run picks them up (refuses running, open-PR and merged tasks) |
 | `factory clean TASK` | Remove a task's worktree |
@@ -357,6 +358,76 @@ All five use only the Python standard library and declare `requires: [python3]`.
 
 ---
 
+## Measuring the factory
+
+### `factory stats`
+
+```text
+factory stats [--since DATE] [--until DATE] [--plan P] [--json]
+```
+
+Stats reads `factory.db` only: it does not write to the database, call GitHub or call a model.
+
+| Flag | Meaning |
+|---|---|
+| `--since DATE` | Select runs that started at or after this time. An ISO date means midnight UTC; an ISO datetime is also accepted, and a datetime without a zone means UTC. Omit for an open-ended start |
+| `--until DATE` | Select runs that started before this time, with the same date and UTC rules. Omit for an open-ended end |
+| `--plan P` | Restrict the report to one plan, named by its file name without `.md` or by its path |
+| `--json` | Print one JSON object with `window`, `summary`, `gates` and `steps`, instead of the text tables |
+
+The window is half-open: `started_at >= --since` and `started_at < --until`. A task is in the window when any of its runs is. Task-level metrics then use **all** of that task's runs, including ones outside the window; run-level metrics use only the selected runs. A step row's first-seen date spans the whole database, independently of both the window and plan filter.
+
+An empty window prints `no runs in the window` and exits 0, including with `--json`. A rate with no denominator shows `-` in text and `null` in JSON; means and costs with no denominator do the same. A malformed date is an error with exit 2.
+
+### Metric definitions
+
+| Metric | Definition |
+|---|---|
+| Window totals | Tasks with a selected run; tasks among them with a `pr` run (`PRs`); and those whose current status is `merged` or `failed` |
+| First-attempt pass rate | Tasks whose first `pr` run with outcome `opened` has attempt 1 ÷ tasks with a `build` run. Both task-level sets use all runs of the selected tasks |
+| Attempts per PR | Mean attempt of each task's first `pr` run with outcome `opened`, over selected tasks that opened a PR |
+| Cost per merged PR | For selected tasks now `merged`, Σ `cost_usd` over every run ÷ merged tasks with complete pricing. A merged task with any agent run whose price is unknown is excluded from that mean and counted separately as `unpriced_merged`; it is never counted as zero cost |
+| Reviewer CHANGES rate | Selected `review` runs whose outcome starts `CHANGES` ÷ selected `review` runs |
+| Gate failures | Per gate name, the `FAIL` rows (`| name | FAIL | … |`) in the gate tables of selected `verify` runs whose outcome is `fail` |
+| Step-limit stops | Per step, selected runs whose outcome ends `(step limit)` or `(graph recursion limit)` |
+| Reworks | Separately for conflict, CI and review: selected tasks with a `pr` run that also have respectively a `resolve`, `ci` or `human_review` run ÷ selected tasks with a `pr` run. These task-level checks use all runs |
+| Human edits | Selected `merge` runs with outcome `edited` ÷ selected `merge` runs |
+
+The **steps** table has one row per `(flow, step, model, prompt version)` over selected agent runs. Runs recorded before flows have flow `-` and their role as the step; an unrecorded prompt version is `-`.
+
+| Column | Meaning |
+|---|---|
+| `flow`, `step`, `model`, `version` | The grouping key: flow and step names, model identifier and 12-hex prompt version |
+| `runs` | Number of selected runs in the group |
+| `calls` | Mean model calls per run (the run's recorded `steps`) |
+| `stops` | Runs ending in either step-limit suffix above |
+| `refused` | Total refused tool calls |
+| `cost` | Σ recorded `cost_usd` for the group, in USD |
+| `outcomes` | Count of each outcome; an unfinished run counts as `running` |
+| `first seen` | UTC date of the earliest run with this grouping key anywhere in the database |
+
+### Prompt versions
+
+An agent run's `prompt_version` is the first 12 hex characters of the SHA-256 of its system prompt without the contract block and `Today: …` line. It covers the step's prompt as loaded (custom step override, kind override or shipped prompt), the generated project rules, the first existing repository-guidance file, and anything else added to the system prompt later. Thus identical instructions share a version, while a prompt, rules or guidance edit creates a new one. Non-agent runs have no version. `factory show TASK` prints each run's version beside its model; the full prompt remains available through `factory transcript`.
+
+Per-version before/after deltas are confounded by the changing task mix until `factory bench` provides controlled comparisons; see [Architecture: Known limitations](architecture.md#known-limitations).
+
+### Merge records
+
+Refresh records at most one `merge` run per task, at attempt 0, when a task with a candidate becomes `merged`. Its SHA is the PR's final head. Refresh fetches the task branch, or `refs/pull/<number>/head` if the branch has been deleted.
+
+| Final head | Outcome and report |
+|---|---|
+| Equal to the candidate | `as_built` |
+| A descendant with an empty `git log --first-parent --no-merges candidate..head` | `as_built`: only base merges, such as GitHub's *Update branch*, followed the candidate |
+| A descendant for which that log is non-empty | `edited`: the log with `--stat -p`, containing the human's commits and diffs |
+| Not a descendant of the candidate (a force-push) | `edited`: a rewritten-head note and `git diff --stat candidate head` |
+| Missing from GitHub, or the fetch fails | No merge run; the task remains merged and stderr says it cannot tell whether the PR was changed |
+
+Reports are capped at 20,000 characters. The first-parent, no-merges walk keeps base merges out of the human's commits. A PR taken up from GitHub as already merged has no candidate and gets no merge run. Use `factory show TASK --role merge` to read one task's record.
+
+---
+
 ## Several maintainers
 
 Each keeps their own board; GitHub is what they share. `factory sync && factory status --refresh` (and every plan run, which starts with a refresh) takes up the factory PRs this board didn't open: a `queued` or `failed` task with an open PR on `factory/TASK` becomes `pr_open`, with its candidate, base and stack read from the PR and its branch, and one with a merged PR becomes `merged`, with a warning when that PR merged into another task's branch rather than the trunk. Closed PRs are history and are ignored; holds (`abandoned`) and running tasks are left alone. Logs, transcripts and costs stay with the board that ran the task.
@@ -374,6 +445,7 @@ Each keeps their own board; GitHub is what they share. `factory sync && factory 
 | Status `DEAD` | The `factory run` process died (killed, crashed). `factory status --refresh` marks it failed; run the task or its plan again |
 | `cannot stack TASK: its open dependencies conflict` | Merge one of the dependencies' PRs, `factory status --refresh`, then run again |
 | Status `conflict` | The PR no longer applies to its base. `factory run TASK` (or its plan) resolves it; see [Merge conflicts](architecture.md#merge-conflicts) |
+| `TASK: merged; can't tell whether it was changed before merging (…)` | GitHub gave no final head or the fetch failed, so no `merge` run was recorded. The task is merged all the same; inspect the PR by hand if you need to know what changed |
 | A conflict resolution `failed` | The PR still holds its old head. Run the task again to rebuild it from scratch on the trunk |
 | Status `ci_failed` | CI fails on the PR's head. `factory show TASK --role ci` names the checks and shows the logs; `factory run TASK` (or its plan) fixes them; see [CI failures](architecture.md#ci-failures) |
 | Status `changes_requested` | A review requests changes on the PR's head, which is the factory's candidate. `factory status --refresh` marks it; `factory run TASK` (or its plan) addresses the review, and `factory show TASK --role human_review` shows the brief; see [Review comments](architecture.md#review-comments) |
