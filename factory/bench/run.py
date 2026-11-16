@@ -7,6 +7,7 @@ are resolved from the repository that invoked the bench.
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import datetime as dt
 import hashlib
@@ -16,12 +17,14 @@ import os
 import re
 import shlex
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .. import agents, factory_home, observe, prices
 from .. import config as C
@@ -31,6 +34,9 @@ from ..flows import Flow
 from ..log import RunLog, log_path
 from ..pipeline import Options, Pipeline, PipelineError, Stopped, create_worktree
 from . import cases, report
+
+
+POLL_SECONDS = 0.5
 
 
 class BenchError(RuntimeError):
@@ -43,6 +49,43 @@ class Variant:
     flow_name: str
     flow: Flow
     model: str | None
+
+
+@dataclass(frozen=True)
+class Cell:
+    variant: Variant
+    case: cases.Case
+    number: int
+    directory: Path
+    cost_limit: float
+    index: int
+
+
+def cell_argv(cell: Cell, *, cases_dir: str | None, max_attempts: int,
+              sandbox_on: bool) -> list[str]:
+    """Describe the one-cell child invocation, with no cwd-dependent paths."""
+    argv = ["--case", cell.case.id]
+    if cases_dir:
+        argv += ["--cases", str(Path(cases_dir).resolve())]
+    argv += ["--flow", cell.variant.flow_name]
+    if cell.variant.model is not None:
+        argv += ["--model", cell.variant.model]
+    argv += ["--dir", str(cell.directory.resolve()), "--max-attempts", str(max_attempts),
+             "--cost-limit", f"{cell.cost_limit:.6f}"]
+    if not sandbox_on:
+        argv.append("--no-sandbox")
+    return argv
+
+
+def default_launch(root: Path, *, cases_dir: str | None, max_attempts: int,
+                   sandbox_on: bool) -> Callable[[Cell], subprocess.Popen]:
+    """Start quiet one-cell children in their own sessions, like plan task runs."""
+    def launch(cell: Cell) -> subprocess.Popen:
+        argv = cell_argv(cell, cases_dir=cases_dir, max_attempts=max_attempts, sandbox_on=sandbox_on)
+        return subprocess.Popen([sys.executable, "-m", "factory.bench.run", *argv],
+                                cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, start_new_session=True, text=True)
+    return launch
 
 
 def variants(cfg: C.Config, flow_names: list[str] | None = None,
@@ -340,6 +383,58 @@ def run_cell(root: Path, case: cases.Case, variant: Variant, directory: Path, *,
     return record
 
 
+def _write_cell_record(directory: Path, record: dict) -> None:
+    """Publish a child's result only after its complete JSON is on disk."""
+    directory.mkdir(parents=True, exist_ok=True)
+    tmp = directory / ".cell.json.tmp"
+    tmp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, directory / "cell.json")
+
+
+def cell_main(argv: list[str]) -> int:
+    """Run exactly one cell in a child process and leave its record in cell.json."""
+    parser = argparse.ArgumentParser(prog="factory.bench.run")
+    parser.add_argument("--case", required=True, metavar="ID")
+    parser.add_argument("--cases", metavar="DIR")
+    parser.add_argument("--flow", required=True, metavar="NAME")
+    parser.add_argument("--model", metavar="SPEC")
+    parser.add_argument("--dir", required=True, metavar="DIR")
+    parser.add_argument("--max-attempts", type=int, default=3, metavar="N")
+    parser.add_argument("--cost-limit", type=float, required=True, metavar="USD")
+    parser.add_argument("--no-sandbox", action="store_true")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as e:
+        return 0 if e.code == 0 else 1
+
+    try:
+        root = Path.cwd()
+        cfg = C.load(root)
+        variant = variants(cfg, [args.flow], [args.model] if args.model is not None else None)[0]
+        loaded = cases.load_cases([args.cases] if args.cases else None)
+        case = next((case for case in loaded if case.id == args.case), None)
+        if case is None:
+            raise BenchError(f"unknown case {args.case} (cases: {', '.join(sorted(c.id for c in loaded))})")
+        directory = Path(args.dir)
+        record = run_cell(root, case, variant, directory, max_attempts=args.max_attempts,
+                          max_cost=args.cost_limit, sandbox_on=not args.no_sandbox)
+    except (KeyboardInterrupt, Stopped) as e:
+        record = getattr(e, "bench_record", None)
+        if record is None:
+            print(f"bench cell interrupted: {e}", file=sys.stderr)
+            return 1
+    except Exception as e:
+        print(f"bench cell: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        _write_cell_record(directory, record)
+    except Exception as e:
+        print(f"bench cell: cannot write cell.json: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _materialized_base(directory: Path) -> str | None:
     repo = directory / "repo"
     if not repo.is_dir():
@@ -371,17 +466,195 @@ def _dry_run(root: Path, cfg: C.Config, selected_cases: list[cases.Case],
     return 0
 
 
+def _cell_line(index: int, total: int, record: dict, suffix: str = "") -> None:
+    attempts = f"{record['attempts']} attempt" + ("" if record["attempts"] == 1 else "s")
+    print(f"[{index}/{total}] {record['variant']} · {record['case']} #{record['repeat']}: "
+          f"{record['outcome']} in {attempts}, ${record['cost_usd'] or 0.0:.2f}, "
+          f"{observe.human_secs(record['seconds'])}{suffix}", flush=True)
+
+
+def _run_sequential(root: Path, run_dir: Path, results: dict, selected_cases: list[cases.Case],
+                    selected_variants: list[Variant], repeat: int, total: int, max_cost: float,
+                    max_attempts: int, sandbox_on: bool) -> None:
+    spent = 0.0
+    index = 0
+    interrupted = False
+    for variant in selected_variants:
+        if interrupted:
+            break
+        for case in selected_cases:
+            if interrupted:
+                break
+            for number in range(1, repeat + 1):
+                index += 1
+                if spent >= max_cost:
+                    record = _empty_record(variant, case, number, "skipped", None)
+                else:
+                    relative = Path("cells") / _slug(variant.id) / case.id / f"r{number}"
+                    directory = run_dir / relative
+                    cell_started = time.monotonic()
+                    try:
+                        record = run_cell(root, case, variant, directory, max_attempts=max_attempts,
+                                          max_cost=max_cost - spent, sandbox_on=sandbox_on)
+                    except (KeyboardInterrupt, Stopped) as e:
+                        record = getattr(e, "bench_record", None) or _recover_record(
+                            directory, variant, case, number, cell_started)
+                        record["repeat"] = number
+                        interrupted = True
+                    except Exception:
+                        record = _recover_record(directory, variant, case, number, cell_started)
+                    if results["cases"][case.id]["base"] is None:
+                        results["cases"][case.id]["base"] = _materialized_base(directory)
+                    spent += float(record["cost_usd"] or 0.0)
+                results["cells"].append(record)
+                write_results(run_dir, results)
+                _cell_line(index, total, record)
+                if interrupted:
+                    break
+
+
+def _running_cost(directory: Path, task_id: str) -> float:
+    """Best-effort live cost; an unreadable/incomplete cell db simply counts as zero."""
+    db = None
+    try:
+        if not (directory / "factory.db").is_file():
+            return 0.0
+        db = open_db(directory, readonly=True)
+        row = db.task(task_id)
+        return float(row["cost_usd"] or 0.0) if row is not None else 0.0
+    except (OSError, sqlite3.Error):
+        return 0.0
+    finally:
+        if db is not None:
+            db.close()
+
+
+def _child_record(cell: Cell) -> dict:
+    record = json.loads((cell.directory / "cell.json").read_text(encoding="utf-8"))
+    if not isinstance(record, dict):
+        raise ValueError("cell.json is not a mapping")
+    record.update(variant=cell.variant.id, case=cell.case.id, repeat=cell.number)
+    return record
+
+
+def _crash_record(proc: subprocess.Popen, cell: Cell, started: float) -> dict:
+    record = _recover_record(cell.directory, cell.variant, cell.case, cell.number, started)
+    cell.directory.mkdir(parents=True, exist_ok=True)
+    stderr = proc.stderr.read() if proc.stderr is not None else ""
+    tail = "\n".join(stderr.splitlines()[-10:])
+    text = f"child exited with status {proc.returncode}\n"
+    if tail:
+        text += f"stderr (last 10 lines):\n{tail}\n"
+    (cell.directory / "crash.log").write_text(text, encoding="utf-8")
+    return record
+
+
+def _run_parallel(root: Path, run_dir: Path, results: dict, selected_cases: list[cases.Case],
+                  selected_variants: list[Variant], repeat: int, total: int, max_cost: float,
+                  max_attempts: int, sandbox_on: bool, parallel: int,
+                  launch: Callable[[Cell], subprocess.Popen]) -> None:
+    pending = []
+    index = 0
+    for variant in selected_variants:
+        for case in selected_cases:
+            for number in range(1, repeat + 1):
+                index += 1
+                relative = Path("cells") / _slug(variant.id) / case.id / f"r{number}"
+                pending.append(Cell(variant, case, number, (run_dir / relative).resolve(), 0.0, index))
+
+    running: dict[subprocess.Popen, tuple[Cell, float]] = {}
+    spent = 0.0
+
+    def finished(cell: Cell, record: dict, suffix: str = "") -> None:
+        nonlocal spent
+        record.update(variant=cell.variant.id, case=cell.case.id, repeat=cell.number)
+        if record.get("dir") is not None and results["cases"][cell.case.id]["base"] is None:
+            results["cases"][cell.case.id]["base"] = _materialized_base(cell.directory)
+        spent += float(record["cost_usd"] or 0.0)
+        results["cells"].append(record)
+        write_results(run_dir, results)
+        _cell_line(cell.index, total, record, suffix)
+
+    try:
+        while pending or running:
+            for proc, (cell, started) in list(running.items()):
+                if proc.poll() is None:
+                    continue
+                del running[proc]
+                try:
+                    record = _child_record(cell)
+                    suffix = ""
+                except (OSError, ValueError, TypeError):
+                    record = _crash_record(proc, cell, started)
+                    suffix = f" (child exit {proc.returncode}; crash.log)"
+                finished(cell, record, suffix)
+
+            recorded = spent + sum(_running_cost(cell.directory, cell.case.contract.id)
+                                   for cell, _ in running.values())
+            if pending and recorded >= max_cost:
+                for cell in pending:
+                    finished(cell, _empty_record(cell.variant, cell.case, cell.number, "skipped", None))
+                pending.clear()
+
+            # Cells started together share the remaining budget; their live cost is
+            # included on the next poll, once each pipeline has updated its db.
+            while pending and len(running) < parallel and recorded < max_cost:
+                next_cell = pending.pop(0)
+                cell = dataclasses.replace(next_cell, cost_limit=max_cost - recorded)
+                started = time.monotonic()
+                try:
+                    proc = launch(cell)
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    cell.directory.mkdir(parents=True, exist_ok=True)
+                    (cell.directory / "crash.log").write_text(f"could not start child: {e}\n",
+                                                               encoding="utf-8")
+                    finished(cell, _recover_record(cell.directory, cell.variant, cell.case,
+                                                   cell.number, started), " (launch failed; crash.log)")
+                    recorded = spent + sum(_running_cost(running_cell.directory,
+                                                         running_cell.case.contract.id)
+                                           for running_cell, _ in running.values())
+                    continue
+                running[proc] = (cell, started)
+
+            if not pending and not running:
+                break
+            time.sleep(POLL_SECONDS)
+    except KeyboardInterrupt:
+        for proc in running:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+        for proc in running:
+            try:
+                proc.wait()
+            except ProcessLookupError:
+                pass
+        for proc, (cell, started) in running.items():
+            try:
+                record = _child_record(cell)
+            except (OSError, ValueError, TypeError):
+                record = _recover_record(cell.directory, cell.variant, cell.case, cell.number, started)
+            finished(cell, record, " (interrupted)")
+        running.clear()
+
+
 def run_bench(root: Path, *, cases_dir: str | None = None, case_ids: list[str] | None = None,
               flow_names: list[str] | None = None, models: list[str] | None = None,
               repeat: int = 1, max_cost: float | None = None, max_attempts: int = 3,
-              dry_run: bool = False, no_sandbox: bool = False) -> int:
-    """Run the selected case × variant × repeat cells sequentially."""
+              dry_run: bool = False, no_sandbox: bool = False, parallel: int = 1) -> int:
+    """Run the selected case × variant × repeat cells within one total budget."""
     if max_cost is None and not dry_run:
         raise BenchError("--max-cost is required (bench runs spend real money); pass --dry-run to preview")
     if repeat < 1:
         raise BenchError("--repeat must be at least 1")
     if max_attempts < 1:
         raise BenchError("--max-attempts must be at least 1")
+    if parallel < 1:
+        raise BenchError("--parallel must be at least 1")
     if max_cost is not None and max_cost < 0:
         raise BenchError("--max-cost must not be negative")
     root = Path(root)
@@ -436,47 +709,20 @@ def run_bench(root: Path, *, cases_dir: str | None = None, case_ids: list[str] |
           f"{repeat} = {total} cells, budget ${max_cost:.2f}", flush=True)
     write_results(run_dir, results)
 
-    spent = 0.0
-    index = 0
-    interrupted = False
-    for variant in selected_variants:
-        if interrupted:
-            break
-        for case in selected_cases:
-            if interrupted:
-                break
-            for number in range(1, repeat + 1):
-                index += 1
-                if spent >= max_cost:
-                    record = _empty_record(variant, case, number, "skipped", None)
-                else:
-                    relative = Path("cells") / _slug(variant.id) / case.id / f"r{number}"
-                    directory = run_dir / relative
-                    cell_started = time.monotonic()
-                    try:
-                        record = run_cell(root, case, variant, directory, max_attempts=max_attempts,
-                                          max_cost=max_cost - spent, sandbox_on=sandbox_on)
-                    except (KeyboardInterrupt, Stopped) as e:
-                        record = getattr(e, "bench_record", None) or _recover_record(
-                            directory, variant, case, number, cell_started)
-                        record["repeat"] = number
-                        interrupted = True
-                    except Exception:
-                        record = _recover_record(directory, variant, case, number, cell_started)
-                    if results["cases"][case.id]["base"] is None:
-                        results["cases"][case.id]["base"] = _materialized_base(directory)
-                    spent += float(record["cost_usd"] or 0.0)
-                results["cells"].append(record)
-                write_results(run_dir, results)
-                attempts = f"{record['attempts']} attempt" + ("" if record["attempts"] == 1 else "s")
-                print(f"[{index}/{total}] {variant.id} · {case.id} #{number}: {record['outcome']} in "
-                      f"{attempts}, ${record['cost_usd'] or 0.0:.2f}, "
-                      f"{observe.human_secs(record['seconds'])}", flush=True)
-                if interrupted:
-                    break
+    if parallel <= 1:
+        _run_sequential(root, run_dir, results, selected_cases, selected_variants, repeat, total,
+                        max_cost, max_attempts, sandbox_on)
+    else:
+        launch = default_launch(root, cases_dir=cases_dir, max_attempts=max_attempts, sandbox_on=sandbox_on)
+        _run_parallel(root, run_dir, results, selected_cases, selected_variants, repeat, total,
+                      max_cost, max_attempts, sandbox_on, parallel, launch)
 
     results["run"]["ended_at"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     write_results(run_dir, results)
     print()
     print(report.summary(results))
     return report.exit_code(results)
+
+
+if __name__ == "__main__":
+    sys.exit(cell_main(sys.argv[1:]))

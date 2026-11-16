@@ -5,6 +5,9 @@ import datetime as dt
 import hashlib
 import json
 import shutil
+import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -80,6 +83,79 @@ def _scripted(monkeypatch, plays_by_spec):
         return ScriptedModel(plays=copy.deepcopy(plays_by_spec[spec]))
 
     monkeypatch.setattr(agents, "build_model", build)
+
+
+CHILD_BOOTSTRAP = r"""
+import copy
+import json
+import os
+import sys
+import time
+
+sys.path.insert(0, os.environ["BENCH_T05_TESTS_DIR"])
+import test_bench
+from factory import agents, prices
+from factory.bench.run import cell_main
+
+plays = {"scripted:good": test_bench.GOOD, "scripted:bad": test_bench.BAD}
+def build(spec):
+    if spec not in plays:
+        raise AssertionError(f"unexpected model spec: {spec}")
+    return test_bench.ScriptedModel(plays=copy.deepcopy(plays[spec]))
+agents.build_model = build
+if "BENCH_T05_FAKE_COST" in os.environ:
+    fake_cost = float(os.environ["BENCH_T05_FAKE_COST"])
+    prices.cost = lambda spec, tin, tout, cache_read=0: fake_cost
+
+def log(event):
+    with open(os.environ["BENCH_T05_LOG"], "a", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "pid": os.getpid(), "event": event,
+            "dir": sys.argv[sys.argv.index("--dir") + 1],
+            "cost_limit": float(sys.argv[sys.argv.index("--cost-limit") + 1]),
+        }) + "\n")
+
+log("start")
+try:
+    time.sleep(float(os.environ.get("BENCH_T05_SLEEP", "0")))
+    code = cell_main(sys.argv[1:])
+finally:
+    log("end")
+sys.exit(code)
+"""
+
+
+def _child_launcher(monkeypatch, tmp_path, *, sleep=0.0, cost=None, crash_numbers=(), ctrl_c_at=None):
+    """Run real cell_main children with scripted models, plus optional crash/interrupt injection."""
+    import factory.bench.run as bench_run
+
+    log_path = tmp_path / "children.jsonl"
+    monkeypatch.setenv("BENCH_T05_TESTS_DIR", str(Path(__file__).resolve().parent))
+    monkeypatch.setenv("BENCH_T05_LOG", str(log_path))
+    monkeypatch.setenv("BENCH_T05_SLEEP", str(sleep))
+    if cost is not None:
+        monkeypatch.setenv("BENCH_T05_FAKE_COST", str(cost))
+    launches = 0
+
+    def factory(root, *, cases_dir, max_attempts, sandbox_on):
+        def launch(cell):
+            nonlocal launches
+            launches += 1
+            if launches == ctrl_c_at:
+                raise KeyboardInterrupt
+            if cell.number in crash_numbers:
+                argv = [sys.executable, "-c", "import sys; sys.stderr.write('boom\\n'); sys.exit(3)"]
+            else:
+                argv = [sys.executable, "-c", CHILD_BOOTSTRAP,
+                        *bench_run.cell_argv(cell, cases_dir=cases_dir, max_attempts=max_attempts,
+                                             sandbox_on=sandbox_on)]
+            return subprocess.Popen(argv, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, start_new_session=True, text=True)
+        return launch
+
+    monkeypatch.setattr(bench_run, "default_launch", factory)
+    monkeypatch.setattr(bench_run, "POLL_SECONDS", 0.02)
+    return log_path
 
 
 def _args(*extra, max_cost="5", cases=BENCH_CASES, sandbox=True):
@@ -217,6 +293,24 @@ def test_a_bench_run_leaves_the_board_and_the_repository_alone(bench_repo, home,
         assert git(bench_run_dir(home) / cell["dir"] / "repo", "remote") == ""
 
 
+def test_sync_releases_the_board_database(bench_repo, home, monkeypatch):
+    import factory.cli as cli
+
+    opened = []
+    real_db = cli._db
+
+    def retain_db():
+        db = real_db()
+        opened.append(db)
+        return db
+
+    monkeypatch.setattr(cli, "_db", retain_db)
+    assert main(["sync"]) == 0
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        opened[0].tasks()
+
+
 def test_the_budget_caps_cells_and_stops_starting_new_ones(bench_repo, home, monkeypatch):
     monkeypatch.setattr(prices, "cost", lambda spec, tin, tout, cache_read=0: 0.40)
     _scripted(monkeypatch, {"scripted:good": GOOD})
@@ -341,6 +435,124 @@ def test_results_are_written_after_every_cell(bench_repo, home, monkeypatch):
     assert [cell["outcome"] for cell in results["cells"]] == ["solved", "error"]
     assert results["cells"][0]["repeat"] == 1 and results["cells"][1]["repeat"] == 2
     assert results["run"]["ended_at"] is not None
+
+
+def test_parallel_cells_run_at_once_and_all_finish(bench_repo, home, tmp_path, monkeypatch):
+    child_log = _child_launcher(monkeypatch, tmp_path, sleep=0.5)
+    assert main(_args("--model", "scripted:good", "--repeat", "4", "--parallel", "2")) == 0
+
+    parallel_dir = bench_run_dir(home)
+    parallel = load_results(home)
+    assert len(parallel["cells"]) == 4
+    for cell in parallel["cells"]:
+        assert cell["outcome"] == "solved" and cell["dir"]
+        assert cell["attempts"] == 1 and cell["model_calls"] > 0
+        directory = parallel_dir / cell["dir"]
+        assert (directory / "factory.db").is_file()
+        assert (directory / "repo").is_dir()
+        assert (directory / "hidden.log").is_file()
+        assert json.loads((directory / "cell.json").read_text()) == cell
+
+    events = [json.loads(line) for line in child_log.read_text().splitlines()]
+    assert sum(event["event"] == "start" for event in events) == 4
+    assert sum(event["event"] == "end" for event in events) == 4
+    live = peak = 0
+    for event in events:
+        live += 1 if event["event"] == "start" else -1
+        peak = max(peak, live)
+    assert peak == 2
+
+    _scripted(monkeypatch, {"scripted:good": GOOD})
+    assert main(_args("--model", "scripted:good", "--repeat", "4")) == 0
+    run_dirs = sorted((home / "bench").iterdir())
+    assert len(run_dirs) == 2 and run_dirs[0] == parallel_dir
+    sequential = json.loads((run_dirs[1] / "results.json").read_text())
+
+    def comparable(results):
+        ordered = sorted(results["cells"], key=lambda cell: (cell["variant"], cell["case"], cell["repeat"]))
+        return [{key: value for key, value in cell.items() if key not in ("seconds", "dir")}
+                for cell in ordered]
+
+    assert comparable(parallel) == comparable(sequential)
+
+
+def test_parallel_runs_keep_to_the_budget(bench_repo, home, tmp_path, monkeypatch):
+    child_log = _child_launcher(monkeypatch, tmp_path, cost=0.40)
+    assert main(_args("--model", "scripted:good", "--repeat", "4", "--parallel", "2",
+                      max_cost="1.0")) == 1
+    cells = load_results(home)["cells"]
+    stopped = [cell for cell in cells if cell["outcome"] == "stopped"]
+    skipped = [cell for cell in cells if cell["outcome"] == "skipped"]
+    assert len(stopped) == len(skipped) == 2
+    assert all(cell["cost_usd"] >= 1.0 and cell["dir"] is not None for cell in stopped)
+    assert all(cell["cost_usd"] == 0.0 and cell["attempts"] == 0 and cell["dir"] is None
+               for cell in skipped)
+
+    starts = [json.loads(line) for line in child_log.read_text().splitlines()
+              if json.loads(line)["event"] == "start"]
+    assert len(starts) == 2
+    assert all(0.0 < event["cost_limit"] <= 1.0 for event in starts)
+
+
+def test_a_crashed_cell_process_is_recorded_as_an_error(bench_repo, home, tmp_path, monkeypatch, capsys):
+    _child_launcher(monkeypatch, tmp_path, sleep=0.1, crash_numbers=(2,))
+    assert main(_args("--model", "scripted:good", "--repeat", "3", "--parallel", "2")) == 1
+    run_dir = bench_run_dir(home)
+    cells = {cell["repeat"]: cell for cell in load_results(home)["cells"]}
+    assert [cells[number]["outcome"] for number in (1, 2, 3)] == ["solved", "error", "solved"]
+    crash_dir = run_dir / cells[2]["dir"]
+    assert crash_dir.is_dir()
+    crash_log = (crash_dir / "crash.log").read_text()
+    assert "child exited with status 3" in crash_log and "boom" in crash_log
+    line = next(line for line in capsys.readouterr().out.splitlines() if "adder #2" in line)
+    assert "error" in line and "child exit 3" in line and "crash.log" in line
+
+
+def test_default_launch_runs_a_cell_process_like_the_scheduler(monkeypatch, tmp_path):
+    import factory.bench.run as bench_run
+    from factory import config as C
+    from factory.bench import cases
+
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.chdir(tmp_path)
+    cfg = C.load(root)
+    variant = bench_run.variants(cfg, ["default"], ["scripted:good"])[0]
+    case = cases.load_cases([BENCH_CASES])[0]
+    cell = bench_run.Cell(variant, case, 2, root / "cells/default@scripted:good/adder/r2", 1.25, 2)
+    seen = {}
+    monkeypatch.setattr(bench_run.subprocess, "Popen", lambda argv, **kw: seen.update(argv=argv, kw=kw))
+
+    bench_run.default_launch(root, cases_dir="case-suite", max_attempts=2, sandbox_on=False)(cell)
+    assert seen["argv"] == [
+        sys.executable, "-m", "factory.bench.run", "--case", "adder",
+        "--cases", str(tmp_path / "case-suite"), "--flow", "default", "--model", "scripted:good",
+        "--dir", str(cell.directory), "--max-attempts", "2", "--cost-limit", "1.250000", "--no-sandbox",
+    ]
+    assert seen["kw"] == {
+        "cwd": root, "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.PIPE, "start_new_session": True, "text": True,
+    }
+
+
+def test_ctrl_c_stops_starting_cells_and_records_them_as_errors(bench_repo, home, tmp_path,
+                                                                 monkeypatch, capsys):
+    _child_launcher(monkeypatch, tmp_path, sleep=30.0, ctrl_c_at=2)
+    assert main(_args("--model", "scripted:good", "--repeat", "4", "--parallel", "2")) == 1
+    results = load_results(home)
+    assert results["run"]["ended_at"] is not None
+    assert len(results["cells"]) == 1
+    assert results["cells"][0]["repeat"] == 1 and results["cells"][0]["outcome"] == "error"
+    out = capsys.readouterr().out
+    line = next(line for line in out.splitlines() if "adder #1" in line)
+    assert "(interrupted)" in line
+    assert "1/0/0/3" in out
+
+
+def test_parallel_must_be_at_least_one(bench_repo, home, capsys):
+    assert main(_args("--parallel", "0")) == 1
+    assert "--parallel must be at least 1" in capsys.readouterr().err
+    assert not (home / "bench").exists()
 
 
 def _steps(model="fake:builder", prompt="a" * 64):

@@ -7,12 +7,12 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | ✓ | Read CI on open PRs and fix failures. Done: [CI failures](docs/architecture.md#ci-failures) | — | — |
 | ✓ | Act on human PR review comments. Done: [Review comments](docs/architecture.md#review-comments) | — | — |
 | 2 | The builder writes the test that judges it. Planned as a test step: [strict-flow](docs/plans/strict-flow.md) | small | — |
-| 3 | Nothing measures the factory itself. `factory stats` planned: [measure](docs/plans/measure.md); `factory bench` not yet | medium | — |
+| 3 | Nothing measures the factory itself. `factory stats` planned: [measure](docs/plans/measure.md); [`factory bench`](#8-compare-flows-and-setups) built | medium | — |
 | 4 | Learn from feedback. Planned as a knowledge crew: [wiki](docs/plans/wiki.md) | medium | 1, 3 |
 | 5 | Steer a running agent | small | — |
 | 6 | Runs need this machine | large | a shared board |
 | ✓ | Reshape the agent flow. Done: [Agent flows](docs/architecture.md#agent-flows) | — | — |
-| 8 | Compare flows and setups. Planned: [bench](docs/plans/bench.md) | medium | 7 |
+| ✓ | Compare flows and setups. Done: [Evaluating flows (factory bench)](docs/architecture.md#evaluating-flows-factory-bench) | — | — |
 | 9 | The steps of a flow are still the first version's. Planned: [strict-flow](docs/plans/strict-flow.md) | large | 3, 7, 8 |
 | ✓ | Managing the factory takes many terminal commands. Done: [The web page](docs/architecture.md#the-web-page) | — | — |
 | ✓ | Factory PR descriptions are long and hard to read. Done: [Pull requests](docs/architecture.md#pull-requests) | — | — |
@@ -76,7 +76,7 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 - Every agent run records a prompt version: a hash of its system prompt without the contract and the date. Stats breaks runs down by flow step, model and version, so a change to a prompt, AGENTS.md or the wiki can be compared before and after on real runs.
 - Refresh records whether the human changed a PR before merging it as a `merge` run: the commits pushed after the candidate, ignoring merges from the base. It does not compare trees.
 
-`factory bench` is not planned yet. It is the controlled comparison stats can't give.
+`factory bench` is built: [item 8](#8-compare-flows-and-setups). It is the controlled comparison stats can't give.
 
 ## 4. Learn from feedback
 

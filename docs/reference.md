@@ -192,6 +192,7 @@ Use `factory init --no-skills` to skip the skills, and `factory init --force` to
 | `factory run PLAN [--flow NAME] [--parallel N] [--network-for T1,T2] [flags]` | Every task of the plan without a PR, one PR each, dependents stacked on open dependency PRs; PRs in `conflict` get their conflicts resolved, PRs in `ci_failed` get their CI fixed, and PRs in `changes_requested` get the review addressed. `--flow NAME` runs every child under that flow instead of the config's `flow` |
 | `factory run TASK [--flow NAME] [flags]` | Run one task in the foreground (stacked the same way) under `--flow NAME` instead of the config's `flow` when given. On a `conflict` task it resolves the conflicts, on a `ci_failed` task it fixes CI, and on a `changes_requested` task it addresses the review; `--force` rebuilds any of them from scratch instead |
 | `factory stop TARGET [--wait SECONDS]` | Stop a running task, or a running plan and every task it started: SIGTERM, then SIGKILL after SECONDS (default 10). TARGET is a task id or a plan name/path. A stopped task ends `failed` with a note saying it was stopped; its worktree and branch are kept |
+| `factory bench run\|report\|compare\|list\|cases` | Evaluate flows and models on fixture cases, in isolated cells, and read or compare the scores; see [Bench](#bench) |
 | `factory top [PLAN] [--once]` | Live dashboard: each active plan with its glyph strip (✓ merged ◆ PR open ≠ PR conflicts ! CI fails ▶ running ✗ failed · queued ⊘ held) and counter, then its tasks' progress, current action, elapsed and quiet time, cost; recent events |
 | `factory web [--port N] [--no-open]` | Serve the board as a page at http://127.0.0.1:8765 and open it; every button runs one of these commands. See [The web page](#the-web-page) |
 | `factory logs TASK [-f] [-n N]` / `factory logs --all -f` | One task's log, or every task's log merged |
@@ -250,6 +251,112 @@ Commands run as detached jobs under `$FACTORY_HOME/web/jobs/` that survive `fact
 
 ---
 
+## Bench
+
+`factory bench` runs a fixed case suite under each selected setup. Cases × variants × repeats become isolated cells: each is a normal pipeline run without a PR, followed by hidden scoring when the gates pass. See [Evaluating flows](architecture.md#evaluating-flows-factory-bench) for the run diagram, outcomes, isolation, budget and recorded data.
+
+### Commands
+
+| Command | Flags and effect |
+|---|---|
+| `factory bench run [--case ID]… [--cases DIR] [--flow NAME]… [--model SPEC]… [--repeat N] [--max-cost USD] [--max-attempts N] [--parallel N] [--dry-run] [--no-sandbox]` | Run every selected case, variant and repeat. `--case` is repeatable and defaults to every case; `--cases DIR` loads that suite instead of the shipped one. `--flow` is repeatable and defaults to the config's `flow`; `--model` is repeatable and puts that model on every agent step, producing `FLOW@MODEL` variants (flows × models). `--repeat N` defaults to 1. `--max-cost USD` is the required total run budget, except with `--dry-run`. `--max-attempts N` defaults to 3 per cell. `--parallel N` defaults to 1 (sequential); larger values run up to N independent child processes. `--dry-run` prints variants, per-step models, provider key names and cells, then exits 0 without creating anything. `--no-sandbox` is unsafe, recorded in the results and flagged in reports |
+| `factory bench report [RUN] [--cells]` | Report `RUN`, defaulting to the newest run: its header, per-variant summary and solved counts per case. `--cells` adds each cell's outcome, attempts, cost, minutes and directory, including `not run` cells missing from an interrupted run |
+| `factory bench compare RUN_A RUN_B` | Compare shared variants and cases as A → B: solved counts, false passes, mean cost, mean attempts and mean minutes per variant, then solved counts per case. The header lists changed and one-sided cases, one-sided variants, and steps whose model or `prompt_sha` changed |
+| `factory bench list` | List past runs newest first: id, start, case and variant counts, recorded cells of the expected total, and cost |
+| `factory bench cases [--cases DIR]` | List each available case's id, kind and title. `--cases DIR` reads your suite instead of the shipped fixtures |
+
+A variant without `--model` uses the models resolved from the invoking repository. Repeating identical `--flow` or `--model` flags does not duplicate a variant. Run from a git repository: its flows, `models`, `max_steps` and `.factory/agents/` prompt overlays configure the variants, while each cell uses the case's gates and isolated factory home.
+
+In a report, `solved` is `solved/eligible`, where eligible cells ended `solved`, `false_pass` or `failed`. `false` counts candidates that passed their own gates but failed hidden tests. `err/stop/skip/not run` separates errors, cost-limit stops, budget-skipped cells and cells absent after an interruption. `attempts`, `cost/cell` and `min/cell` are means over cells that ran, excluding `skipped` and `not run`; `total` is all recorded spend. A comparison's per-case and per-variant solved columns are counts, not percentages.
+
+`compare` also checks whether the two runs measured the same thing: a changed `fixture_sha` means the case files differ, and a changed step model or `prompt_sha` means the named variant's setup differs. Cases or variants present in only one run are named and omitted from the shared score tables. Treat small differences cautiously; use at least `--repeat 3` and compare like with like.
+
+### A case directory
+
+A suite is a directory containing one directory per case. A case id is its directory name and must match `^[a-z][a-z0-9-]*$`:
+
+```text
+my-cases/slugify/
+  case.yaml        title, kind, requires, config, contract, hidden
+  repo/            the starting tree: guidance, package and existing tests
+  hidden/          files laid over the candidate to score it
+  solution/        files laid over the starting tree to prove it solvable
+```
+
+`case.yaml` must have exactly these keys:
+
+| Key | Meaning |
+|---|---|
+| `title` | The case's human-readable title |
+| `kind` | One of `feature`, `bugfix`, `multi-file`, `refactor`, `algorithm` |
+| `requires` | Non-empty command names checked with `command -v` inside the case's sandbox before a run |
+| `config` | The case's `.factory/config.yaml` mapping, written into its base commit; its gates and sandbox apply in every cell |
+| `contract` | One ordinary 8-key task contract, with id `<case id>-t01`, written to `docs/plans/<case id>.md` in the base commit |
+| `hidden` | Non-empty test commands that score the candidate. Each must be recognized as a test command, such as pytest, `cargo … test` or `python3 -m unittest …`; zero selected tests is inconclusive, not a pass |
+
+`repo/` is the starting tree. Materialization copies only that tree, writes `config` and `contract`, and makes one git commit with a fixed author, committer and date, so the base commit sha is deterministic across runs and machines. Neither `hidden/` nor `solution/` enters that repository.
+
+`hidden/` must contain files and is copied over a scratch worktree of the candidate only after its gates pass. The `hidden` commands run there in the case's sandbox; their output is saved in the cell's `hidden.log`. `solution/` must also contain files: laid over the base, it demonstrates that the case is solvable. The factory's own fixture tests use it; it never enters the case repository or the candidate being scored.
+
+For example, this is the shipped `slugify` metadata:
+
+```yaml
+title: Slugify titles for URLs
+kind: feature
+requires: [python3]
+config:
+  unit_tests: ["python3 -m unittest -q"]
+  dependency_sources: []
+  sandbox: {ro_binds: [], rw_binds: [], path: [], hide: []}
+contract:
+  id: slugify-t01
+  goal: "Add textkit.slug.slugify(title, max_length=64) to turn a title into a URL slug"
+  spec_refs: ["docs/plans/slugify.md"]
+  depends_on: []
+  non_goals: ["Changing normalize(text) or adding third-party dependencies"]
+  acceptance:
+    - "textkit.slug.slugify(title, max_length=64) lowercases titles, folds accents to ASCII, collapses runs of other characters to one hyphen, and trims leading and trailing hyphens"
+    - "Empty and all-symbol titles return an empty string; for example, 'Café au Beurre' becomes 'cafe-au-beurre' and 'Hello, World!!!' becomes 'hello-world'"
+    - "A slug longer than max_length keeps only complete hyphen-separated words that fit; if its first word is too long, that word is cut to max_length"
+    - "Add visible unittest coverage in tests/test_slugify.py while preserving normalize(text) and the existing test suite"
+  verification: ["python3 -m unittest -v tests.test_slugify"]
+  risk: low
+hidden:
+  - python3 -m unittest -v bench_hidden.test_slugify
+```
+
+### Writing and checking your own cases
+
+Put each case under a suite directory of your choosing, then check it incrementally:
+
+```bash
+factory bench cases --cases my-cases                 # load and validate every case
+factory bench run --cases my-cases --dry-run         # inspect variants, models, keys and cells
+factory bench run --cases my-cases --case slugify --max-cost 2
+```
+
+A malformed case is refused with its id and the problem, before any run directory or cells are created. Once the case loads, a dry run checks the expansion without spending money; a real run requires `--max-cost`. Add more cases, variants or `--repeat` after the smallest run works.
+
+When writing one:
+
+- Hidden tests may call only the public functions, commands and output formats named by the contract, so any solution satisfying the contract can pass.
+- Prove both directions: the base tree must not already pass the hidden tests, and `solution/` laid over that base must pass every configured gate and the hidden tests. Keep a visible test command in the contract's `verification` so the production gates have something meaningful to run.
+- Keep the case's `sandbox.ro_binds`, `rw_binds`, `path` and `dependency_sources` away from its own `hidden/` and `solution/` files. Preflight checks this from inside the sandbox and through the dependency sources, and refuses an exposed case.
+
+### The shipped cases
+
+| Case | Kind | Title | Task and what the hidden tests check |
+|---|---|---|---|
+| `slugify` | feature | Slugify titles for URLs | Add `slugify(title, max_length=64)` to a small text package: lowercase, fold accents, collapse punctuation to single hyphens, trim and cut at word boundaries. Hidden tests cover accents, punctuation runs, empty and all-symbol titles, and length cuts |
+| `money-rounding` | bugfix | Round ledger money exactly to cents | Fix totals and balances that drift when amounts are summed as floats, including exact half-to-even cent rounding. Hidden tests cover float-drifting sums, half-cent amounts and preservation of existing behavior |
+| `report-json` | multi-file | Add --format json to the report tool | Add `--format json` beside the existing table output across the argument parser, formatter and usage documentation. Hidden tests exercise the JSON shape through the real entry point and require the default table output to stay byte for byte unchanged |
+| `ini-refactor` | refactor | Extract one shared settings parser | Replace two copies of a `key = value` parser with one shared parser without changing behavior. Hidden tests cover both modules, comments, blank lines, duplicate keys and preservation of the public function names |
+| `rate-limiter` | algorithm | Implement the token-bucket rate limiter | Implement a token bucket with capacity, refill rate, an injectable clock and `try_acquire(n=1)`. Hidden tests cover bursts, fractional-time refills, requests larger than capacity and the capacity ceiling |
+
+All five use only the Python standard library and declare `requires: [python3]`. Their hidden suites use `python3 -m unittest`, and their contracts require visible tests so the ordinary factory gates still apply.
+
+---
+
 ## Several maintainers
 
 Each keeps their own board; GitHub is what they share. `factory sync && factory status --refresh` (and every plan run, which starts with a refresh) takes up the factory PRs this board didn't open: a `queued` or `failed` task with an open PR on `factory/TASK` becomes `pr_open`, with its candidate, base and stack read from the PR and its branch, and one with a merged PR becomes `merged`, with a warning when that PR merged into another task's branch rather than the trunk. Closed PRs are history and are ignored; holds (`abandoned`) and running tasks are left alone. Logs, transcripts and costs stay with the board that ran the task.
@@ -287,3 +394,6 @@ Each keeps their own board; GitHub is what they share. `factory sync && factory 
 | A plan run leaves a task `queued` | A dependency has no PR (it failed, is held, or is in another plan). `factory status PLAN` shows what it waits for |
 | A stacked PR shows its dependency's changes | Its dependency merged but its commits didn't rebase cleanly, so it is `conflict` and targets the trunk already. Run the task to resolve it |
 | Costs show `-` | The model isn't on OpenRouter's price list, or the list couldn't be fetched |
+| `CASE: hidden/solution files readable inside its sandbox: …` (or `CASE: hidden/solution files readable under its dependency_sources: …`) | The case's sandbox binds, `sandbox.path` or `dependency_sources` reach its own fixture files, so agents could read the answers. Remove that bind or source; the shipped cases bind nothing from `$HOME` |
+| `CASE: required command 'X' is missing from its sandbox` | `requires` names a command not on the case sandbox's `PATH`. Add its directory to the case config's `sandbox.path` or `ro_binds`, or install the tool |
+| Bench cells end `stopped` or `skipped` | The budget ran out: a `stopped` cell hit the cost limit it received when it started; a `skipped` cell never started. Raise `--max-cost`, cut variants or repeats, or preview with `--dry-run`. The command exits 1 whenever any cell ended `error`, `stopped` or `skipped` |
