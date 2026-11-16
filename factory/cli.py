@@ -509,6 +509,9 @@ def _refresh(db) -> None:
                 if not listed:      # once per refresh, and only when something merged
                     prs, listed = _factory_pr_list(repo_root()), True
                 _merged(db, row, prs)
+                if row["candidate_sha"] and db.task(row["id"])["status"] == "merged":
+                    from . import merges
+                    merges.record(db, repo_root(), row, pr.get("headRefOid"))
             elif pr.get("state") == "CLOSED":
                 db.update(row["id"], status="abandoned", note="PR closed without merge")
             # A stacked PR is checked against its dependency by restack below, not by GitHub.
@@ -1244,7 +1247,7 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("show", help="a task's runs and reports")
     s.add_argument("task_id")
-    s.add_argument("--role", choices=("plan", "build", "resolve", "ci", "human_review", "review", "verify", "pr"))
+    s.add_argument("--role", choices=("plan", "build", "resolve", "ci", "human_review", "review", "verify", "pr", "merge"))
     s.add_argument("--step", help="only runs of this flow step")
     s.set_defaults(fn=cmd_show)
 
