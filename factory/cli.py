@@ -772,6 +772,20 @@ def cmd_show(a) -> int:
     return 0
 
 
+def cmd_stats(a) -> int:
+    from . import stats
+    try:
+        data = stats.collect(_db(), a.since, a.until, a.plan)
+    except ValueError as e:
+        print(f"FAIL {e}", file=sys.stderr)
+        return 2
+    if data is None:
+        print("no runs in the window")
+        return 0
+    print(json.dumps(data, indent=2) if a.json else stats.render(data))
+    return 0
+
+
 def cmd_gates(a) -> int:
     """Gates for a ref, in a throwaway detached worktree (for reviewing hand-written work)."""
     from .pipeline import git
@@ -1250,6 +1264,14 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--role", choices=("plan", "build", "resolve", "ci", "human_review", "review", "verify", "pr", "merge"))
     s.add_argument("--step", help="only runs of this flow step")
     s.set_defaults(fn=cmd_show)
+
+    s = sub.add_parser("stats", help="how the factory is doing over a window: outcomes, attempts, cost per PR, "
+                                     "gate failures, reworks, per-step runs")
+    s.add_argument("--since", metavar="DATE")
+    s.add_argument("--until", metavar="DATE")
+    s.add_argument("--plan", metavar="PLAN")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_stats)
 
     s = sub.add_parser("gates", help="run the deterministic gates for a ref (no agents)")
     s.add_argument("task_id")
