@@ -191,7 +191,9 @@ Use `factory init --no-skills` to skip the skills, and `factory init --force` to
 | `factory status [PLAN] [--refresh] [--json]` | The board, grouped by plan with a task counter. `--refresh` picks up merged or closed PRs (a stacked PR merged into a dependency's branch counts once that branch's PR carries it to the trunk; one stranded there becomes `conflict`), takes up open or merged PRs opened from another board, moves stacked PRs whose dependencies merged, marks PRs that conflict with their base `conflict`, marks PRs a review requests changes on `changes_requested` and clears them when the request is approved or dismissed, and marks PRs whose CI fails `ci_failed`, and fails dead runs. Conflicts come first, then requested changes, then CI |
 | `factory run PLAN [--flow NAME] [--parallel N] [--network-for T1,T2] [flags]` | Every task of the plan without a PR, one PR each, dependents stacked on open dependency PRs; PRs in `conflict` get their conflicts resolved, PRs in `ci_failed` get their CI fixed, and PRs in `changes_requested` get the review addressed. `--flow NAME` runs every child under that flow instead of the config's `flow` |
 | `factory run TASK [--flow NAME] [flags]` | Run one task in the foreground (stacked the same way) under `--flow NAME` instead of the config's `flow` when given. On a `conflict` task it resolves the conflicts, on a `ci_failed` task it fixes CI, and on a `changes_requested` task it addresses the review; `--force` rebuilds any of them from scratch instead |
+| `factory stop TARGET [--wait SECONDS]` | Stop a running task, or a running plan and every task it started: SIGTERM, then SIGKILL after SECONDS (default 10). TARGET is a task id or a plan name/path. A stopped task ends `failed` with a note saying it was stopped; its worktree and branch are kept |
 | `factory top [PLAN] [--once]` | Live dashboard: each active plan with its glyph strip (✓ merged ◆ PR open ≠ PR conflicts ! CI fails ▶ running ✗ failed · queued ⊘ held) and counter, then its tasks' progress, current action, elapsed and quiet time, cost; recent events |
+| `factory web [--port N] [--no-open]` | Serve the board as a page at http://127.0.0.1:8765 and open it; every button runs one of these commands. See [The web page](#the-web-page) |
 | `factory logs TASK [-f] [-n N]` / `factory logs --all -f` | One task's log, or every task's log merged |
 | `factory trace TASK [--role R] [--step S] [--attempt N] [--all]` | Per-step model time, tool time, context size, cached tokens, output, cost, calls, largest results; `--step` filters by flow step |
 | `factory transcript TASK [--role R] [--step S] [--attempt N] [--all] [--full]` | Exactly what the model saw and did; `--step` filters by flow step |
@@ -218,6 +220,33 @@ Useful `run` flags:
 | `--notify` | Desktop notification when the run ends |
 | `--quiet` | Log to the file only |
 | `--force` | Run even if the status, or a dependency without a PR, would refuse |
+
+### The web page
+
+`factory web [--port N] [--no-open]` binds 127.0.0.1 only. Its default port is 8765; if that is busy and `--port` wasn't given, it picks a free port, while a busy explicit `--port` exits 1. It prints `factory web: http://127.0.0.1:PORT/ (Ctrl-C to stop)` and opens the page in a browser unless `--no-open` is given. To reach another machine's board, use `ssh -L 8765:127.0.0.1:8765 HOST`.
+
+| Page | What it shows |
+|---|---|
+| `/` | The board: what needs you, counts, running tasks and every plan |
+| `/tasks/TASK` | The next step and note, contract, runs with their reports, and the last 200 log lines |
+| `/tasks/TASK/runs/RUN` | One agent run's transcript |
+| `/activity` | Commands the page ran, with output, plus every task's log merged |
+| `/run?plan=…` or `/run?task=…` | The run form: what will run, the required cost cap, limits, the exact command and the cost warning |
+| `/confirm` | What Stop and Remove worktree will do, so one click never acts alone |
+
+| Button | Command it runs |
+|---|---|
+| Load plans | `factory sync` |
+| Check GitHub | `factory status --refresh` |
+| Put on hold | `factory abandon TASK --note "put on hold from factory web"` |
+| Take off hold | `factory requeue TASK` |
+| Remove worktree | `factory clean TASK`, after confirmation |
+| Stop / Stop this run | `factory stop TASK` or `factory stop PLAN`, after confirmation |
+| Run plan / Run again / Start run | Run plan and Run again open the form; Start run runs its displayed `factory run TARGET …` with the chosen limits |
+
+The command buttons' tooltips name their commands, and the run form displays its exact command before Start run. Quick actions return to the page with a job notice; Stop and Start run go to the activity page.
+
+Commands run as detached jobs under `$FACTORY_HOME/web/jobs/` that survive `factory web` stopping; a restart finds them, and only the newest 200 are kept. Live pages refresh every 2 seconds, and every page works without JavaScript. The page is loopback-only; its safeguards are described in [architecture](architecture.md#the-web-page).
 
 ---
 

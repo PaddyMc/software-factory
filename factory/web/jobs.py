@@ -60,7 +60,7 @@ def prune(home: Path, keep: int = 200) -> None:
 
 
 def start(home: Path, root: Path, argv: list[str], command: str, kind: str, target: str,
-          launch=default_launch) -> str:
+          launch=default_launch, notice="") -> str:
     """Record and detach one factory command, returning its six-digit job id."""
     with _LOCK:
         parent = home / "web" / "jobs"
@@ -75,6 +75,7 @@ def start(home: Path, root: Path, argv: list[str], command: str, kind: str, targ
             "command": command,
             "kind": kind,
             "target": target,
+            "notice": notice,
             "started_at": _now(),
             "pid": None,
             "root": str(root),
@@ -94,6 +95,7 @@ class Job:
     command: str
     kind: str
     target: str
+    notice: str
     started_at: str
     pid: int | None
     result: dict | None
@@ -124,6 +126,7 @@ def _job(home: Path, directory: Path) -> Job | None:
             command=str(record["command"]),
             kind=str(record["kind"]),
             target=str(record["target"]),
+            notice=str(record.get("notice") or ""),
             started_at=str(record["started_at"]),
             pid=record.get("pid"),
             result=_read_json(directory / "result.json"),

@@ -272,7 +272,8 @@ def test_plans_show_one_square_per_task_and_finished_plans_collapse(home, repo):
     assert re.findall(r'<i class="([^"]+)"></i>', strip) == ["s-merged", "s-attn", "s-failed", "s-waiting"]
     assert 'aria-label="1 merged, 1 CI failing, 1 failed, 1 waiting"' in mix
     assert '<span class="plan-counts">1 of 4 merged, 1 CI failing, 1 failed, 1 waiting</span>' in mix
-    assert '<span class="plan-end"><span class="num">$3.50</span></span>' in mix
+    assert ('<span class="plan-end"><span class="num">$3.50</span>'
+            '<a class="btn" href="/run?plan=mix">Run plan</a></span>') in mix
     assert '<details class="finished" id="finished"><summary>1 finished plan</summary>' in body
     assert '<details class="finished" id="finished" open>' not in body
     assert '<details class="plan" id="plan-done">' in body
@@ -842,7 +843,11 @@ def test_task_page_next_step_follows_the_status(home, repo):
     assert 'action="/actions/requeue"' in panels["state-t10"] and "Take off hold" in panels["state-t10"]
     for task_id in ("state-t06", "state-t12"):
         assert f'href="/confirm?action=stop&amp;target={task_id}"' in panels[task_id]
-    for task_id in ("state-t02", "state-t03", "state-t04", "state-t05", "state-t09", "state-t11"):
+    for task_id in ("state-t02", "state-t03", "state-t04"):
+        link = f'<a class="btn btn-primary" href="/run?task={task_id}">Run again</a>'
+        assert f'<div class="acts">{link}</div>' in panels[task_id]
+        assert "<form" not in panels[task_id]
+    for task_id in ("state-t05", "state-t09", "state-t11"):
         assert '<div class="acts">' not in panels[task_id] and "<form" not in panels[task_id]
     for task_id, note in notes.items():
         assert f"<pre>{html.escape(note, quote=True)}</pre>" in panels[task_id]
@@ -1300,3 +1305,318 @@ def test_old_jobs_are_pruned(home, repo):
     assert len(remaining) == 200
     assert remaining[0] == "000002" and remaining[-1] == "000201"
     assert not (home / "web" / "jobs" / "000001").exists()
+
+
+def test_run_form_lists_what_will_run_and_previews_the_command(home, repo, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "x")
+    db = _board(home, [
+        _contract("form-t01"), _contract("form-t02"), _contract("form-t03"), _contract("form-t04"),
+        _contract("form-t05", depends=["form-t04"]), _contract("form-t06", depends=["form-t05"]),
+        _contract("form-t07"), _contract("form-t08"), _contract("form-t09"), _contract("form-t10"),
+    ], "docs/plans/form/form.md")
+    for task_id, state in (("form-t01", "ci_failed"), ("form-t02", "failed"),
+                           ("form-t03", "conflict"), ("form-t04", "changes_requested"),
+                           ("form-t07", "building"), ("form-t08", "merged"),
+                           ("form-t09", "pr_open"), ("form-t10", "abandoned")):
+        db.update(task_id, status=state)
+    db.claim("form-t07", os.getpid())
+    _add(db, [_contract("empty-t01"), _contract("empty-t02")], "docs/plans/empty/empty.md")
+    db.update("empty-t01", status="merged")
+    db.update("empty-t02", status="pr_open")
+    db.close()
+    app = App(home, repo)
+
+    status, _, body = _get(app, "/run?plan=form")
+    assert status == 200
+    assert "<title>Run form · demo</title>" in body
+    assert '<h1 class="lede">Run the form plan.</h1>' in body
+    assert '<li><a href="/">Board</a></li>' in body
+    assert '<li><a href="/#plan-form">form</a></li>' in body
+    assert '<h2 id="h-what">What will run <span class="count">4 now, 2 later</span></h2>' in body
+    what = re.search(r'<section class="block" aria-labelledby="h-what">(.*?)</section>', body, re.S).group(1)
+    rows = re.findall(r'<li class="row">(.*?)</li>', what, re.S)
+    assert len(rows) == 7
+    expected = {
+        "form-t01": "Starts now, to fix the failing checks on its pull request.",
+        "form-t02": "Starts now, with a fresh build.",
+        "form-t03": "Starts now, to resolve the conflict with its base.",
+        "form-t04": "Starts now, to address the review.",
+        "form-t05": "Starts when form-t04 has a pull request.",
+        "form-t06": "Starts when form-t05 has a pull request.",
+        "form-t07": "Running already; this run leaves it alone.",
+    }
+    for task_id, sentence in expected.items():
+        row = next(row for row in rows if f'>{task_id}</a>' in row)
+        assert sentence in row
+    for task_id in ("form-t08", "form-t09", "form-t10"):
+        assert task_id not in what
+
+    for field in (
+            '<label for="max-cost">Cost cap per task, in USD</label>',
+            '<input id="max-cost" name="max_cost" inputmode="decimal" value="5.00" required>',
+            '<span class="hint">A task stops once it has spent this much.</span>',
+            '<label for="parallel">Tasks at once</label>',
+            '<input id="parallel" name="parallel" inputmode="numeric" value="3">',
+            '<span class="hint">Independent tasks run side by side.</span>',
+            '<label for="attempts">Builds per task</label>',
+            '<input id="attempts" name="max_attempts" inputmode="numeric" value="3">',
+            '<span class="hint">How often review or the gates may send it back.</span>',
+            '<label for="flow">Agent flow</label>',
+            '<select id="flow" name="flow"><option selected>default</option></select>',
+            '<span class="hint">From .factory/config.yaml.</span>'):
+        assert field in body
+    assert ('<div class="cmd" data-preview><code>factory run form --max-cost 5.00 --parallel 3 '
+            '--max-attempts 3</code><button class="copy" type="button" hidden>Copy</button></div>') in body
+    assert ("Agents call your model provider, which costs money: at most $5.00 for each of 6 tasks, "
+            "$30.00 in all. The run keeps going if you close this page. Stop it from the board.") in body
+    assert '<button class="btn btn-primary">Start run</button>' in body
+    assert '<a class="btn btn-quiet" href="/">Cancel</a>' in body
+    assert f'<input type="hidden" name="token" value="{app.token}">' in body
+    assert '<input type="hidden" name="target" value="form">' in body
+    assert '<main class="wrap">' in body and "data-refresh" not in body
+
+    status, _, task = _get(app, "/run?task=form-t02")
+    assert status == 200
+    assert '<h1 class="lede">Run form-t02.</h1>' in task
+    assert '<li><a href="/tasks/form-t02">form-t02</a></li>' in task
+    assert '<h2 id="h-what">What will run</h2>' in task
+    assert 'name="parallel"' not in task
+    assert '<input type="checkbox" name="quiet" checked hidden>' in task
+    assert ("factory run form-t02 --max-cost 5.00 --max-attempts 3 --quiet"
+            in task)
+    assert "at most $5.00 for each of 1 tasks, $5.00 in all." in task
+    assert '<a class="btn btn-quiet" href="/tasks/form-t02">Cancel</a>' in task
+
+    status, _, empty = _get(app, "/run?plan=empty")
+    assert status == 200
+    assert "Every task of empty is merged, on hold or has a pull request." in empty
+    assert "<form" not in empty
+    for path in ("/run?plan=nope", "/run?task=nope", "/run"):
+        assert _get(app, path)[0] == 404
+
+
+def test_a_run_needs_a_valid_cost_cap_and_limits(home, repo):
+    db = _board(home, [_contract("limits-t01")], "docs/plans/limits/limits.md")
+    db.update("limits-t01", status="failed")
+    db.close()
+    recording = Recording()
+    app = App(home, repo, launch=recording)
+
+    base = {"target": "limits-t01", "max_attempts": "3", "flow": "default"}
+    status, _, body = _post(app, "run", base)
+    assert status == 400 and "The cost cap is required." in body
+    for cap in ("0", "-1", "abc", "1000.01"):
+        status, _, body = _post(app, "run", {**base, "max_cost": cap})
+        assert status == 400
+        assert "Enter a number above 0 and at most 1000." in body
+        assert f'value="{cap}"' in body
+    for parallel in ("0", "9", "2.5", "x"):
+        status, _, body = _post(app, "run", {
+            "target": "limits", "max_cost": "5.00", "parallel": parallel,
+            "max_attempts": "3", "flow": "default",
+        })
+        assert status == 400 and "Enter a whole number from 1 to 8." in body
+        assert f'value="{parallel}"' in body
+    for attempts in ("0", "6", "x"):
+        status, _, body = _post(app, "run", {
+            "target": "limits", "max_cost": "5.00", "parallel": "3",
+            "max_attempts": attempts, "flow": "default",
+        })
+        assert status == 400 and "Enter a whole number from 1 to 5." in body
+        assert f'value="{attempts}"' in body
+    status, _, body = _post(app, "run", {**base, "max_cost": "5.00", "flow": "nonsense"})
+    assert status == 400 and "Pick a flow from the list." in body
+    status, _, body = _post(app, "run", {**base, "max_cost": "0", "max_attempts": "6"})
+    assert status == 400
+    assert body.count('<span class="error">') == 2
+    assert '<input id="max-cost" name="max_cost" inputmode="decimal" value="0" required>' in body
+    assert '<input id="attempts" name="max_attempts" inputmode="numeric" value="6">' in body
+    assert recording.calls == [] and not (home / "web" / "jobs").exists()
+
+    valid = [
+        {"target": "limits-t01", "max_cost": "0.01"},
+        {"target": "limits-t01", "max_cost": "1000"},
+        {"target": "limits", "max_cost": "5.00", "parallel": "1"},
+        {"target": "limits", "max_cost": "5.00", "parallel": "8"},
+        {"target": "limits", "max_cost": "5.00", "max_attempts": "1"},
+        {"target": "limits", "max_cost": "5.00", "max_attempts": "5"},
+        {"target": "limits-t01", "max_cost": "5.00", "parallel": "99"},
+    ]
+    for fields in valid:
+        status, _, _ = _post(app, "run", fields)
+        assert status == 303
+    assert len(recording.calls) == len(valid)
+
+
+def test_starting_a_run_launches_factory_run_with_the_forms_flags(home, repo):
+    config_path = repo / ".factory/config.yaml"
+    config_path.write_text(config_path.read_text()
+                           + "\nflows:\n  strict: [plan, build, review, gates, verify]\n")
+    db = _board(home, [_contract("go-t01")], "docs/plans/go/go.md")
+    db.update("go-t01", status="failed")
+    db.close()
+    recording = Recording()
+    app = App(home, repo, launch=recording)
+
+    status, plan_headers, _ = _post(app, "run", {
+        "target": "go", "max_cost": "5.00", "parallel": "2", "max_attempts": "3",
+    })
+    assert status == 303 and plan_headers["Location"] == "/activity?job=000001"
+    status, _, _ = _post(app, "run", {
+        "target": "go", "max_cost": "5.00", "parallel": "2", "max_attempts": "3", "flow": "strict",
+    })
+    assert status == 303
+    status, task_headers, _ = _post(app, "run", {
+        "target": "go-t01", "max_cost": "2.5", "max_attempts": "4", "flow": "strict",
+    })
+    assert status == 303 and task_headers["Location"] == "/activity?job=000003"
+
+    expected = [
+        ("go", "factory run go --max-cost 5.00 --parallel 2 --max-attempts 3", "Started the go plan."),
+        ("go", "factory run go --max-cost 5.00 --parallel 2 --max-attempts 3 --flow strict",
+         "Started the go plan."),
+        ("go-t01", "factory run go-t01 --max-cost 2.5 --max-attempts 4 --flow strict --quiet",
+         "Started go-t01."),
+    ]
+    for number, (target, command, notice) in enumerate(expected, 1):
+        directory = home / "web" / "jobs" / f"{number:06d}"
+        record = json.loads((directory / "job.json").read_text())
+        assert record["command"] == command
+        assert record["argv"] == [sys.executable, "-m", "factory.cli", *command.split()[1:]]
+        assert record["kind"] == "run" and record["target"] == target
+        assert record["notice"] == notice
+        assert recording.calls[number - 1] == (
+            [sys.executable, "-m", "factory.web.jobs", str(directory)], repo)
+
+    _, _, activity = _get(app, plan_headers["Location"])
+    assert '<div class="notice notice-ok" role="status">' in activity
+    assert "Started the go plan." in activity
+    assert '<a href="/activity#job-000001">View job</a>' in activity
+    _, _, activity = _get(app, task_headers["Location"])
+    assert "Started go-t01." in activity
+    assert '<a href="/activity#job-000003">View job</a>' in activity
+
+    for path, preview in (
+            ("/run?plan=go", "factory run go --max-cost 2.5 --parallel 3 --max-attempts 3"),
+            ("/run?task=go-t01", "factory run go-t01 --max-cost 2.5 --max-attempts 3 --quiet")):
+        _, _, form = _get(app, path)
+        assert 'value="2.5"' in form
+        assert preview in form
+
+
+def test_a_run_cannot_be_started_without_the_form(home, repo):
+    db = _board(home, [
+        _contract("gate-t01"), _contract("gate-t02"), _contract("gate-t03"), _contract("gate-t04"),
+        _contract("gate-t05"), _contract("gate-t06", depends=["gate-t07"]), _contract("gate-t07"),
+        _contract("gate-t08"),
+    ], "docs/plans/gate/gate.md")
+    for task_id, state in (("gate-t01", "failed"), ("gate-t02", "building"), ("gate-t03", "merged"),
+                           ("gate-t04", "pr_open"), ("gate-t05", "abandoned"), ("gate-t08", "building")):
+        db.update(task_id, status=state)
+    db.claim("gate-t02", os.getpid())
+    db.claim("gate-t08", _dead_pid())
+    _add(db, [_contract("shut-t01")], "docs/plans/shut/shut.md")
+    db.update("shut-t01", status="merged")
+    db.close()
+    recording = Recording()
+    app = App(home, repo, launch=recording)
+
+    assert _post(app, "run", {"target": "gate-t01"})[0] == 400
+    refused = [
+        ("gate-t02", "gate-t02 is building; it is already running"),
+        ("gate-t08", "gate-t08 is building but its process is gone; check GitHub first, then run it again"),
+        ("gate-t03", "gate-t03 is merged; nothing to run"),
+        ("gate-t04", "gate-t04 has an open pull request; nothing to run"),
+        ("gate-t05", "gate-t05 is on hold; take it off hold first, then run it"),
+        ("gate-t06", "gate-t06 waits for gate-t07 (queued): each dependency needs a merged or an open PR"),
+        ("shut", "Every task of shut is merged, on hold or has a pull request."),
+        ("missing", "missing is neither a task on the board nor a plan"),
+    ]
+    for target, reason in refused:
+        status, _, body = _post(app, "run", {"target": target, "max_cost": "5.00"})
+        assert status == 409
+        assert "Run refused." in body and html.escape(reason, quote=True) in body
+    assert _post(app, "run", {"target": "gate-t01", "max_cost": "5.00", "token": "wrong"})[0] == 403
+    assert recording.calls == [] and not (home / "web" / "jobs").exists()
+
+    status, _, running = _get(app, "/run?task=gate-t02")
+    assert status == 200
+    assert "gate-t02 is building; it is already running" in running
+    assert "<form" not in running
+
+
+def test_missing_provider_keys_disable_start_run(home, repo, monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    db = _board(home, [_contract("keys-t01")], "docs/plans/keys/keys.md")
+    db.update("keys-t01", status="failed")
+    db.close()
+    app = App(home, repo)
+
+    _, _, body = _get(app, "/run?plan=keys")
+    assert "Set OPENROUTER_API_KEY first: the default flow's models need it." in body
+    assert '<button class="btn btn-primary" disabled>Start run</button>' in body
+    assert "factory run keys --max-cost 5.00 --parallel 3 --max-attempts 3" in body
+    assert "at most $5.00 for each of 1 tasks, $5.00 in all." in body
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "x")
+    _, _, enabled = _get(app, "/run?plan=keys")
+    assert "Set OPENROUTER_API_KEY first" not in enabled
+    assert '<button class="btn btn-primary" disabled>Start run</button>' not in enabled
+    assert '<button class="btn btn-primary">Start run</button>' in enabled
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    config_path = repo / ".factory/config.yaml"
+    config_path.write_text(config_path.read_text() + '\nmodels: {plan: "anthropic:claude-opus-5-5"}\n')
+    _, _, anthropic = _get(App(home, repo), "/run?plan=keys")
+    assert "Set ANTHROPIC_API_KEY first: the default flow's models need it." in anthropic
+    assert "Set OPENROUTER_API_KEY first" not in anthropic
+
+
+def test_run_buttons_appear_where_a_run_would_do_something(home, repo):
+    db = _board(home, [
+        _contract("btn-t01"), _contract("btn-t02"), _contract("btn-t03"), _contract("btn-t04"),
+        _contract("btn-t05"), _contract("btn-t06", depends=["btn-t01"]),
+        _contract("btn-t07"), _contract("btn-t08"),
+    ], "docs/plans/btn/btn.md")
+    for task_id, state in (("btn-t01", "failed"), ("btn-t02", "conflict"), ("btn-t03", "ci_failed"),
+                           ("btn-t04", "changes_requested"), ("btn-t07", "pr_open"),
+                           ("btn-t08", "merged")):
+        db.update(task_id, status=state)
+    for number in (2, 3, 4, 7):
+        db.update(f"btn-t{number:02d}", pr_url=f"https://github.test/pr/{number}")
+    _add(db, [_contract("onlywait-t01", depends=["btn-t06"])], "docs/plans/onlywait/onlywait.md")
+    _add(db, [_contract("onlyrun-t01"), _contract("onlyrun-t02", depends=["onlyrun-t01"])],
+         "docs/plans/onlyrun/onlyrun.md")
+    db.update("onlyrun-t01", status="building")
+    db.claim("onlyrun-t01", os.getpid())
+    _add(db, [_contract("doneplan-t01")], "docs/plans/doneplan/doneplan.md")
+    db.update("doneplan-t01", status="merged")
+    db.close()
+    app = App(home, repo)
+
+    _, _, board = _get(app)
+    needs = re.search(r'<section class="block" aria-labelledby="h-you">(.*?)</section>', board, re.S).group(1)
+    rows = re.findall(r'<li class="row">(.*?)</li>', needs, re.S)
+    for number in (1, 2, 3, 4):
+        task_id = f"btn-t{number:02d}"
+        row = next(row for row in rows if f'>{task_id}</a>' in row)
+        link = f'<a class="btn btn-primary" href="/run?task={task_id}">Run again</a>'
+        assert link in row
+        following = "Put on hold" if number == 1 else "Open pull request"
+        assert row.index("Run again") < row.index(following)
+    pr_row = next(row for row in rows if ">btn-t07</a>" in row)
+    assert "Run again" not in pr_row
+
+    def summary(name):
+        return re.search(rf'<details class="plan" id="plan-{name}"[^>]*>(.*?)</summary>', board, re.S).group(1)
+
+    assert '<a class="btn" href="/run?plan=btn">Run plan</a>' in summary("btn")
+    for name in ("onlywait", "onlyrun", "doneplan"):
+        assert "Run plan" not in summary(name)
+
+    _, _, conflict = _get(app, "/tasks/btn-t02")
+    assert '<a class="btn btn-primary" href="/run?task=btn-t02">Run again</a>' in conflict
+    _, _, pr_open = _get(app, "/tasks/btn-t07")
+    assert "Run again" not in pr_open
+    _, _, running = _get(app, "/tasks/onlyrun-t01")
+    assert "Run again" not in running
