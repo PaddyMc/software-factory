@@ -39,7 +39,10 @@ e2e:
 unit_tests: ["cargo test --workspace --exclude demo-e2e"]
 """
 
-GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+# Every git the tests start, directly or through the factory, sees this identity and no user or system config,
+# so a developer's settings (tag.gpgSign, commit.gpgSign, hooks, …) can't make a test fail locally that passes in CI.
+GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+           "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 
 
 def plan_text(yaml_body: str = TASK) -> str:
