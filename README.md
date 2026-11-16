@@ -71,7 +71,7 @@ The state is local to your machine, in `$FACTORY_HOME`. That defaults to `~/.loc
 | `$FACTORY_HOME/factory.db` | The SQLite database: every task's status, branch, PR and cost, and every agent run (older schemas migrate in place) |
 | `$FACTORY_HOME/worktrees/<task>/` | The task's git worktree, on branch `factory/<task>` |
 | `$FACTORY_HOME/logs/<task>.log` | Stage changes, agent messages, tool calls, gate results |
-| `$FACTORY_HOME/transcripts/<task>/NNNNN-ROLE-ATTEMPT.jsonl` | A full transcript per role step: system prompt, messages, tool calls and results, usage, cost |
+| `$FACTORY_HOME/transcripts/<task>/NNNNN-ROLE-ATTEMPT.jsonl` | A full transcript per role step: system prompt, messages, tool calls and results, usage, cost, and the reasoning each model returned |
 | `$FACTORY_HOME/cache/` | Shared build caches, and the OpenRouter price list (refreshed daily) |
 
 To keep a separate board, for example for experiments, set `FACTORY_HOME` or `home:` in the config. Inside the repository, the factory's only files are the ones [`factory init` writes](docs/reference.md#factory-init) and your plans.

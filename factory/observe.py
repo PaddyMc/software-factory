@@ -211,7 +211,14 @@ def render_transcript(path: Path, full: bool = False, limit: int = 2000) -> str:
         elif t == "ai":
             cost = f" ${e['cost_usd']:.4f}" if e.get("cost_usd") is not None else ""
             u = e.get("usage", {})
-            out.append(f"{at} [agent step {e['step']}] {u.get('in', 0)} in / {u.get('out', 0)} out{cost}")
+            think = u.get("reasoning") or 0
+            thinking = f" ({think} thinking)" if think > 0 else ""
+            out.append(f"{at} [agent step {e['step']}] {u.get('in', 0)} in / {u.get('out', 0)} out{thinking}{cost}")
+            reasoning = e.get("reasoning")
+            if reasoning:
+                out.append("thinks: " + cut(reasoning))
+            elif think > 0:
+                out.append(f"thinks: ({think} tokens; the model didn't share its reasoning)")
             if e.get("text"):
                 out.append(cut(e["text"]))
             for tc in e.get("tool_calls", []):
@@ -231,7 +238,7 @@ def _brief_args(args: dict) -> str:
 
 
 def trace_rows(events: list[dict]) -> list[dict]:
-    """One row per model call: how long the model took, how long its tools took, context size, cost."""
+    """One row per model call: model and tool time, context size, thinking tokens and cost."""
     import datetime as dt
 
     def at(e):
@@ -255,6 +262,7 @@ def trace_rows(events: list[dict]) -> list[dict]:
             "model_s": (t_ai - mark).total_seconds() if t_ai and mark else None,
             "tools_s": (t_done - t_ai).total_seconds() if results and t_ai and t_done else 0.0,
             "ctx_in": u.get("in", 0), "out": u.get("out", 0), "cached": u.get("cache_read", 0) or 0,
+            "thinking": u.get("reasoning"),
             "cost": e.get("cost_usd"),
             "calls": [f"{tc['name']}({_brief_args(tc['args'])})" for tc in e.get("tool_calls", [])] or ["(final answer)"],
             "result_chars": sum(len(str(r.get("content", ""))) for r in results),
@@ -275,20 +283,24 @@ def render_trace(path: Path, width: int | None = None) -> str:
     rows = trace_rows(events)
     out = [f"model {system.get('model', '?')} · max_steps {system.get('max_steps', '?')} · system prompt "
            f"{len(system.get('content', ''))} chars · task message {len(human.get('content', ''))} chars", ""]
-    head = f"{'step':>4} {'model':>7} {'tools':>7} {'ctx in':>8} {'cached':>7} {'out':>6} {'cost':>8} {'result':>7}  calls"
+    head = f"{'step':>4} {'model':>7} {'tools':>7} {'ctx in':>8} {'cached':>7} {'out':>6} {'think':>6} {'cost':>8} {'result':>7}  calls"
     out += [head, "-" * min(width, 120)]
     for r in rows:
         secs = lambda v: "-" if v is None else f"{v:.1f}s"
         cost = "-" if r["cost"] is None else f"${r['cost']:.4f}"
+        think = "-" if r["thinking"] is None else str(r["thinking"])
         flag = f" ⚠{r['refused']} refused" if r["refused"] else ""
         out.append(fit(f"{r['step']:>4} {secs(r['model_s']):>7} {secs(r['tools_s']):>7} {r['ctx_in']:>8} "
-                       f"{r['cached']:>7} {r['out']:>6} {cost:>8} {r['result_chars']:>7}  "
+                       f"{r['cached']:>7} {r['out']:>6} {think:>6} {cost:>8} {r['result_chars']:>7}  "
                        f"{', '.join(r['calls'])}{flag}", width))
     if not rows:
         return "\n".join(out + ["(no model calls recorded)"])
     tin = sum(r["ctx_in"] for r in rows)
     tout = sum(r["out"] for r in rows)
     cached = sum(r["cached"] for r in rows)
+    thinking = sum(r["thinking"] or 0 for r in rows)
+    thinking_note = (f" ({thinking:,} thinking)"
+                     if any(r["thinking"] is not None for r in rows) else "")
     model_s = sum(r["model_s"] or 0 for r in rows)
     tools_s = sum(r["tools_s"] for r in rows)
     costs = [r["cost"] for r in rows if r["cost"] is not None]
@@ -299,7 +311,7 @@ def render_trace(path: Path, width: int | None = None) -> str:
             f"  steps {len(rows)}" + (f" — stopped: {stopped['reason']}" if stopped else ""),
             f"  time  model {human_secs(model_s)} · tools {human_secs(tools_s)}",
             f"  tokens  input {tin:,} (context re-sent every step: {rows[0]['ctx_in']:,} → {rows[-1]['ctx_in']:,}"
-            f"; {cached:,} served from cache) · output {tout:,}",
+            f"; {cached:,} served from cache) · output {tout:,}{thinking_note}",
             f"  cost  {'$%.4f' % sum(costs) if costs else 'unknown'}"
             + (f" · input share {100 * tin / max(1, tin + tout):.0f}% of tokens" if rows else ""),
             "  tool mix  " + ", ".join(f"{k} ×{v}" for k, v in mix.most_common()),
