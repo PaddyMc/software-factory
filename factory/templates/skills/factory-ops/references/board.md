@@ -10,6 +10,14 @@ pgrep -af "factory run" | grep -v pgrep
 
 Plan runs and task runs live outside your session. While any is active, don't switch the main checkout's branch (new tasks start from its current branch), don't reset the database, and don't remove worktrees.
 
+## How is the factory doing?
+
+```bash
+factory stats [--since DATE] [--until DATE] [--plan P] [--json]
+```
+
+This is read-only: it reads the board and summarises outcomes, attempts, costs, gate failures, reworks and human edits over the window. Its per-step rows are split by flow, model and prompt version. `--since` is inclusive, `--until` exclusive, and either can be omitted; `--plan` takes a plan name or path. `factory show TASK --role merge` shows whether one task merged `as_built` or was `edited`, with the human's commits when available.
+
 ## Reset the board ("clean the db and start all tasks again")
 
 Archive rather than delete, and keep the build cache warm. `factory config` prints the board's directory:
