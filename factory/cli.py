@@ -685,15 +685,18 @@ def cmd_sync(a) -> int:
         print("contracts invalid (fix, then sync):\n  " + "\n  ".join(errs), file=sys.stderr)
         return 1
     db = _db()
-    added, updated, orphaned = db.sync(tasks)
-    print(f"synced {len(tasks)} tasks from the plans: {len(added)} added, {len(updated)} updated")
-    for t in orphaned:
-        print(f"  note: {t} is in the db but no longer in any plan")
-    ready = [r["id"] for r in db.tasks() if r["status"] == "queued" and db.ready(r["id"])]
-    print("ready to run: " + (", ".join(ready) if ready else "none"))
-    print("run a whole plan: factory run <plan>   (e.g. factory run "
-          + contracts.plan_name(next(iter(tasks.values())).plan) + ")" if tasks else "")
-    return 0
+    try:
+        added, updated, orphaned = db.sync(tasks)
+        print(f"synced {len(tasks)} tasks from the plans: {len(added)} added, {len(updated)} updated")
+        for t in orphaned:
+            print(f"  note: {t} is in the db but no longer in any plan")
+        ready = [r["id"] for r in db.tasks() if r["status"] == "queued" and db.ready(r["id"])]
+        print("ready to run: " + (", ".join(ready) if ready else "none"))
+        print("run a whole plan: factory run <plan>   (e.g. factory run "
+              + contracts.plan_name(next(iter(tasks.values())).plan) + ")" if tasks else "")
+        return 0
+    finally:
+        db.close()
 
 
 def cmd_logs(a) -> int:

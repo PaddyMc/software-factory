@@ -5,6 +5,7 @@ import datetime as dt
 import hashlib
 import json
 import shutil
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -290,6 +291,24 @@ def test_a_bench_run_leaves_the_board_and_the_repository_alone(bench_repo, home,
     assert json.loads(fake_gh.read_text())["calls"] == []
     for cell in load_results(home)["cells"]:
         assert git(bench_run_dir(home) / cell["dir"] / "repo", "remote") == ""
+
+
+def test_sync_releases_the_board_database(bench_repo, home, monkeypatch):
+    import factory.cli as cli
+
+    opened = []
+    real_db = cli._db
+
+    def retain_db():
+        db = real_db()
+        opened.append(db)
+        return db
+
+    monkeypatch.setattr(cli, "_db", retain_db)
+    assert main(["sync"]) == 0
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        opened[0].tasks()
 
 
 def test_the_budget_caps_cells_and_stops_starting_new_ones(bench_repo, home, monkeypatch):
