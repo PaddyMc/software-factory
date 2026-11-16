@@ -76,6 +76,68 @@ def test_a_model_that_keeps_failing_ends_the_run_with_its_error(tmp_path, monkey
         _roles(tmp_path, 5).plan(_ctx(tmp_path, []))
 
 
+def test_reasoning_is_recorded_with_each_step(tmp_path, monkeypatch):
+    reasoning = "The repository layout comes first; then the plan can name its files."
+    plays = {"PLANNER": [call("list_dir", path="."), AIMessage(
+        "the plan", additional_kwargs={"reasoning_content": reasoning},
+        usage_metadata={"input_tokens": 100, "output_tokens": 30, "total_tokens": 130,
+                        "output_token_details": {"reasoning": 25}})],
+             "_calls": [], "_verdicts": []}
+    monkeypatch.setattr(agents, "build_model", lambda spec: ScriptedModel(plays=plays))
+    events = []
+    out = _roles(tmp_path, 5).plan(_ctx(tmp_path, events))
+    ai = [e for e in events if e["type"] == "ai"]
+    assert ai[0]["reasoning"] == "" and ai[0]["usage"]["reasoning"] is None
+    assert ai[1]["reasoning"] == reasoning
+    assert ai[1]["usage"] == {"in": 100, "out": 30, "cache_read": 0, "reasoning": 25}
+    assert ai[1]["text"] == "the plan" and out.text == "the plan"
+    assert out.thinking == 25 and out.tokens_out == 30
+    logs = [e["msg"] for e in events if e["type"] == "log"]
+    assert any(line.startswith("done: 2 steps, 100 tokens in / 30 out (25 thinking)") for line in logs)
+
+
+def test_reasoning_blocks_in_the_content_are_recorded_and_kept_out_of_the_answer(tmp_path, monkeypatch):
+    reply = AIMessage(content=[{"type": "reasoning", "reasoning": "first"},
+                               {"type": "reasoning", "reasoning": "second"},
+                               {"type": "text", "text": "the plan"}])
+    plays = {"PLANNER": [reply], "_calls": [], "_verdicts": []}
+    monkeypatch.setattr(agents, "build_model", lambda spec: ScriptedModel(plays=plays))
+    events = []
+    out = _roles(tmp_path, 5).plan(_ctx(tmp_path, events))
+    event = next(e for e in events if e["type"] == "ai")
+    assert event["reasoning"] == "first\n\nsecond" and event["usage"]["reasoning"] is None
+    assert event["text"] == "the plan" and out.text == "the plan"
+
+
+def test_the_log_gets_a_thinks_line_before_the_step_says_and_calls(tmp_path, monkeypatch):
+    reply = AIMessage(
+        "considering", additional_kwargs={"reasoning_content": "t" * 1000},
+        tool_calls=[{"name": "list_dir", "args": {"path": "."}, "id": "c-list_dir-1", "type": "tool_call"}])
+    plays = {"PLANNER": [reply, AIMessage("the plan")], "_calls": [], "_verdicts": []}
+    monkeypatch.setattr(agents, "build_model", lambda spec: ScriptedModel(plays=plays))
+    events = []
+    _roles(tmp_path, 5).plan(_ctx(tmp_path, events))
+    logs = [e["msg"] for e in events if e["type"] == "log"]
+    thinks = [line for line in logs if line.startswith("thinks: ")]
+    assert thinks == ["thinks: " + "t" * 239 + "…"]
+    says = logs.index("says: considering")
+    call_log = next(i for i, line in enumerate(logs) if line.startswith("→ list_dir("))
+    assert logs.index(thinks[0]) < says < call_log
+
+
+def test_a_step_without_reasoning_records_none(tmp_path, monkeypatch):
+    plays = {"PLANNER": [AIMessage("the plan")], "_calls": [], "_verdicts": []}
+    monkeypatch.setattr(agents, "build_model", lambda spec: ScriptedModel(plays=plays))
+    events = []
+    out = _roles(tmp_path, 5).plan(_ctx(tmp_path, events))
+    event = next(e for e in events if e["type"] == "ai")
+    assert event["reasoning"] == "" and event["usage"]["reasoning"] is None
+    logs = [e["msg"] for e in events if e["type"] == "log"]
+    assert not any(line.startswith("thinks: ") for line in logs)
+    assert out.thinking == 0
+    assert "done: 1 steps, 0 tokens in / 0 out" in logs
+
+
 def test_trace_shows_context_growth_timing_and_largest_results(tmp_path):
     t = tmp_path / "run.jsonl"
     ev = [
