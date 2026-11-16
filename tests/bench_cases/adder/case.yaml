@@ -1,0 +1,20 @@
+title: Add integer addition to the calc package
+kind: feature
+requires: [python3]
+config:
+  unit_tests: ["python3 -m unittest -q"]
+  dependency_sources: []
+  sandbox: {ro_binds: [], rw_binds: [], path: [], hide: []}
+contract:
+  id: adder-t01
+  goal: "Add `add(a, b)` to the calc package so it returns the sum of its two arguments"
+  spec_refs: ["docs/plans/adder.md"]
+  depends_on: []
+  non_goals: ["Changing the existing double(x) function or adding dependencies"]
+  acceptance:
+    - "calc.add(a, b) returns a + b for positive and negative sums, including negative operands and zero"
+    - "Add visible unittest coverage in tests/test_adder.py, including add(2, 3) == 5, while keeping double(x) and its tests working"
+  verification: ["python3 -m unittest -v tests.test_adder"]
+  risk: low
+hidden:
+  - python3 -m unittest -v bench_hidden.test_adder
