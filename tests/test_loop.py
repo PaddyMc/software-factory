@@ -72,7 +72,7 @@ def _trim_run(tmp_path, monkeypatch):
 
 
 def test_loop_is_a_list_of_known_behaviours(repo, monkeypatch, capsys):
-    assert F.LOOP == ("trim", "map", "nudge")
+    assert F.LOOP == ("trim", "map", "nudge", "resume")
     step = F.parse_step("careful", {"name": "reading", "kind": "build", "loop": ["trim"]})
     assert step.loop == ("trim",)
     assert F.parse_step("careful", "build").loop == ()
@@ -359,3 +359,175 @@ def test_nudge_names_a_command_that_keeps_failing(tmp_path, monkeypatch):
     logs = [e for e in events if e["type"] == "log" and e["msg"].startswith("nudge: failing:")]
     assert len(logs) == 1 and logs[0]["tag"] == "build#1"
     assert out.steps == 12 and out.stopped is None and out.refused == 3
+
+
+def test_resume_is_for_build_steps_only():
+    assert "resume" in F.LOOP
+    step = F.parse_step("careful", {"name": "fix", "kind": "build", "loop": ["trim", "resume"]})
+    assert step.loop == ("trim", "resume")
+
+    for kind in ("plan", "review", "verify"):
+        with pytest.raises(C.ConfigError, match="only valid on build steps") as error:
+            F.parse_step("careful", {"name": "fix", "kind": kind, "loop": ["resume"]})
+        assert "careful" in str(error.value) and "fix" in str(error.value)
+    with pytest.raises(C.ConfigError, match="gates step") as error:
+        F.parse_step("careful", {"kind": "gates", "loop": ["resume"]})
+    assert "careful" in str(error.value) and "gates" in str(error.value)
+
+
+def test_a_resumed_attempt_continues_the_conversation_with_the_feedback(tmp_path, monkeypatch):
+    (tmp_path / "big.txt").write_text("MARKER-" + "x" * 2000 + "\n")
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "add", "big.txt")
+    git(tmp_path, "commit", "-q", "-m", "init")
+    monkeypatch.setattr(agents, "TRIM_AT", 200)
+    monkeypatch.setattr(agents, "TRIM_KEEP", 0)
+    plays = {"BUILDER": [call("read_file", path="big.txt"), AIMessage("first attempt report"),
+                         AIMessage("second attempt report")],
+             "_calls": [], "_verdicts": [], "_seen": []}
+    monkeypatch.setattr(agents, "build_model", lambda spec: SeenModel(plays=plays))
+    roles = _builder_roles(tmp_path)
+    step = F.Step("build", "build", loop=("trim", "map", "resume"))
+
+    first_events = []
+    first_ctx = _ctx(tmp_path, first_events)
+    first_ctx.attempt = 1
+    first_ctx.plan = "the original plan"
+    first = roles.step(step, first_ctx)
+
+    second_events = []
+    second_ctx = _ctx(tmp_path, second_events)
+    second_ctx.attempt = 2
+    second_ctx.plan = "a new plan must not be sent"
+    second_ctx.feedback = "verification failed; fix the greeting"
+    second_ctx.earlier = ("The preceding build step finished.",)
+    second = roles.step(step, second_ctx)
+
+    assert first.steps == 2 and first.text == "first attempt report"
+    assert second.steps == 1 and second.text == "second attempt report"
+    assert len(plays["_seen"]) == 3
+    request = plays["_seen"][2]
+    assert [type(m) for m in request] == [SystemMessage, HumanMessage, AIMessage, ToolMessage,
+                                          AIMessage, HumanMessage]
+    assert request[1].content.startswith("Implement task demo-t01 (attempt 1).\n\n# Plan\n\nthe original plan")
+    assert request[2].tool_calls[0]["name"] == "read_file"
+    assert request[3].content == "[cleared: read_file(path=big.txt): call it again if you need it]"
+    assert request[4].text == "first attempt report"
+    assert request[5].content == (
+        "# Attempt 2\n\n"
+        "# Feedback to address first\n\nverification failed; fix the greeting\n\n"
+        "# Earlier build steps in this attempt\n\n1. The preceding build step finished."
+    )
+    assert sum("# Plan" in str(m.content) for m in request[1:]) == 1
+    assert sum("# Repository map" in str(m.content) for m in request[1:]) == 1
+
+    recorded = [e for e in second_events if e["type"] != "log"]
+    assert [e["type"] for e in recorded[:3]] == ["resumed", "system", "human"]
+    assert recorded[0] == {"type": "resumed", "messages": 4}
+    assert recorded[2]["content"] == request[5].content
+    assert len([e for e in recorded if e["type"] == "human"]) == 1
+    assert not [e for e in recorded if e["type"] == "tool"]
+    assert [e["text"] for e in recorded if e["type"] == "ai"] == ["second attempt report"]
+    assert any(e["type"] == "tool" and "MARKER-" in e["content"] for e in first_events)
+
+
+def test_each_attempt_has_its_own_step_limit_and_counts(tmp_path, monkeypatch):
+    def used(message, tin, tout):
+        return message.model_copy(update={"usage_metadata": {
+            "input_tokens": tin, "output_tokens": tout, "total_tokens": tin + tout}})
+
+    plays = {"BUILDER": [
+        used(call("list_dir", path="."), 10, 1),
+        used(call("list_dir", path="."), 20, 2),
+        AIMessage("not played"),
+        used(call("list_dir", path="."), 30, 3),
+        used(call("list_dir", path="."), 40, 4),
+    ], "_calls": [], "_verdicts": [], "_seen": []}
+    monkeypatch.setattr(agents, "build_model", lambda spec: SeenModel(plays=plays))
+    monkeypatch.setattr(agents.prices, "cost", lambda spec, tin, tout, cached: tin / 1000)
+    roles = _builder_roles(tmp_path, max_steps=2)
+    step = F.Step("build", "build", loop=("resume",))
+
+    first_events = []
+    first_ctx = _ctx(tmp_path, first_events)
+    first_ctx.attempt = 1
+    first = roles.step(step, first_ctx)
+    second_events = []
+    second_ctx = _ctx(tmp_path, second_events)
+    second_ctx.attempt = 2
+    second_ctx.feedback = "keep going"
+    second = roles.step(step, second_ctx)
+
+    for out, tin, tout, cost in ((first, 30, 3, 0.03), (second, 70, 7, 0.07)):
+        assert out.steps == 2 and out.stopped == "step limit"
+        assert (out.tokens_in, out.tokens_out) == (tin, tout)
+        assert out.cost_usd == pytest.approx(cost)
+    assert len(plays["_seen"]) == 4                 # two fresh model calls in each attempt
+    assert [e["step"] for e in first_events if e["type"] == "ai"] == [1, 2]
+    assert [e["step"] for e in second_events if e["type"] == "ai"] == [1, 2]
+    resumed = next(e for e in second_events if e["type"] == "resumed")
+    assert resumed["messages"] == 6                 # human, two calls/results, and the limit marker
+
+
+def test_the_first_attempt_and_a_resolve_start_fresh(tmp_path, monkeypatch):
+    class SometimesFails(SeenModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            if any(isinstance(m, HumanMessage) and "BOOM" in str(m.content) for m in messages):
+                raise RuntimeError("model exploded")
+            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    monkeypatch.setattr(agents, "MODEL_RETRY", {"max_retries": 1, "initial_delay": 0.0})
+    plays = {"BUILDER": [AIMessage("done")], "_calls": [], "_verdicts": [], "_seen": []}
+    monkeypatch.setattr(agents, "build_model", lambda spec: SometimesFails(plays=plays))
+    roles = _builder_roles(tmp_path)
+    step = F.Step("build", "build", loop=("resume",))
+
+    first_events = []
+    first = _ctx(tmp_path, first_events)
+    first.attempt = 1
+    first.plan = "the plan"
+    roles.step(step, first)
+    assert any("first attempt of the step in this run" in e.get("msg", "") for e in first_events)
+    assert len(roles.resumes["build"].messages) == 2
+
+    resolve_events = []
+    resolve = _ctx(tmp_path, resolve_events)
+    resolve.attempt = 1
+    resolve.resolution = "the conflict brief"
+    roles.resolve(resolve, step)
+    assert any("conflict resolution" in e.get("msg", "") for e in resolve_events)
+    assert not roles.resumes                              # a resolve neither resumes nor seeds memory
+
+    after_resolve_events = []
+    after_resolve = _ctx(tmp_path, after_resolve_events)
+    after_resolve.attempt = 2
+    after_resolve.plan = "the plan"
+    after_resolve.feedback = "review after the resolve"
+    roles.step(step, after_resolve)
+    assert any("nothing to resume after a conflict resolution" in e.get("msg", "")
+               for e in after_resolve_events)
+    assert not [e for e in after_resolve_events if e["type"] == "resumed"]
+
+    failed = _ctx(tmp_path, [])
+    failed.attempt = 3
+    failed.feedback = "BOOM"
+    with pytest.raises(RuntimeError, match="model exploded"):
+        roles.step(step, failed)
+    assert roles.resumes["build"].error
+
+    recovered_events = []
+    recovered = _ctx(tmp_path, recovered_events)
+    recovered.attempt = 4
+    recovered.plan = "the plan"
+    recovered.feedback = "recovered"
+    roles.step(step, recovered)
+    assert any("an earlier attempt ended in an error" in e.get("msg", "") for e in recovered_events)
+    human = next(e["content"] for e in recovered_events if e["type"] == "human")
+    assert human.startswith("Implement task demo-t01 (attempt 4).\n\n# Plan")
+    assert not [e for e in recovered_events if e["type"] == "resumed"]
+
+    # Every fresh case sent one new task message, never an earlier conversation.
+    assert [[type(m) for m in request] for request in plays["_seen"]] == [
+        [SystemMessage, HumanMessage], [SystemMessage, HumanMessage],
+        [SystemMessage, HumanMessage], [SystemMessage, HumanMessage],
+    ]

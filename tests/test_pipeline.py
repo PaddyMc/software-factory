@@ -14,7 +14,7 @@ from factory import agents
 from factory import prbody
 from factory.cli import main
 from factory.db import open_db
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from fake_model import E2E, ScriptedModel, call, scripts
 from conftest import DEMO_CONFIG, git, plan_text
@@ -1579,6 +1579,56 @@ def test_gates_first_flow_reviews_on_a_passing_build(factory_repo, home, fake_gh
     assert calls.count(("REVIEWER", 0)) == 1
     body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
     assert "Reviewer report (review)" in body and "VERDICT: APPROVE" in body
+
+
+def test_a_resuming_builder_gets_gate_feedback_in_the_same_conversation(factory_repo, home, fake_gh, monkeypatch):
+    _flow_config(factory_repo, "flow: resuming\nflows:\n  resuming:\n    - plan\n"
+                               "    - {kind: build, loop: [resume]}\n    - gates\n    - verify\n")
+    seen = []
+
+    class SeenModel(ScriptedModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            if any(isinstance(m, SystemMessage) and "You are the BUILDER" in str(m.content) for m in messages):
+                seen.append(list(messages))
+            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    plays = scripts(review_verdicts=[])
+    plays["BUILDER"] = [
+        call("write_file", path="src/greet.txt", content="bye\n"),
+        call("write_file", path="crates/e2e/tests/greet.rs", content=E2E),
+        call("write_file", path="docs/sessions/2026-10-09.md", content="## [12:00] demo-t01\n"),
+        AIMessage("Wrote the wrong greeting.\nRESULT: DONE"),
+        call("write_file", path="src/greet.txt", content="hello\n"),
+        AIMessage("Fixed the greeting.\nRESULT: DONE"),
+    ]
+    monkeypatch.setattr(agents, "build_model", lambda spec: SeenModel(plays=plays))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, "--max-attempts", "2", *SANDBOX]) == 0
+
+    db = open_db(home)
+    assert db.task("demo-t01")["status"] == "pr_open" and db.task("demo-t01")["attempts"] == 2
+    builds = [r for r in db.runs("demo-t01") if r["role"] == "build"]
+    assert [(r["attempt"], r["steps"], r["outcome"]) for r in builds] == [
+        (1, 4, "committed"), (2, 2, "committed")]
+
+    assert len(seen) == 6
+    resumed = seen[4]                              # attempt 1 used script entries 0–3
+    carried = resumed[1:-1]
+    assert isinstance(resumed[0], SystemMessage) and isinstance(resumed[-1], HumanMessage)
+    assert len(carried) == 8                       # human, three calls/results, final report
+    assert [(m.type, str(m.content)) for m in carried[:-1]] == [
+        (m.type, str(m.content)) for m in seen[3][1:]]
+    assert carried[-1].text == "Wrote the wrong greeting.\nRESULT: DONE"
+    assert sum("# Plan" in str(m.content) for m in resumed[1:]) == 1
+    feedback = resumed[-1].content
+    assert feedback.startswith("# Attempt 2\n\n# Feedback to address first\n\n")
+    assert "Verification gates failed: verification" in feedback and "### verification" in feedback
+    assert "# Plan" not in feedback and "# Repository map" not in feedback
+
+    events = [json.loads(line) for line in open(builds[1]["transcript"])]
+    assert [e["type"] for e in events[:3]] == ["resumed", "system", "human"]
+    assert events[0]["messages"] == 8 and events[2]["content"] == feedback
+    assert len([e for e in events if e["type"] == "human"]) == 1
+    assert len([e for e in events if e["type"] == "tool"]) == 1  # earlier messages are not written again
 
 
 def test_two_build_steps_both_run_each_attempt(factory_repo, home, fake_gh, monkeypatch):

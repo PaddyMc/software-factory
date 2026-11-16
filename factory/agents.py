@@ -304,16 +304,17 @@ class TrimMiddleware(AgentMiddleware):
         self.ctx = ctx
         self.cleared: set[int] = set()       # message positions: the conversation only appends
 
+    def view(self, messages):
+        """The non-system messages with every result cleared so far replaced by its placeholder."""
+        messages = [m for m in messages if not isinstance(m, SystemMessage)]
+        details = _tool_details(messages)
+        return [m.model_copy(update={"content": _cleared(*details[i])})
+                if isinstance(m, ToolMessage) and i in self.cleared else m
+                for i, m in enumerate(messages)]
+
     def wrap_model_call(self, request, handler):
         messages = [m for m in request.messages if not isinstance(m, SystemMessage)]
-        details = _tool_details(messages)
-
-        def view(positions):
-            return [m.model_copy(update={"content": _cleared(*details[i])})
-                    if isinstance(m, ToolMessage) and i in positions else m
-                    for i, m in enumerate(messages)]
-
-        trimmed = view(self.cleared)
+        trimmed = self.view(messages)
         before = count_tokens_approximately(trimmed)
         if before > TRIM_AT:
             results = [i for i, m in enumerate(messages) if isinstance(m, ToolMessage)]
@@ -321,7 +322,7 @@ class TrimMiddleware(AgentMiddleware):
             newly = [i for i in candidates if i not in self.cleared]
             if newly:
                 self.cleared.update(newly)
-                trimmed = view(self.cleared)
+                trimmed = self.view(messages)
                 after = count_tokens_approximately(trimmed)
                 self.ctx.record({"type": "trim", "cleared": len(newly),
                                  "tokens_before": before, "tokens_after": after})
@@ -333,11 +334,12 @@ class TrimMiddleware(AgentMiddleware):
 
 class NudgeMiddleware(AgentMiddleware):
     """Warn once per budget, repeatedly edited path or repeatedly failing command."""
-    def __init__(self, tag: str, ctx: Ctx, max_steps: int):
+    def __init__(self, tag: str, ctx: Ctx, max_steps: int, carried_calls: int = 0):
         super().__init__()
         self.tag = tag
         self.ctx = ctx
         self.max_steps = max_steps
+        self.carried_calls = carried_calls
         self.budget_nudged = False
         self.nudged_paths: set[str] = set()
         self.nudged_commands: set[str] = set()
@@ -348,8 +350,8 @@ class NudgeMiddleware(AgentMiddleware):
         history = state.get("messages") or request.messages
         messages = [m for m in history if not isinstance(m, SystemMessage)]
         nudges: list[tuple[str, str]] = []
-        used = sum(isinstance(m, AIMessage) and not str(m.content).startswith(CALL_LIMIT_MARKER)
-                   for m in messages)
+        used = max(0, sum(isinstance(m, AIMessage) and not str(m.content).startswith(CALL_LIMIT_MARKER)
+                          for m in messages) - self.carried_calls)
         threshold = (3 * self.max_steps + 3) // 4
         if used >= threshold and not self.budget_nudged:
             self.budget_nudged = True
@@ -393,12 +395,20 @@ class NudgeMiddleware(AgentMiddleware):
         return handler(request.override(messages=[*request.messages, *(HumanMessage(text) for _, text in nudges)]))
 
 
+@dataclass
+class _Carried:
+    """One build step's resumable conversation, or an error that forbids resuming it."""
+    messages: tuple = ()
+    error: bool = False
+
+
 class LangChainRoles:
     def __init__(self, root: Path, model_override: str | None = None, model_factory=None, cfg: Config | None = None):
         self.root = root
         self.model_override = model_override
         self.model_factory = model_factory
         self.cfg = cfg or Config()
+        self.resumes: dict[str, _Carried] = {}
 
     def step(self, step: Step, ctx: Ctx, tag: str | None = None, message: str | None = None) -> Output:
         """Run one flow step: its kind's tools and task message, its own prompt, model and step limit.
@@ -417,40 +427,87 @@ class LangChainRoles:
         version = prompt_version(text for text, per_task in parts if text and not per_task)
         tools, default_message, log = self._kit(step, ctx)
         message = message if message is not None else default_message
-        if "map" in step.loop:
+        tag = tag or (f"{step.name}#{ctx.attempt}" if step.kind in ("build", "review") else step.name)
+
+        resume = step.kind == "build" and "resume" in step.loop
+        remember = resume and not ctx.resolution
+        carried = ()
+        resumed = False
+        if resume:
+            previous = self.resumes.get(step.name)
+            if ctx.resolution:
+                # A resolve neither continues nor seeds a conversation; its next build attempt starts fresh too.
+                self.resumes.pop(step.name, None)
+                ctx.log(tag, "resume: starting fresh — a conflict resolution does not resume or seed a conversation")
+            elif ctx.attempt <= 1:
+                # A new run's first attempt never uses memory left by an earlier run on the same object.
+                self.resumes.pop(step.name, None)
+                ctx.log(tag, "resume: starting fresh — first attempt of the step in this run")
+            elif previous is not None and previous.error:
+                ctx.log(tag, "resume: starting fresh — an earlier attempt ended in an error")
+            elif previous is not None and previous.messages:
+                carried = previous.messages
+                resumed = True
+                message = f"# Attempt {ctx.attempt}"
+                if ctx.feedback:
+                    message += f"\n\n# Feedback to address first\n\n{ctx.feedback}"
+                if ctx.earlier:
+                    seen = "\n\n".join(f"{i}. {m}" for i, m in enumerate(ctx.earlier, 1))
+                    message += f"\n\n# Earlier build steps in this attempt\n\n{seen}"
+                ctx.log(tag, f"resume: carrying {len(carried)} messages into attempt {ctx.attempt}")
+            else:
+                ctx.log(tag, "resume: starting fresh — nothing to resume after a conflict resolution")
+        if "map" in step.loop and not resumed:
             block = repository_map(ctx.worktree, ctx.task.spec_refs)
             if block:
                 message = f"{message}\n\n{block}"
-        tag = tag or (f"{step.name}#{ctx.attempt}" if step.kind in ("build", "review") else step.name)
+
         middleware = [ModelCallLimitMiddleware(run_limit=steps, exit_behavior="end"),
                       ModelRetryMiddleware(**MODEL_RETRY, on_failure="error"), tool_errors(ctx.worktree)]
+        trimmer = None
         if "trim" in step.loop:
-            middleware.append(TrimMiddleware(tag, ctx))
+            trimmer = TrimMiddleware(tag, ctx)
+            middleware.append(trimmer)
         if "nudge" in step.loop:
-            middleware.append(NudgeMiddleware(tag, ctx, steps))
+            carried_calls = sum(isinstance(m, AIMessage) and not str(m.content).startswith(CALL_LIMIT_MARKER)
+                                for m in carried)
+            middleware.append(NudgeMiddleware(tag, ctx, steps, carried_calls))
         agent = create_agent(
             (self.model_factory or build_model)(spec), tools, system_prompt=system, middleware=middleware,
         )
         ctx.log(tag, f"start ({spec}, max {steps} steps)")
         if step.kind == "review" and "VERDICT:" not in instructions:
             ctx.log(tag, f"⚠ {step.name}'s prompt has no VERDICT: line; every review will count as CHANGES")
+        if resumed:
+            ctx.record({"type": "resumed", "messages": len(carried)})
         ctx.record({"type": "system", "model": spec, "max_steps": steps, "content": system})
         ctx.record({"type": "human", "content": message})
         out = Output(text="", model=spec, prompt_version=version)
+        human = HumanMessage(message)
+        history = [human]
         # Each agent step runs 4 graph nodes (call-limit before_model, model, call-limit after_model,
         # tools). ModelCallLimitMiddleware enforces max_steps; the recursion limit is only a backstop
         # and must sit above 4 * steps or a run that finishes on its last step is killed.
         try:
-            for update in agent.stream({"messages": [HumanMessage(message)]},
+            for update in agent.stream({"messages": [*carried, human]},
                                        config={"recursion_limit": recursion_limit(steps)}, stream_mode="updates"):
                 for payload in update.values():
                     for m in (payload or {}).get("messages", []) if isinstance(payload, dict) else []:
+                        history.append(m)
                         self._observe(m, out, tag, ctx)
                 ctx.progress(out.steps, steps, out.tokens_in, out.tokens_out, out.cost_usd, out.refused)
         except GraphRecursionError:
             out.stopped = "graph recursion limit"
+        except Exception:
+            if remember:
+                # Even a good earlier conversation is unusable once any attempt in its chain errors.
+                self.resumes[step.name] = _Carried(error=True)
+            raise
         if out.stopped is None and out.steps >= steps and out.wants_tools:
             out.stopped = "step limit"
+        if remember:
+            messages = [*carried, *history]
+            self.resumes[step.name] = _Carried(tuple(trimmer.view(messages) if trimmer else messages))
         if out.stopped:
             ctx.log(tag, f"⚠ stopped: {out.stopped} after {out.steps} steps (raise max_steps for this role in .factory/config.yaml)")
             ctx.record({"type": "stopped", "reason": out.stopped, "steps": out.steps})
