@@ -19,6 +19,7 @@ DENIED_COMMANDS = (
     r"\bsudo\b", r"\bterraform\b.*\b(apply|destroy)\b", r"\bgh\b", r"\bfactory\s+",
 )
 HIDDEN_DIRS = ("target", ".git", "node_modules", ".venv", "__pycache__")
+READ_CAP = 400
 
 
 class PathGuard:
@@ -58,7 +59,7 @@ class ToolLog:
     commands: list[tuple[str, int]] = field(default_factory=list)
 
 
-def read_tools(root: Path, guard: PathGuard) -> list:
+def read_tools(root: Path, guard: PathGuard, cap: int | None = None) -> list:
     @tool
     def read_file(path: str, start: int = 1, end: int | None = None) -> str:
         """Read a worktree-relative file, or a dependency's source by absolute path (e.g. ~/.cargo/registry/src/…).
@@ -66,7 +67,16 @@ def read_tools(root: Path, guard: PathGuard) -> list:
         p = guard.readable(path)
         lines = p.read_text(errors="replace").splitlines()
         end = end or len(lines)
-        return "\n".join(f"{i}\t{line}" for i, line in enumerate(lines[start - 1:end], start)) or "(empty)"
+        if cap is None:
+            return "\n".join(f"{i}\t{line}" for i, line in enumerate(lines[start - 1:end], start)) or "(empty)"
+        stop = min(end, len(lines))
+        window_end = min(stop, start - 1 + cap)
+        window = lines[start - 1:window_end]
+        out = "\n".join(f"{i}\t{line}" for i, line in enumerate(window, start)) or "(empty)"
+        if window_end < stop:
+            served = start - 1 + len(window)
+            out += f"\n… {stop - served} more of {len(lines)} lines; read on from start {served + 1}"
+        return out
 
     @tool
     def list_dir(path: str = ".") -> str:

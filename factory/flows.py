@@ -3,7 +3,7 @@
 A repository defines flows under `flows:` in `.factory/config.yaml` and picks one with `flow:`;
 without either, the built-in `default` flow runs, which is today's plan -> build -> review ->
 gates -> verify pipeline. Each step has a kind, which fixes the agent's tools and how its output
-is used, plus an optional name, model and step limit. A flow without a `gates` step gets one
+is used, plus an optional name, model, step limit and loop behaviours. A flow without a `gates` step gets one
 inserted after its last review step (or its last build step), so gates always decide the PR.
 This module only parses and validates the config; running a flow lives in the pipeline.
 """
@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from .config import ConfigError
 
 KINDS = ("plan", "build", "review", "verify", "gates")
+LOOP = ("trim",)
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 RESERVED = ("resolve", "ci", "pr", "human_review", "planner", "builder", "reviewer", "verifier")
 
@@ -27,6 +28,7 @@ class Step:
     kind: str                             # plan | build | review | verify | gates
     model: str | None = None              # `provider:model`; None = the kind's model
     max_steps: int | None = None          # model calls allowed; None = the kind's limit
+    loop: tuple[str, ...] = ()            # loop behaviours, e.g. ("trim",)
 
 
 @dataclass(frozen=True)
@@ -41,7 +43,7 @@ DEFAULT = Flow("default", (Step("plan", "plan"), Step("build", "build"), Step("r
 
 
 def parse_step(flow: str, raw) -> Step:
-    """One step of flow `flow`: a kind as a bare string, or a mapping with `kind` required."""
+    """One step: a bare kind, or a mapping with `kind`, its optional settings and `loop` behaviours."""
     if isinstance(raw, str):
         if raw not in KINDS:
             raise ConfigError(f"flows.{flow}.{raw}: a string step must be a kind ({', '.join(KINDS)})")
@@ -56,7 +58,7 @@ def parse_step(flow: str, raw) -> Step:
     if not isinstance(name, str):
         raise ConfigError(f"flows.{flow}: a step's `name` must be a string")
     where = f"flows.{flow}.{name}"
-    extra = sorted(str(k) for k in set(raw) - {"kind", "name", "model", "max_steps"})
+    extra = sorted(str(k) for k in set(raw) - {"kind", "name", "model", "max_steps", "loop"})
     if extra:
         raise ConfigError(f"{where}: unknown key(s) {', '.join(extra)}")
     if kind == "gates":
@@ -67,7 +69,17 @@ def parse_step(flow: str, raw) -> Step:
     max_steps = raw.get("max_steps")
     if max_steps is not None and (not isinstance(max_steps, int) or isinstance(max_steps, bool) or max_steps <= 0):
         raise ConfigError(f"{where}: max_steps must be a positive integer")
-    return Step(name, kind, model, max_steps)
+    loop = raw.get("loop", [])
+    if not isinstance(loop, list):
+        raise ConfigError(f"{where}: loop must be a list of behaviour names ({', '.join(LOOP)})")
+    seen_loop = set()
+    for behaviour in loop:
+        if behaviour not in LOOP:
+            raise ConfigError(f"{where}: unknown loop behaviour {behaviour!r} (loop: {', '.join(LOOP)})")
+        if behaviour in seen_loop:
+            raise ConfigError(f"{where}: loop behaviour {behaviour!r} appears more than once")
+        seen_loop.add(behaviour)
+    return Step(name, kind, model, max_steps, tuple(loop or ()))
 
 
 def validate(flow: str, steps: tuple[Step, ...]) -> None:
