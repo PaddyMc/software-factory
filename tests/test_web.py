@@ -73,12 +73,17 @@ def _human(at, content):
     return {"type": "human", "at": _at(at), "content": content}
 
 
-def _ai(step, at, text="", calls=(), tokens=(100, 10), cost=0.001):
-    return {
+def _ai(step, at, text="", calls=(), tokens=(100, 10), cost=0.001, reasoning=None, think=None):
+    event = {
         "type": "ai", "at": _at(at), "step": step, "text": text,
         "usage": {"in": tokens[0], "out": tokens[1], "cache_read": 0}, "cost_usd": cost,
         "tool_calls": [{"name": name, "args": args} for name, args in calls],
     }
+    if reasoning is not None:
+        event["reasoning"] = reasoning
+    if think is not None:
+        event["usage"]["reasoning"] = think
+    return event
 
 
 def _tool(at, name, content):
@@ -590,7 +595,7 @@ def test_transcript_page_shows_each_step_with_its_calls_and_results(home, repo):
         ("tokens", f"{tokens(sum(row['ctx_in'] for row in rows))} in, "
                    f"{tokens(sum(row['out'] for row in rows))} out"),
         ("cost", f"${sum(costs):.2f}"),
-        ("time", f"{observe.human_secs(sum(row['model_s'] or 0 for row in rows))} thinking, "
+        ("time", f"{observe.human_secs(sum(row['model_s'] or 0 for row in rows))} in the model, "
                  f"{observe.human_secs(sum(row['tools_s'] for row in rows))} in tools"),
         ("tools", ", ".join(f"{name} {count}" for name, count in mix.most_common())),
     ]
@@ -610,7 +615,7 @@ def test_transcript_page_shows_each_step_with_its_calls_and_results(home, repo):
     assert re.findall(r'<div class="step-n">Step (\d+)</div>', body) == ["1", "2", "3"]
     for row in rows:
         model_time = "-" if row["model_s"] is None else f"{row['model_s']:.1f}s"
-        timing = f"{model_time} thinking"
+        timing = f"{model_time} in the model"
         if row["tools_s"] >= 1.0:
             timing += f", {observe.human_secs(row['tools_s'])} in tools"
         step_facts = [timing, f"{tokens(row['ctx_in'])} in, {tokens(row['out'])} out"]
@@ -675,6 +680,123 @@ def test_long_results_are_folded_and_refusals_flagged(home, repo):
     assert '<span class="outcome o-good">committed (step limit)</span>' in body
     assert "<script>alert(1)</script>" not in body
     assert html.escape("<script>alert(1)</script>", quote=True) in body
+
+
+def test_transcript_page_shows_thoughts_above_what_the_step_said(home, repo):
+    db = _board(home, [_contract("web-thoughts-t01")])
+    run = db.start_run("web-thoughts-t01", "build", 1)
+    thought = "Compare <script> & the result."
+    events = [
+        _system(0, "prompt"),
+        _human(0.5, "task"),
+        _ai(1, 1, "I checked.", [("read_file", {"path": "factory/web/views.py"})],
+            reasoning=thought, think=152),
+        _tool(2, "read_file", "source"),
+        _ai(2, 3, "Done.", reasoning="No token count was reported."),
+    ]
+    _write_transcript(db, home, "web-thoughts-t01", run, events)
+    db.finish_run(run, "committed")
+    db.close()
+
+    status, _, body = _get(App(home, repo), f"/tasks/web-thoughts-t01/runs/{run}")
+    assert status == 200
+    escaped = html.escape(thought, quote=True)
+    assert (f'<div class="thinks"><div class="thinks-head">Thought, 152 tokens</div>'
+            f'<p>{escaped}</p></div>') in body
+    assert '<div class="thinks-head">Thought</div>' in body
+    assert "&lt;script&gt;" in body and "&amp;" in body
+    assert "<script>" not in body
+
+    step_one = body[body.index('<div class="step-n">Step 1</div>'):
+                    body.index('<div class="step-n">Step 2</div>')]
+    thought_at = step_one.index('<div class="thinks">')
+    assert thought_at < step_one.index('<p class="says">I checked.</p>')
+    assert thought_at < step_one.index("<b>read_file</b>")
+
+
+def test_long_thoughts_fold_after_their_opening(home, repo):
+    db = _board(home, [_contract("thought-fold-t01")])
+    run = db.start_run("thought-fold-t01", "build", 1)
+    boundary = "a" * 800
+    long = "x" * 300 + " " + "x" * 293 + "\n" + "y" * 251
+    events = [
+        _system(0, "prompt"),
+        _ai(1, 1, reasoning=boundary),
+        _ai(2, 2, reasoning=long, think=318),
+    ]
+    _write_transcript(db, home, "thought-fold-t01", run, events)
+    db.finish_run(run, "committed")
+    db.close()
+
+    status, _, body = _get(App(home, repo), f"/tasks/thought-fold-t01/runs/{run}")
+    assert status == 200
+    assert f"<p>{boundary}</p>" in body
+    assert 'id="t-1-thought"' not in body
+    opening = f"<p>{'x' * 300} {'x' * 293}…</p>"
+    fold = (f'<details class="fold" id="t-2-thought"><summary>The rest of the thought, 251 characters</summary>'
+            f'<p>{"y" * 251}</p></details>')
+    assert opening in body
+    assert fold in body
+    assert body.index(opening) < body.index(fold)
+    assert long not in body
+
+
+def test_a_step_that_thought_without_sharing_says_so(home, repo):
+    db = _board(home, [_contract("hidden-thought-t01")])
+    run = db.start_run("hidden-thought-t01", "build", 1)
+    events = [
+        _system(0, "prompt"),
+        _ai(1, 1, "I can still answer.", reasoning="", think=121),
+    ]
+    _write_transcript(db, home, "hidden-thought-t01", run, events)
+    db.finish_run(run, "committed")
+    db.close()
+
+    status, _, body = _get(App(home, repo), f"/tasks/hidden-thought-t01/runs/{run}")
+    assert status == 200
+    thought = ('<div class="thinks"><div class="thinks-head">Thought, 121 tokens</div>'
+               '<p class="thinks-none">The model didn&#x27;t share its reasoning.</p></div>')
+    says = '<p class="says">I can still answer.</p>'
+    assert thought in body
+    assert body.index(thought) < body.index(says)
+
+
+def test_transcript_page_labels_model_time_and_thinking_tokens(home, repo):
+    db = _board(home, [_contract("thought-facts-t01")])
+    run = db.start_run("thought-facts-t01", "build", 1)
+    events = [
+        _system(0, "prompt"),
+        _human(1, "task"),
+        _ai(1, 4.1, "First", [("run", {"command": "fast"})], (18000, 210), 0.004,
+            reasoning="First thought", think=9500),
+        _tool(5.0, "run", "fast result"),
+        _ai(2, 10.0, "Second", [("run", {"command": "slow"})], (24000, 412), 0.005,
+            reasoning="Second thought", think=312),
+        _tool(55.0, "run", "slow result"),
+    ]
+    _write_transcript(db, home, "thought-facts-t01", run, events)
+    db.finish_run(run, "committed")
+    old_run = db.start_run("thought-facts-t01", "build", 2)
+    old_events = [_system(0, "prompt"), _ai(1, 2, "done")]
+    _write_transcript(db, home, "thought-facts-t01", old_run, old_events)
+    db.finish_run(old_run, "committed")
+    db.close()
+
+    status, _, body = _get(App(home, repo), f"/tasks/thought-facts-t01/runs/{run}")
+    assert status == 200
+    facts = re.search(r'<dl class="facts">(.*?)</dl>', body, re.S).group(1)
+    assert '<div><dt>time</dt><dd>9s in the model, 45s in tools</dd></div>' in facts
+    assert '<div><dt>tokens</dt><dd>42k in, 622 out (9,812 thinking)</dd></div>' in facts
+    assert ('<div class="step-facts">4.1s in the model<br>18k in, 210 out<br>'
+            '9500 thinking<br>$0.004</div>') in body
+    assert ('<div class="step-facts">5.0s in the model, 45s in tools<br>24k in, 412 out<br>'
+            '312 thinking<br>$0.005</div>') in body
+
+    status, _, old_body = _get(App(home, repo), f"/tasks/thought-facts-t01/runs/{old_run}")
+    assert status == 200
+    assert "thinking" not in old_body
+    old_facts = re.search(r'<dl class="facts">(.*?)</dl>', old_body, re.S).group(1)
+    assert '<div><dt>time</dt><dd>2s in the model, 0s in tools</dd></div>' in old_facts
 
 
 def test_transcript_page_refreshes_only_while_its_run_is_running(home, repo):
