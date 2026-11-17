@@ -30,6 +30,7 @@ from . import flows, globs
 from . import gates as G
 from . import github
 from . import prbody
+from . import verification
 from .agents import Ctx, Roles
 from .config import Config
 from .contracts import Task
@@ -154,6 +155,8 @@ class State(TypedDict, total=False):
     test_sha: str
     test_step: str
     test_report: str
+    test_files: list[str]
+    red_commands: list[str]
     test_failed: bool
     sha: str
     verdict: str
@@ -365,39 +368,73 @@ class Pipeline:
                         lambda: (o := self.roles.step(step, self.ctx(s)), "done", o.text, None), step=step.name)
         return {"plan": out.text, "attempt": 0, "feedback": ""}
 
+    def _acceptance_commands(self, sha: str) -> list[str]:
+        """The contract's test commands plus one run_new command per e2e test added at this try's commit."""
+        commands = [c for c in self.task.verification if verification.is_test_command(c)]
+        e2e = self.opts.config.e2e
+        if e2e and e2e.run_new:
+            patch = git(self.wt, "diff", f"{self.base_sha}..{sha}", "--", e2e.dir)
+            commands += [e2e.run_new.format(target=t.target, name=t.name, path=t.path)
+                         for t in G.new_e2e_tests(patch, e2e)]
+        return commands
+
     def _test_try(self, ctx: Ctx):
-        """Run the tester once and classify its staged change against the original base."""
+        """Run the tester once, then prove at least one acceptance command is red at its commit."""
         out = self.roles.step(self.test_step, ctx)
         git(self.wt, "add", "-A")
         paths = git(self.wt, "diff", "--cached", "--name-only", self.base_sha).splitlines()
+        empty = ((), (), ())
         if not paths:
-            return out, "no-changes", "The try wrote no tests.", None
+            return out, "no-changes", "The try wrote no tests.", None, *empty
         outside = [p for p in paths if not globs.matches_any(p, self.opts.config.test_paths)]
         if outside:
             allowed = ", ".join(self.opts.config.test_paths)
             reason = f"The try changed paths outside test_paths ({allowed}): {', '.join(outside)}"
-            return out, "out-of-scope", reason, None
+            return out, "out-of-scope", reason, None, *empty
         git(self.wt, "commit", "-q", "-m", f"factory({self.task.id}): acceptance tests")
-        return out, "committed", "", git(self.wt, "rev-parse", "HEAD")
+        sha = git(self.wt, "rev-parse", "HEAD")
+        red, passing = [], []
+        for command in self._acceptance_commands(sha):
+            result = self.sandbox.run(command)
+            n = verification.tests_run(result.output)
+            if n == 0:
+                return out, "not-red", f"{command} selects no tests: write the tests it names", None, *empty
+            if verification.classify(command, result.code, result.output) == verification.FAIL:
+                red.append(command)
+            else:
+                passing.append(command)
+        if not red:
+            return out, "not-red", "the tests pass before the change", None, *empty
+        return out, "committed", "", sha, tuple(paths), tuple(red), tuple(passing)
 
     def test(self, s: State) -> State:
-        """Write and commit the acceptance tests once, before the first build; discard invalid tries."""
+        """Write, commit and red-check the acceptance tests once, before the first build."""
         step = self.test_step
+        if (not any(verification.is_test_command(c) for c in self.task.verification)
+                and self.opts.config.e2e is None):
+            reason = "no verification test command and no e2e tests configured: nothing for the tester to write"
+            self.role("test", "building", 0, lambda: (None, "skipped", reason, None), step=step.name)
+            return {"feedback": ""}
         feedback = s.get("feedback", "")
         for number in range(1, TEST_TRIES + 1):
             ctx = self.ctx({**s, "attempt": number, "feedback": feedback})
             result = {}
 
             def run():
-                out, outcome, reason, sha = self._test_try(ctx)
-                result.update(outcome=outcome, reason=reason, sha=sha)
-                return out, outcome, out.text, sha
+                out, outcome, reason, sha, files, red, passing = self._test_try(ctx)
+                report = out.text
+                if outcome == "committed":
+                    bullets = lambda commands: "\n".join(f"- `{c}`" for c in commands) or "- (none)"
+                    report += ("\n\n# Red check\n\nRed commands:\n" + bullets(red)
+                               + "\n\nAlready passing:\n" + bullets(passing))
+                result.update(outcome=outcome, reason=reason, sha=sha, files=files, red=red, report=report)
+                return out, outcome, report, sha
 
-            out = self.role("test", "building", number, run, step=step.name)
+            self.role("test", "building", number, run, step=step.name)
             if result["outcome"] == "committed":
                 self.test_sha = result["sha"]
-                return {"test_sha": result["sha"], "test_step": step.name, "test_report": out.text,
-                        "feedback": ""}
+                return {"test_sha": result["sha"], "test_step": step.name, "test_report": result["report"],
+                        "test_files": list(result["files"]), "red_commands": list(result["red"]), "feedback": ""}
             feedback = result["reason"]
             git(self.wt, "reset", "-q", "--hard", self.base_sha)
             git(self.wt, "clean", "-q", "-fd")
@@ -457,7 +494,9 @@ class Pipeline:
 
         earlier, out = [], None
         for step in self.build_steps:
-            ctx = self.ctx({**s, "plan": plan, "attempt": attempt, "feedback": feedback}, earlier=tuple(earlier))
+            ctx = self.ctx({**s, "plan": plan, "attempt": attempt, "feedback": feedback}, earlier=tuple(earlier),
+                           test_files=tuple(s.get("test_files") or ()),
+                           red_commands=tuple(s.get("red_commands") or ()))
             out = self.role("build", "building", attempt,
                             lambda step=step, ctx=ctx: self._commit(self.roles.step(step, ctx), message),
                             step=step.name)
@@ -494,7 +533,9 @@ class Pipeline:
         """The gates step (role verify, step gates): any failure ends the attempt."""
         def run():
             gs = G.run_gates(self.task, self.wt, self.base_sha, s["sha"], self.sandbox, self.opts.config,
-                             skip=self.opts.skip_gates, full_e2e=self.opts.full_e2e)
+                             skip=self.opts.skip_gates, full_e2e=self.opts.full_e2e,
+                             test_commit=s.get("test_sha"), test_files=tuple(s.get("test_files") or ()),
+                             test_red=tuple(s.get("red_commands") or ()))
             return gs, "pass" if G.passed(gs) else "fail", G.table(gs), s["sha"]
 
         gs = self.role("verify", "verifying", s["attempt"], run, step="gates")

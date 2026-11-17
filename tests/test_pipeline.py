@@ -1433,9 +1433,15 @@ def _flow_config(repo, yaml_tail: str):
 
 
 def _test_flow(repo, paths=True, model="fake:tester", planner=True):
-    """A tested flow and its fake tester prompt, committed on the demo repo's main branch."""
+    """A tested flow, its fake tester prompt, and a stdlib acceptance command on demo-t01."""
     (repo / ".factory/agents/tester.md").write_text(
         f"---\nmodel: {model}\nmax_steps: 20\n---\nYou are the TESTER for one task.\n")
+    (repo / "tests").mkdir(exist_ok=True)
+    (repo / "tests/__init__.py").write_text("")
+    plan = repo / "docs/plans/demo/demo.md"
+    plan.write_text(plan.read_text().replace(
+        'verification: ["grep -q hello src/greet.txt"]',
+        'verification: ["grep -q hello src/greet.txt", "python3 -m unittest tests.test_greet"]'))
     steps = ("    - plan\n" if planner else "") + "    - test\n    - build\n    - review\n    - verify\n"
     _flow_config(repo, ("test_paths: ['tests/**']\n" if paths else "")
                        + "flow: tested\nflows:\n  tested:\n" + steps)
@@ -1729,7 +1735,8 @@ def test_a_test_step_commits_the_tests_before_the_first_build(factory_repo, home
                     ("verify", "gates", 1, "pass"), ("verify", "verify", 1, "report"),
                     ("pr", "pr", 1, "opened")]
     test_run = db.runs("demo-t01")[1]
-    assert test_run["report"] == plays["TESTER"][-1].content
+    assert test_run["report"].startswith(plays["TESTER"][-1].content)
+    assert "python3 -m unittest tests.test_greet" in test_run["report"]
 
     commits = git(factory_repo, "log", "--reverse", "--format=%H",
                   f"{row['base_sha']}..{row['candidate_sha']}").splitlines()
@@ -1814,6 +1821,156 @@ def test_reworks_skip_the_test_step(factory_repo, home, fake_gh, monkeypatch, ca
     assert [role for role, _ in after_first_pr] == ["ci", "build", "review", "verify", "verify", "pr"]
     assert not any(role == "TESTER" for role, _ in calls)
     assert git(factory_repo, "rev-parse", f"{row['candidate_sha']}^") == old
+
+
+def test_tests_that_pass_before_the_change_are_rejected(factory_repo, home, fake_gh, monkeypatch):
+    _test_flow(factory_repo, planner=False)
+    plays = scripts(review_verdicts=[])
+    passing = TEST.replace(
+        'self.assertTrue(Path("src/greet.txt").read_text().startswith("hello"))', 'self.assertTrue(True)')
+    plays["TESTER"] = [call("write_file", path="tests/test_greet.py", content=passing),
+                       AIMessage("Wrote an always-passing test.")]
+    calls = _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 1
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    assert row["status"] == "failed" and row["pr_url"] is None
+    assert "the test step gave up after 2 tries" in row["note"]
+    assert "the tests pass before the change" in row["note"]
+    runs = [(r["role"], r["attempt"], r["outcome"]) for r in db.runs("demo-t01")]
+    assert runs == [("test", 1, "not-red"), ("test", 2, "not-red")]
+    events = [json.loads(line) for line in open(db.runs("demo-t01")[-1]["transcript"])]
+    message = next(e["content"] for e in events if e["type"] == "human")
+    assert "# Feedback to address first" in message and "the tests pass before the change" in message
+    assert not any(role == "BUILDER" for role, _ in calls)
+    wt = home / "worktrees/demo-t01"
+    assert git(wt, "rev-parse", "HEAD") == row["base_sha"] and git(wt, "status", "--porcelain") == ""
+
+
+def test_a_verification_command_that_selects_no_tests_sends_the_tester_back(
+        factory_repo, home, fake_gh, monkeypatch):
+    _test_flow(factory_repo, planner=False)
+    plan = factory_repo / "docs/plans/demo/demo.md"
+    plan.write_text(plan.read_text().replace(
+        "python3 -m unittest tests.test_greet",
+        "python3 -m unittest discover -s tests -p test_other.py"))
+    git(factory_repo, "add", "-A")
+    git(factory_repo, "commit", "-q", "-m", "name a test module the tester does not write")
+    git(factory_repo, "push", "-q", "origin", "main")
+    calls = _use_model(monkeypatch, scripts(review_verdicts=[]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 1
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    command = "python3 -m unittest discover -s tests -p test_other.py"
+    reason = f"{command} selects no tests: write the tests it names"
+    assert row["status"] == "failed" and reason in row["note"]
+    runs = db.runs("demo-t01")
+    assert [(r["role"], r["attempt"], r["outcome"]) for r in runs] == [
+        ("test", 1, "not-red"), ("test", 2, "not-red")]
+    events = [json.loads(line) for line in open(runs[-1]["transcript"])]
+    message = next(e["content"] for e in events if e["type"] == "human")
+    assert reason in message
+    assert not any(role == "BUILDER" for role, _ in calls)
+
+
+def test_the_builder_is_told_which_tests_are_locked(factory_repo, home, fake_gh, monkeypatch):
+    _test_flow(factory_repo)
+    _use_model(monkeypatch, scripts(review_verdicts=["CHANGES", "APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    builds = [r for r in db.runs("demo-t01") if r["role"] == "build"]
+    assert len(builds) == 2
+    for run in builds:
+        events = [json.loads(line) for line in open(run["transcript"])]
+        message = next(e["content"] for e in events if e["type"] == "human")
+        assert "# Acceptance tests (locked)" in message
+        assert "`tests/test_greet.py`" in message
+        assert "`python3 -m unittest tests.test_greet`" in message
+        assert "may gain lines, but no line the test step wrote may change or be removed" in message
+        assert "RESULT: BLOCKED" in message
+
+    test_run = next(r for r in db.runs("demo-t01") if r["role"] == "test")
+    red_check = test_run["report"].split("# Red check", 1)[1]
+    assert "Red commands:\n- `python3 -m unittest tests.test_greet`" in red_check
+    assert "Already passing:\n- (none)" in red_check
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    block = body.split("<details><summary>Acceptance tests (test)</summary>", 1)[1].split("</details>", 1)[0]
+    assert "python3 -m unittest tests.test_greet" in block
+    assert "| acceptance_untouched | PASS |" in body
+
+
+def test_a_builder_that_edits_a_locked_test_fails_the_gate(factory_repo, home, fake_gh, monkeypatch):
+    _test_flow(factory_repo, planner=False)
+    plays = scripts(review_verdicts=["APPROVE"])
+    weakened = TEST.replace(
+        '        self.assertTrue(Path("src/greet.txt").read_text().startswith("hello"))\n', '        pass\n')
+    plays["BUILDER"] = [
+        call("write_file", path="src/greet.txt", content="hello\n"),
+        call("write_file", path="crates/e2e/tests/greet.rs", content=E2E),
+        call("write_file", path="docs/sessions/2026-10-09.md", content="## [12:00] demo-t01\n"),
+        call("write_file", path="tests/test_greet.py", content=weakened),
+        AIMessage("Wrote the change and weakened its acceptance test.\nRESULT: DONE"),
+    ]
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, "--max-attempts", "1", *SANDBOX]) == 1
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    assert row["status"] == "failed" and row["pr_url"] is None
+    assert "acceptance_untouched" in row["note"] and "tests/test_greet.py" in row["note"]
+    gates = next(r for r in db.runs("demo-t01") if r["step"] == "gates")
+    assert "acceptance_untouched" in gates["report"]
+    assert "tests/test_greet.py: 1 lines removed" in gates["report"]
+    assert not fake_gh.exists() or "factory/demo-t01" not in json.loads(fake_gh.read_text())["prs"]
+
+
+def test_a_task_without_test_commands_skips_the_test_step(factory_repo, home, fake_gh, monkeypatch):
+    (factory_repo / ".factory/agents/tester.md").write_text(
+        "---\nmodel: fake:tester\nmax_steps: 20\n---\nYou are the TESTER for one task.\n")
+    (factory_repo / ".factory/config.yaml").write_text(
+        "name: demo\nsession_log: docs/sessions\ntest_paths: ['tests/**']\n"
+        "flow: tested\nflows:\n  tested:\n    - test\n    - build\n    - review\n    - verify\n")
+    git(factory_repo, "add", "-A")
+    git(factory_repo, "commit", "-q", "-m", "a tested flow without e2e")
+    git(factory_repo, "push", "-q", "origin", "main")
+    calls = _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", *SANDBOX]) == 0
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    assert row["status"] == "pr_open"
+    runs = db.runs("demo-t01")
+    assert [(r["role"], r["attempt"], r["outcome"]) for r in runs] == [
+        ("test", 0, "skipped"), ("build", 1, "committed"), ("review", 1, "APPROVE"),
+        ("verify", 1, "pass"), ("verify", 1, "report"), ("pr", 1, "opened")]
+    assert runs[0]["report"] == (
+        "no verification test command and no e2e tests configured: nothing for the tester to write")
+    assert not any(role == "TESTER" for role, _ in calls)
+    commits = git(factory_repo, "log", "--format=%H", f"{row['base_sha']}..{row['candidate_sha']}").splitlines()
+    assert len(commits) == 1
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    assert "Acceptance tests" not in body and "acceptance_untouched" not in body
+
+
+def test_an_e2e_test_the_test_step_wrote_is_red(factory_repo, home, fake_gh, monkeypatch):
+    (factory_repo / ".factory/agents/tester.md").write_text(
+        "---\nmodel: fake:tester\nmax_steps: 20\n---\nYou are the TESTER for one task.\n")
+    _flow_config(factory_repo, "test_paths: ['crates/e2e/tests/**']\nflow: tested\nflows:\n  tested:\n"
+                               "    - test\n    - build\n    - review\n    - verify\n")
+    plays = scripts(review_verdicts=["APPROVE"])
+    plays["TESTER"] = [call("write_file", path="crates/e2e/tests/greet.rs", content=E2E),
+                       AIMessage("Wrote the e2e acceptance test.")]
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    command = "cargo test -p demo-e2e --test greet greeting_e2e -- --exact"
+    test_run = next(r for r in open_db(home).runs("demo-t01") if r["role"] == "test")
+    assert test_run["outcome"] == "committed" and command in test_run["report"]
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    assert command in body and "| acceptance_untouched | PASS |" in body
 
 
 # ------------------------------------------------------------ agent flows (the --flow flag and reworks under a flow)
