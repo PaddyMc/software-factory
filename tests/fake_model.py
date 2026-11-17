@@ -13,11 +13,14 @@ def call(name: str, **args) -> AIMessage:
 
 
 E2E = "#[test]\nfn greeting_e2e() {\n    assert!(true);\n}\n"
+TEST = "def test_greeting():\n    assert True\n"
 
 
 def scripts(review_verdicts: list[str], greeting: str = "hello") -> dict[str, list]:
     return {
         "PLANNER": [call("list_dir", path="."), AIMessage("**Files**: src/greet.txt, crates/e2e/tests/greet.rs\n**Steps**: write them")],
+        "TESTER": [call("write_file", path="tests/test_greet.py", content=TEST), AIMessage(
+            "## Acceptance tests\n- tests/test_greet.py covers the greeting\n\nWrote the tests under tests/**.")],
         "BUILDER": [
             call("write_file", path="src/greet.txt", content=f"{greeting}\n"),
             call("write_file", path="crates/e2e/tests/greet.rs", content=E2E),
@@ -47,7 +50,7 @@ class ScriptedModel(BaseChatModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         system = next(m.content for m in messages if isinstance(m, SystemMessage))
-        role = next(r for r in ("PLANNER", "BUILDER", "REVIEWER", "VERIFIER") if f"You are the {r}" in system)
+        role = next(r for r in ("PLANNER", "TESTER", "BUILDER", "REVIEWER", "VERIFIER") if f"You are the {r}" in system)
         step = sum(isinstance(m, AIMessage) for m in messages)
         script = self.plays[role]
         msg = script[min(step, len(script) - 1)]

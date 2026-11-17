@@ -16,7 +16,7 @@ from factory.cli import main
 from factory.db import open_db
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from fake_model import E2E, ScriptedModel, call, scripts
+from fake_model import E2E, TEST, ScriptedModel, call, scripts
 from conftest import DEMO_CONFIG, git, plan_text
 
 SKIP = "unit_tests,e2e_tests"   # the toy repo has no Cargo workspace
@@ -1432,6 +1432,15 @@ def _flow_config(repo, yaml_tail: str):
     git(repo, "push", "-q", "origin", "main")
 
 
+def _test_flow(repo, paths=True, model="fake:tester", planner=True):
+    """A tested flow and its fake tester prompt, committed on the demo repo's main branch."""
+    (repo / ".factory/agents/tester.md").write_text(
+        f"---\nmodel: {model}\nmax_steps: 20\n---\nYou are the TESTER for one task.\n")
+    steps = ("    - plan\n" if planner else "") + "    - test\n    - build\n    - review\n    - verify\n"
+    _flow_config(repo, ("test_paths: ['tests/**']\n" if paths else "")
+                       + "flow: tested\nflows:\n  tested:\n" + steps)
+
+
 def _run_with_two_long_reviews(factory_repo, home, fake_gh, monkeypatch):
     _flow_config(factory_repo, "flow: pair\nflows:\n  pair:\n    - build\n"
                                "    - {name: r1, kind: review, model: fake:r1}\n"
@@ -1703,6 +1712,108 @@ def test_a_custom_steps_model_key_is_checked_before_the_run(factory_repo, home, 
     assert "set ANTHROPIC_API_KEY first" in err and "second-review=anthropic:claude-opus-5-5" in err
     assert not (home / "worktrees/demo-t01").exists()                # refused before any work
     assert open_db(home).task("demo-t01") is None and open_db(home).runs("demo-t01") == []
+
+
+def test_a_test_step_commits_the_tests_before_the_first_build(factory_repo, home, fake_gh, monkeypatch):
+    _test_flow(factory_repo)
+    plays = scripts(review_verdicts=["APPROVE"])
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    assert row["status"] == "pr_open" and row["attempts"] == 1
+    runs = [(r["role"], r["step"], r["attempt"], r["outcome"]) for r in db.runs("demo-t01")]
+    assert runs == [("plan", "plan", 0, "done"), ("test", "test", 1, "committed"),
+                    ("build", "build", 1, "committed"), ("review", "review", 1, "APPROVE"),
+                    ("verify", "gates", 1, "pass"), ("verify", "verify", 1, "report"),
+                    ("pr", "pr", 1, "opened")]
+    test_run = db.runs("demo-t01")[1]
+    assert test_run["report"] == plays["TESTER"][-1].content
+
+    commits = git(factory_repo, "log", "--reverse", "--format=%H",
+                  f"{row['base_sha']}..{row['candidate_sha']}").splitlines()
+    assert len(commits) == 2 and commits[0] == test_run["sha"]
+    assert git(factory_repo, "log", "-1", "--format=%s", commits[0]) == "factory(demo-t01): acceptance tests"
+    assert git(factory_repo, "diff", "--name-only", f"{commits[0]}^..{commits[0]}").splitlines() == \
+        ["tests/test_greet.py"]
+    assert git(factory_repo, "show", f"{commits[0]}:tests/test_greet.py") == TEST.strip()
+
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    assert body.index("<summary>The task</summary>") < body.index("<summary>Acceptance tests (test)</summary>") \
+        < body.index("<summary>Reviewer report (review)</summary>")
+    block = body.split("<details><summary>Acceptance tests (test)</summary>", 1)[1].split("</details>", 1)[0]
+    assert "#### Acceptance tests" in block and "tests/test_greet.py covers the greeting" in block
+    assert "**Flow** `tested`: plan, test, build, review, gates, verify" in body
+
+
+def test_a_test_step_that_writes_outside_test_paths_is_retried_then_fails_the_task(
+        factory_repo, home, fake_gh, monkeypatch):
+    _test_flow(factory_repo, planner=False)
+    plays = scripts(review_verdicts=[])
+    plays["TESTER"] = [call("run", command="mkdir -p src && printf 'not a test\\n' > src/greet.txt"),
+                       AIMessage("I wrote the wrong file.")]
+    calls = _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 1
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    assert row["status"] == "failed" and row["attempts"] == 0 and row["pr_url"] is None
+    assert "outside test_paths" in row["note"] and "src/greet.txt" in row["note"]
+    runs = [(r["role"], r["step"], r["attempt"], r["outcome"]) for r in db.runs("demo-t01")]
+    assert runs == [("test", "test", 1, "out-of-scope"), ("test", "test", 2, "out-of-scope")]
+    assert calls.count(("TESTER", 0)) == 2 and not any(role == "BUILDER" for role, _ in calls)
+    events = [json.loads(line) for line in open(db.runs("demo-t01")[1]["transcript"])]
+    message = next(e["content"] for e in events if e["type"] == "human")
+    assert "# Feedback to address first" in message and "outside test_paths" in message
+    assert "src/greet.txt" in message
+
+    wt = home / "worktrees/demo-t01"
+    assert git(wt, "rev-parse", "HEAD") == row["base_sha"]
+    assert git(wt, "status", "--porcelain") == ""
+    assert not fake_gh.exists() or "factory/demo-t01" not in json.loads(fake_gh.read_text())["prs"]
+
+
+def test_a_flow_with_a_test_step_needs_test_paths(factory_repo, home, monkeypatch, capsys):
+    _test_flow(factory_repo, paths=False)
+    assert main(["run", "demo-t01", *SANDBOX]) == 1
+    assert capsys.readouterr().err.strip() == \
+        "flow tested has a test step: set test_paths in .factory/config.yaml"
+    assert not (home / "worktrees/demo-t01").exists()
+    assert open_db(home).task("demo-t01") is None and open_db(home).runs("demo-t01") == []
+
+    monkeypatch.setitem(agents.PROVIDER_KEYS, "testonly", "TESTONLY_API_KEY")
+    monkeypatch.delenv("TESTONLY_API_KEY", raising=False)
+    _test_flow(factory_repo, model="testonly:tester")
+    assert main(["run", "demo-t01", *SANDBOX]) == 1
+    err = capsys.readouterr().err
+    assert "set TESTONLY_API_KEY first" in err and "test=testonly:tester" in err
+    assert not (home / "worktrees/demo-t01").exists() and open_db(home).runs("demo-t01") == []
+
+
+def test_reworks_skip_the_test_step(factory_repo, home, fake_gh, monkeypatch, capsys):
+    _test_flow(factory_repo)
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    old = open_db(home).task("demo-t01")["candidate_sha"]
+
+    _ci_says(fake_gh, "factory/demo-t01", old, FMT, logs={"22": FMT_LOG})
+    capsys.readouterr()
+    assert main(["status", "--refresh"]) == 0
+    plays = scripts(review_verdicts=["APPROVE"])
+    plays["BUILDER"] = [call("write_file", path="src/greet.txt", content="hello, world\n"),
+                        AIMessage("Fixed the greeting CI expects.\nRESULT: DONE")]
+    calls = _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    assert row["status"] == "pr_open"
+    runs = [(r["role"], r["outcome"]) for r in db.runs("demo-t01")]
+    after_first_pr = runs[runs.index(("pr", "opened")) + 1:]
+    assert [role for role, _ in after_first_pr] == ["ci", "build", "review", "verify", "verify", "pr"]
+    assert not any(role == "TESTER" for role, _ in calls)
+    assert git(factory_repo, "rev-parse", f"{row['candidate_sha']}^") == old
 
 
 # ------------------------------------------------------------ agent flows (the --flow flag and reworks under a flow)
