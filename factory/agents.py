@@ -26,7 +26,7 @@ from .config import Config
 from .contracts import Task
 from .flows import Flow, Step
 from .log import NullLog, clip
-from .tools import READ_CAP, PathGuard, ToolLog, diff_tool, read_tools, run_tool, write_tools
+from .tools import DENIED_COMMANDS, READ_CAP, PathGuard, ToolLog, diff_tool, read_tools, run_tool, write_tools
 
 OVERRIDE_DIR = ".factory/agents"                 # per-repository prompt overrides, in the main checkout
 ROLE_FILES = {"plan": "planner", "test": "tester", "build": "builder", "review": "reviewer", "verify": "verifier"}
@@ -176,6 +176,75 @@ def project_rules(cfg: Config) -> str:
     return "# Project rules (enforced by the factory's gates)\n\n" + _bullets(rules)
 
 
+def proof_rules() -> str:
+    """The extra review contract when a step opts into independently reproduced findings."""
+    return """# Proof rules (enforced by the factory)
+
+- A blocker or major finding about what the code does when it runs must carry a line `REPRO:` followed by one shell command that fails on the candidate. Run the command with `run` before reporting it.
+- A finding about scope — a non-goal done, an acceptance criterion with no change behind it, an unrelated edit, or documentation made untrue — must be tagged `[scope]` and cite `path:line`.
+- `VERDICT: CHANGES` counts only with a REPRO that fails again on the candidate or a blocker or major finding tagged `[scope]`. Otherwise the factory records `APPROVE (unproven)` and keeps the findings in its report."""
+
+
+_REPRO = re.compile(r"^[ \t]*REPRO:[ \t]*(.+?)[ \t]*$", re.M)
+_FINDING = re.compile(r"^\s*\d+\.\s*\[(?:blocker|major)\].*\[scope\]", re.M)
+
+
+def parse_repros(text: str) -> list[str]:
+    """The first PROVE_MAX distinct REPRO commands, in their report order."""
+    return list(dict.fromkeys(_REPRO.findall(text)))[:PROVE_MAX]
+
+
+def has_scope_finding(text: str) -> bool:
+    """Whether a numbered blocker or major finding carries the scope tag."""
+    return _FINDING.search(text) is not None
+
+
+def run_repros(commands: list[str], sandbox, denied: tuple[str, ...] = ()) -> list[tuple[str, str, str]]:
+    """Run each REPRO independently, returning (command, result, output tail) for the Proof section."""
+    patterns = DENIED_COMMANDS + tuple(denied)
+    results = []
+    for command in commands[:PROVE_MAX]:
+        pattern = next((pat for pat in patterns if re.search(pat, command)), None)
+        if pattern is not None:
+            results.append((command, "denied", f"command matches denied pattern {pattern!r}"))
+            continue
+        result = sandbox.run(command, timeout=PROVE_TIMEOUT)
+        output = "\n".join(result.output.splitlines()[-PROOF_OUTPUT_LINES:])
+        if result.code == -1 and "timeout" in result.output:
+            word = "timed out"
+        elif result.code != 0:
+            word = "reproduced"
+        else:
+            word = "passed"
+        results.append((command, word, output))
+    return results
+
+
+def proof_section(results: list[tuple[str, str, str]]) -> str:
+    """The report's reproducibility evidence, including output even when a command did not reproduce."""
+    if not results:
+        return ""
+    entries = []
+    for number, (command, result, output) in enumerate(results, 1):
+        entries.append(f"### {number}. `{command}`\n\nResult: **{result}**\n\n"
+                       f"```text\n{output or '(no output)'}\n```")
+    return "## Proof\n\n" + "\n\n".join(entries)
+
+
+def apply_proof(text: str, verdict: str, sandbox, denied: tuple[str, ...] = ()) -> tuple[str, str, str]:
+    """Re-run a proving review's REPROs and return its augmented report, effective verdict and run outcome."""
+    results = run_repros(parse_repros(text), sandbox, denied)
+    proof = proof_section(results)
+    report = f"{text.rstrip()}\n\n{proof}" if proof else text
+    if not _VERDICT.search(text):
+        return report, "CHANGES", "CHANGES"
+    if verdict == "APPROVE":
+        return report, "APPROVE", "APPROVE"
+    if any(result == "reproduced" for _, result, _ in results) or has_scope_finding(text):
+        return report, "CHANGES", "CHANGES"
+    return report, "APPROVE", "APPROVE (unproven)"
+
+
 def role_model(root: Path, role: str, cfg: Config, override: str | None = None) -> str:
     """`--model` > the config's `models` > the prompt's frontmatter > the default."""
     return override or cfg.models.get(role) or load_role(root, role)[0].get("model", DEFAULT_MODEL)
@@ -218,6 +287,9 @@ TRIM_KEEP = 8         # most recent tool results kept in full
 MAP_LINES = 120       # repository-map lines, including its heading and any truncation line
 NUDGE_EDITS = 6       # combined successful writes to one path before an edits nudge
 NUDGE_FAILS = 3       # consecutive non-zero exits of one command before a failing nudge
+PROVE_MAX = 5         # distinct REPRO commands the factory runs again after a proving review
+PROVE_TIMEOUT = 300   # seconds allowed for each REPRO command
+PROOF_OUTPUT_LINES = 20
 
 
 def repository_map(worktree: Path, spec_refs: tuple[str, ...]) -> str:
@@ -426,6 +498,8 @@ class LangChainRoles:
             (f"Today: {dt.date.today().isoformat()}. Worktree root is the tools' working directory.", True),
             (_repo_guidance(ctx.worktree, self.cfg.guidance), False),
         ]
+        if step.kind == "review" and step.prove:
+            parts.insert(3, (proof_rules(), False))
         system = "\n\n".join(text for text, _ in parts if text)
         version = prompt_version(text for text, per_task in parts if text and not per_task)
         tools, default_message, log = self._kit(step, ctx)
@@ -567,6 +641,8 @@ class LangChainRoles:
             return tools, msg, log
         if step.kind == "review":
             tools = read_tools(ctx.worktree, guard, cap) + diff_tool(ctx.worktree, ctx.base_sha)
+            if step.prove:
+                tools += run_tool(ctx.sandbox, ToolLog(), self.cfg.denied_commands)
             msg = f"Review the change for task {ctx.task.id}. Start with git_diff(stat=True)."
             if ctx.review_brief:
                 msg += (

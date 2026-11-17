@@ -1447,6 +1447,59 @@ def _test_flow(repo, paths=True, model="fake:tester", planner=True):
                        + "flow: tested\nflows:\n  tested:\n" + steps)
 
 
+def test_a_proving_review_leaves_the_worktree_at_the_candidate(factory_repo, home, fake_gh, monkeypatch):
+    _flow_config(factory_repo, "flow: proving\nflows:\n  proving:\n    - plan\n    - build\n"
+                               "    - {kind: review, prove: true}\n    - verify\n")
+    plays = scripts(review_verdicts=[])
+    plays["REVIEWER"] = [
+        call("git_diff", stat=True),
+        call("run", command=("printf junk > src/greet.txt; touch leftover.txt; "
+                             "mkdir -p __pycache__; touch __pycache__/kept.pyc")),
+        AIMessage("## Findings\n1. [minor] src/greet.txt:1 — ok\n\nVERDICT: APPROVE"),
+    ]
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    wt = home / "worktrees/demo-t01"
+    assert open_db(home).task("demo-t01")["status"] == "pr_open"
+    assert git(wt, "status", "--porcelain") == ""
+    assert (wt / "src/greet.txt").read_text() == "hello\n"
+    assert not (wt / "leftover.txt").exists()
+    assert (wt / "__pycache__/kept.pyc").is_file()               # clean -fd keeps ignored files
+    log = (home / "logs/demo-t01.log").read_text()
+    assert "review: reset the worktree to the candidate, removed:" in log
+    assert "leftover.txt" in log and "src/greet.txt" in log
+
+
+def test_an_unproven_review_does_not_send_the_build_back(factory_repo, home, fake_gh, monkeypatch):
+    _flow_config(factory_repo, "flow: proving\nflows:\n  proving:\n    - plan\n    - build\n"
+                               "    - {kind: review, prove: true}\n    - verify\n")
+    finding = "## Findings\n1. [major] src/greet.txt:1 — wrong greeting\n   REPRO: true"
+    original = finding + "\n\nVERDICT: CHANGES"
+    plays = scripts(review_verdicts=[])
+    plays["REVIEWER"] = [call("git_diff", stat=True), AIMessage(original)]
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    assert row["status"] == "pr_open" and row["attempts"] == 1
+    runs = db.runs("demo-t01")
+    assert len([r for r in runs if r["role"] == "build"]) == 1
+    review = next(r for r in runs if r["role"] == "review")
+    assert review["outcome"] == "APPROVE (unproven)"
+    assert finding in review["report"] and "## Proof" in review["report"]
+    assert "Result: **passed**" in review["report"]
+
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    assert "Reviewed by review: APPROVE (unproven)." in body
+    assert "wrong greeting" in body and "#### Proof" in body
+    verify = next(r for r in runs if r["role"] == "verify" and r["step"] == "verify")
+    events = [json.loads(line) for line in open(verify["transcript"])]
+    message = next(event["content"] for event in events if event["type"] == "human")
+    assert "# Reviewer reports" in message and finding in message and "## Proof" in message
+
+
 def _run_with_two_long_reviews(factory_repo, home, fake_gh, monkeypatch):
     _flow_config(factory_repo, "flow: pair\nflows:\n  pair:\n    - build\n"
                                "    - {name: r1, kind: review, model: fake:r1}\n"
