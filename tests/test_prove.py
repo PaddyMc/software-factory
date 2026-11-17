@@ -43,13 +43,12 @@ def test_prove_is_a_review_step_option(repo, monkeypatch, capsys):
     step = F.parse_step("careful", {"name": "audit", "kind": "review", "prove": True})
     assert step.prove is True
     assert F.parse_step("careful", {"name": "audit", "kind": "review"}).prove is False
-    assert F.parse_step("careful", {"name": "audit", "kind": "review", "prove": None}).prove is False
 
     for kind in ("plan", "test", "build", "verify", "gates"):
         with pytest.raises(C.ConfigError) as error:
             F.parse_step("careful", {"name": "audit", "kind": kind, "prove": True})
         assert "careful" in str(error.value) and "audit" in str(error.value)
-    for value in ("yes", 1):
+    for value in ("yes", 1, None):
         with pytest.raises(C.ConfigError, match="prove must be a boolean") as error:
             F.parse_step("careful", {"name": "audit", "kind": "review", "prove": value})
         assert "flows.careful.audit" in str(error.value)
@@ -117,12 +116,16 @@ def test_changes_stands_on_a_reproduced_failure(tmp_path):
 
 
 def test_changes_stands_on_a_scope_finding(tmp_path):
-    text = _report("true").replace("[major]", "[major] [scope]")
-    report, verdict, outcome = agents.apply_proof(text, "CHANGES", Unsandboxed(tmp_path), ())
+    for finding in ("[major] [scope] src/greet.txt:1", "[major]\n   [scope] src/greet.txt:1"):
+        text = _report("true").replace("[major] src/greet.txt:1", finding)
+        report, verdict, outcome = agents.apply_proof(text, "CHANGES", Unsandboxed(tmp_path), ())
 
-    assert verdict == outcome == "CHANGES"
-    assert "[major] [scope] src/greet.txt:1" in report
-    assert "## Proof" in report and "passed" in report
+        assert verdict == outcome == "CHANGES"
+        assert "[scope] src/greet.txt:1" in report
+        assert "## Proof" in report and "passed" in report
+
+    assert not agents.has_scope_finding(
+        "1. [major] src/a.py:1 — no tag\n2. [minor] [scope] src/b.py:2 — only this minor is scoped")
 
 
 def test_unproven_changes_becomes_an_approval(tmp_path):

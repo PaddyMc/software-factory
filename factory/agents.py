@@ -186,7 +186,7 @@ def proof_rules() -> str:
 
 
 _REPRO = re.compile(r"^[ \t]*REPRO:[ \t]*(.+?)[ \t]*$", re.M)
-_FINDING = re.compile(r"^\s*\d+\.\s*\[(?:blocker|major)\].*\[scope\]", re.M)
+_FINDING = re.compile(r"^\s*\d+\.\s*(?:\[(blocker|major|minor)\])?")
 
 
 def parse_repros(text: str) -> list[str]:
@@ -195,8 +195,17 @@ def parse_repros(text: str) -> list[str]:
 
 
 def has_scope_finding(text: str) -> bool:
-    """Whether a numbered blocker or major finding carries the scope tag."""
-    return _FINDING.search(text) is not None
+    """Whether a numbered blocker or major finding carries the scope tag, including on a continuation line."""
+    in_finding = False
+    for line in text.splitlines():
+        finding = _FINDING.match(line)
+        if finding:
+            in_finding = finding.group(1) in ("blocker", "major")
+        elif re.match(r"^(?:#{1,6}\s|VERDICT:)", line):
+            in_finding = False
+        if in_finding and "[scope]" in line:
+            return True
+    return False
 
 
 def run_repros(commands: list[str], sandbox, denied: tuple[str, ...] = ()) -> list[tuple[str, str, str]]:

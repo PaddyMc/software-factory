@@ -84,11 +84,11 @@ def parse_step(flow: str, raw) -> Step:
     if "resume" in seen_loop and kind != "build":
         raise ConfigError(f"{where}: loop behaviour 'resume' is only valid on build steps")
     prove = raw.get("prove", False)
-    if prove is not None and not isinstance(prove, bool):
+    if not isinstance(prove, bool):
         raise ConfigError(f"{where}: prove must be a boolean")
     if prove and kind != "review":
         raise ConfigError(f"{where}: 'prove' is only valid on review steps")
-    return Step(name, kind, model, max_steps, tuple(loop or ()), bool(prove))
+    return Step(name, kind, model, max_steps, tuple(loop or ()), prove)
 
 
 def validate(flow: str, steps: tuple[Step, ...]) -> None:

@@ -521,17 +521,23 @@ class Pipeline:
                 if (self.opts.rework and self.opts.rework.kind == "human_review") else {}
             result = {}
 
+            def restore_candidate():
+                removed = git(self.wt, "status", "--porcelain")
+                git(self.wt, "reset", "-q", "--hard", s["sha"])
+                git(self.wt, "clean", "-q", "-fd")
+                if removed:
+                    self._event(step.name, "review: reset the worktree to the candidate, removed:\n" + removed)
+
             def run():
                 out = self.roles.step(step, self.ctx(s, **extra))
                 report, verdict, outcome = out.text, out.verdict, out.verdict
                 if step.prove:
+                    # Prove against the committed candidate, never against files the reviewer wrote.
+                    restore_candidate()
                     report, verdict, outcome = agents.apply_proof(
                         out.text, out.verdict, self.sandbox, self.opts.config.denied_commands)
-                    removed = git(self.wt, "status", "--porcelain")
-                    git(self.wt, "reset", "-q", "--hard", s["sha"])
-                    git(self.wt, "clean", "-q", "-fd")
-                    if removed:
-                        self._event(step.name, "review: reset the worktree to the candidate, removed:\n" + removed)
+                    # A REPRO can write too; leave the candidate clean for the remaining steps and gates.
+                    restore_candidate()
                 result.update(report=report, verdict=verdict, outcome=outcome)
                 return out, outcome, report, s["sha"]
 
