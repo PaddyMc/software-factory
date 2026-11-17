@@ -638,6 +638,7 @@ Through the real CLI, pipeline, agents, git, bubblewrap and fake `gh`, with `Scr
   - [flow-tuning](flow-tuning.md). `flow-tuning-t02` (build candidates) depends on `strict-flow-t08`, so candidates are chosen against the locked tests and bench records step settings, and `flow-tuning-t05` on `strict-flow-t09`, which edits the same docs.
   - [wiki](wiki.md). `wiki-t01` depends on `strict-flow-t08` and `wiki-t07` on `strict-flow-t09`: wiki changes the same `agents.py`, `gates.py` and `tools.py`, and its role pages should describe the loop the task crew then runs. wiki-t03's `PathGuard` with writable prefixes builds on the glob-limited write tools t04 adds. A `test` step gets a role page only if the wiki has one for it.
   - [NEXT.md item 2](../../NEXT.md#2-the-builder-writes-the-test-that-judges-it), which t04 and t05 address.
+- **Related:** The [factory specification](factory-spec.md) documents flows and gates at its first-edition baseline. This workstream provides implementation and test evidence for a later edition once merged.
 
 ## Notes / Out of Scope
 

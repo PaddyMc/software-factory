@@ -499,6 +499,7 @@ The repository configures no `e2e` gate. `test_wiki_reading.py`, `test_wiki_inge
   - [agent-flows](agent-flows.md), through measure. wiki-t02 adds its block where `LangChainRoles.step` builds each step's prompt, and picks the role page by the step's kind.
   - [pr-review-rework](pr-review-rework.md), merged. t04's briefs read the `human_review` runs from its t04.
 - **Required by:** nothing planned. `factory bench` (NEXT.md item 3), when it's planned, could replay tasks with and without the wiki.
+- **Related:** The [factory specification](factory-spec.md) defines shipped behavior for implementers. The wiki maintains repository knowledge from task history. The two workstreams have independent deliverables.
 
 ## Notes / Out of Scope
 

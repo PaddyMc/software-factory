@@ -19,6 +19,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 12 | The models' reasoning is thrown away. Planned: [thoughts](docs/plans/thoughts.md) | small | 10 (its web task) |
 | ✓ | You can't tell which factory version is running. Done: [Commands](docs/reference.md#commands) | — | — |
 | 14 | A review without a verdict costs a rebuild, a task gets one build per attempt, and nothing picks the default flow from data. Planned: [flow-tuning](docs/plans/flow-tuning.md) | medium | 8, 9 |
+| 15 | Specify the shipped factory for implementers. Planned in [factory-spec](docs/plans/factory-spec.md) | medium | shipped factory |
 
 ## 1. Act on human PR review comments
 
@@ -197,3 +198,9 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 - A review without a verdict is asked once more in the same conversation. Still none counts as CHANGES, recorded as `CHANGES (no verdict)`, and the builder is told so.
 - A build step can set `candidates: N` (2 to 5). The first attempt builds N candidates one after another in their own worktrees, the gates judge each, and a selector agent picks among those that pass, falling back to the smallest diff.
 - bench records candidates, and a by-hand trial of six flows sets this repository's `flow:` by a fixed rule.
+
+## 15. Specify the shipped factory
+
+The architecture and reference explain how to run the factory. An implementer also needs to know the expected outcome when a dependency has an open PR, a check selects zero tests, or a human requests changes on a candidate.
+
+The [factory-spec plan](docs/plans/factory-spec.md) covers the behavior shipped at `8bd7012` in ten plain-text chapters under `docs/spec/`. Five tasks cover the subsystems and a sixth checks the complete series and publishes its reading guide in `00-spec.txt`. No other planned workstream is a prerequisite or waits on this edition.

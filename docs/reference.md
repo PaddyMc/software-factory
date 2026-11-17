@@ -183,7 +183,7 @@ Contracts don't fence the builder in: it can edit any file in the worktree. The 
 
 | Skill | Codex invocation | Use | What it does |
 |---|---|---|---|
-| [`/plan-workstream`](../factory/templates/skills/plan-workstream/SKILL.md) | `$plan-workstream` | Before work starts | Grounds in the config, roadmap, plans and code; locks 2–4 strategic decisions with you; writes a plan whose contracts satisfy the configured gates; updates the roadmap; runs `factory validate-plan` |
+| [`/plan-workstream`](../factory/templates/skills/plan-workstream/SKILL.md) | `$plan-workstream` | Before work starts | Grounds in the config, roadmap, plans and code; locks 2–4 strategic decisions with you; writes a plan whose contracts satisfy the configured gates; validates the contracts and opens a plan PR with the roadmap changes. Tasks are synced from the target branch after merge |
 | [`/review-task TASK [REF]`](../factory/templates/skills/review-task/SKILL.md) | `$review-task TASK [REF]` | Before you merge | Runs `factory gates` (cheap, then full) on the task's branch, applies the reviewer agent's checklist, and reports APPROVE or REQUEST CHANGES. It never edits or merges |
 | [`factory-ops`](../factory/templates/skills/factory-ops/SKILL.md) | `$factory-ops` or automatic | While running | Loads by itself on operational questions: starting runs, what's happening, why a task failed, requeues, holds, merging stacked PRs, resetting the board |
 
