@@ -218,6 +218,12 @@ def _step_changes(a_id: str, a_variant: dict, b_id: str, b_variant: dict) -> lis
             a_sha = str(a_step.get("prompt_sha") or "-")[:12]
             b_sha = str(b_step.get("prompt_sha") or "-")[:12]
             differences.append(f"prompt_sha {a_sha} → {b_sha}")
+        a_loop, b_loop = list(a_step.get("loop") or []), list(b_step.get("loop") or [])
+        if a_loop != b_loop:
+            differences.append(f"loop {a_loop} → {b_loop}")
+        a_prove, b_prove = a_step.get("prove", False), b_step.get("prove", False)
+        if a_prove != b_prove:
+            differences.append(f"prove {a_prove} → {b_prove}")
         if differences:
             changes.append(f"{name}: {', '.join(differences)}")
     return changes

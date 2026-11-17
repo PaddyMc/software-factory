@@ -54,6 +54,27 @@ def _plays(calc: str) -> dict:
 
 GOOD = _plays(GOOD_CALC)
 BAD = _plays(BAD_CALC)
+STRICT_REPRO = "python3 -c 'from calc import add; assert add(2, 3) == 5'"
+STRICT_GOOD = {
+    "TESTER": [call("write_file", path="tests/test_adder.py", content=VISIBLE_TEST), AIMessage(
+        "Wrote the locked acceptance test for calc.add.")],
+    "BUILDER": [
+        call("write_file", path="calc/__init__.py", content=GOOD_CALC),
+        call("run", command="python3 -m unittest -q"),
+        AIMessage("Implemented calc.add without changing the acceptance test.\nRESULT: DONE"),
+    ],
+    "REVIEWER": [
+        call("git_diff", stat=True),
+        call("run", command=STRICT_REPRO),
+        AIMessage(f"## Findings\n1. [minor] calc/__init__.py:1 — no blocking findings\n"
+                  f"   REPRO: {STRICT_REPRO}\n\nVERDICT: APPROVE"),
+    ],
+    "VERIFIER": [call("read_file", path="calc/__init__.py"), AIMessage(
+        "TITLE: Adds integer addition\n\n## What changed\n- calc.add returns a sum\n\n"
+        "## What to check\n- hidden arithmetic cases\n")],
+    "_verdicts": [],
+    "_calls": [],
+}
 CONFIGURED_SPECS = tuple(f"fake:{role}" for role in ("planner", "builder", "reviewer", "verifier"))
 
 
@@ -216,6 +237,32 @@ def test_a_bench_run_scores_each_cell_with_gates_and_hidden_tests(bench_repo, ho
     assert "Ran 4 tests" in bad_log and "FAILED" in bad_log and "hidden: FAIL" in bad_log
 
 
+def test_a_strict_cell_is_scored_like_any_other(bench_repo, home, monkeypatch):
+    _scripted(monkeypatch, {"scripted:strict": STRICT_GOOD})
+    assert main(_args("--flow", "strict", "--model", "scripted:strict")) == 0
+
+    results = load_results(home)
+    cell = results["cells"][0]
+    assert cell["outcome"] == "solved" and cell["attempts"] == 1
+    assert "hidden: PASS" in (bench_run_dir(home) / cell["dir"] / "hidden.log").read_text()
+    db = open_db(bench_run_dir(home) / cell["dir"])
+    runs = db.runs("adder-t01")
+    assert [(run["role"], run["step"]) for run in runs] == [
+        ("test", "test"), ("build", "build"), ("verify", "gates"),
+        ("review", "review"), ("verify", "verify"),
+    ]
+    assert runs[0]["outcome"] == "committed" and runs[0]["sha"]
+    gates = next(run for run in runs if run["step"] == "gates")
+    assert gates["outcome"] == "pass" and "acceptance_untouched" in gates["report"]
+    review = next(run for run in runs if run["role"] == "review")
+    assert review["outcome"] == "APPROVE"
+    assert "## Proof" in review["report"] and "Result: **passed**" in review["report"]
+    events = [json.loads(line) for line in Path(review["transcript"]).read_text().splitlines()]
+    system = next(event["content"] for event in events if event["type"] == "system")
+    assert "# Proof rules" in system
+    db.close()
+
+
 def test_each_variant_runs_its_flow_and_model(bench_repo, home, monkeypatch):
     _scripted(monkeypatch, {spec: GOOD for spec in CONFIGURED_SPECS})
     assert main(_args("--flow", "default", "--flow", "lean")) == 0
@@ -321,6 +368,22 @@ def test_the_budget_caps_cells_and_stops_starting_new_ones(bench_repo, home, mon
     assert first["cost_usd"] >= 1.0 and first["dir"] is not None
     assert all(cell["dir"] is None and cell["cost_usd"] == 0.0 for cell in later)
     assert all(cell["attempts"] == 0 for cell in later)
+
+
+def test_a_flow_with_a_test_step_needs_the_cases_test_paths(bench_repo, home, tmp_path, monkeypatch, capsys):
+    missing = tmp_path / "missing-test-paths" / "adder"
+    missing.parent.mkdir()
+    shutil.copytree(BENCH_CASES / "adder", missing)
+    data = yaml.safe_load((missing / "case.yaml").read_text())
+    del data["config"]["test_paths"]
+    (missing / "case.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
+    monkeypatch.setattr(agents, "build_model", lambda spec: (_ for _ in ()).throw(
+        AssertionError("a cell started")))
+
+    assert main(_args("--flow", "strict", "--model", "scripted:good", cases=missing.parent)) == 1
+    error = capsys.readouterr().err
+    assert "adder" in error and "strict" in error and "test_paths" in error
+    assert not (home / "bench").exists()
 
 
 def test_bench_run_refuses_before_any_work(bench_repo, home, tmp_path, monkeypatch, capsys):
@@ -772,6 +835,34 @@ def test_compare_flags_changed_cases_models_and_prompts(home, capsys):
     assert "review: prompt_sha qqqqqqqqqqqq → zzzzzzzzzzzz" in out
     assert f"verify: only in {a}" in out
     assert any(line.startswith("default ") and "1/1 → 1/1" in line for line in out.splitlines())
+
+
+def test_results_record_loop_and_prove_and_compare_flags_a_change(bench_repo, home, capsys):
+    import factory.bench.run as bench_run
+    from factory import config as C
+
+    cfg = C.load(bench_repo)
+    first = bench_run.variant_steps(bench_repo, cfg.flows["strict"], cfg, "scripted:strict")
+    assert [(step["name"], step["loop"], step["prove"]) for step in first] == [
+        ("test", ["map", "trim", "nudge"], False),
+        ("build", ["map", "trim", "nudge", "resume"], False),
+        ("review", ["trim"], True),
+        ("verify", [], False),
+    ]
+    second = copy.deepcopy(first)
+    next(step for step in second if step["name"] == "build")["loop"] = ["map", "trim", "nudge"]
+    next(step for step in second if step["name"] == "review")["prove"] = False
+
+    a, b = "20261115-114500", "20261115-115000"
+    _write_run(home, a, {"adder": "a" * 64}, {"strict": first}, [_cell("strict", "adder")])
+    _write_run(home, b, {"adder": "a" * 64}, {"strict": second}, [_cell("strict", "adder")])
+    recorded = json.loads((home / "bench" / a / "results.json").read_text())
+    assert all(set(step) >= {"loop", "prove"} for step in recorded["variants"]["strict"]["steps"])
+
+    assert main(["bench", "compare", a, b]) == 0
+    out = capsys.readouterr().out
+    assert ("build: loop ['map', 'trim', 'nudge', 'resume'] → ['map', 'trim', 'nudge']" in out)
+    assert "review: prove True → False" in out
 
 
 def test_list_shows_runs_newest_first_and_cases_lists_the_suite(home, capsys):
