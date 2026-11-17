@@ -23,9 +23,9 @@ flowchart TB
   CLI["factory CLI · cli.py<br/>run · top · status · trace"]:::you
   Contracts["contracts.py<br/>parse + validate"]:::core
   Sched["scheduler.py<br/>one plan, --parallel"]:::core
-  Pipe["pipeline.py · outer loop (LangGraph)<br/>plan → build → review → verify → PR"]:::core
+  Pipe["pipeline.py · outer loop (LangGraph)<br/>plan? → test? → build+ → review/gates → verify → PR"]:::core
   Roles["prompts/*.md<br/>role prompts (override: .factory/agents/)"]:::core
-  Agents["agents.py · inner loop (LangChain)<br/>planner · builder · reviewer · verifier"]:::core
+  Agents["agents.py · inner loop (LangChain)<br/>planner · tester · builder · reviewer · verifier"]:::core
   Gates["gates.py<br/>deterministic checks"]:::core
   Tools["tools.py<br/>read · write · run · git_diff"]:::core
   Sandbox["sandbox.py<br/>bubblewrap, offline"]:::core
@@ -75,15 +75,15 @@ Dotted lines are observability data, not control flow.
 |---|---|---|
 | Entry | `cli.py` | Commands, pre-run checks (contract valid, factory-runnable, API keys present, dependencies merged or with open PRs), worktree setup, `status --refresh`, `init` and `config` |
 | Settings | `config.py` | Load and validate `.factory/config.yaml` from the **main checkout** (never a task worktree, so an agent can't weaken its own gates) |
-| Flows | `flows.py` | Parse and validate named flows from `flows:` (step kinds, names, models, step limits and order rules), hold the built-in `default` flow, and insert a gates step when one is omitted |
+| Flows | `flows.py` | Parse and validate named flows from `flows:` (step kinds, names, models, step limits, `loop`, `prove` and order rules), hold the built-in `default` and `strict` flows, and insert a gates step when one is omitted |
 | Contracts | `contracts.py` | Read the fenced YAML in plans into `Task` objects (8 keys). Validate schema, IDs, dependencies across plans, command selection, placeholders |
 | Scheduling | `scheduler.py` | Run one plan's tasks as child `factory run` processes, up to `--parallel`. A task starts once each dependency is merged or has an open PR |
 | Stacking | `stack.py` | After a merge, rebase the PRs stacked on it onto the trunk and retarget them; edit PRs through the GitHub REST API |
 | CI | `ci.py` | Read an open PR's checks at its head; the failing jobs' logs become the builder's feedback |
-| Outer loop | `pipeline.py` | LangGraph state machine: plan → build → review → verify → PR / fail; resolve → review → verify for a conflicting PR; ci → build → review → verify for a PR whose CI fails. Commits the builder's work. Stops early when there is no progress |
+| Outer loop | `pipeline.py` | LangGraph state machine: optional plan and test steps → build attempts → reviews and gates in flow order → optional verify → PR / fail; resolve and ci/review rework enter on the PR's head without plan, test or the acceptance lock. Commits the tester's and builder's work. Stops early when there is no progress |
 | Inner loop | `agents.py` | One LangChain `create_agent` per role: loads the role prompt (the repository's override, else the shipped one), builds the system prompt (role + contract + project rules + repository guidance), streams steps, counts tokens and cost, records the transcript |
-| Tools | `tools.py` | `read_file`, `list_dir`, `grep` (the worktree, plus `dependency_sources` read-only), `git_diff`, `write_file`/`edit_file` (anywhere in the worktree except `.git`), `run` (sandboxed; denied commands refused) |
-| Checks | `gates.py`, `verification.py` | Conflict markers, plan untouched, and the configured session-log, e2e, unit and verification checks. Zero tests selected counts as failed |
+| Tools | `tools.py` | `read_file`, `list_dir`, `grep` (the worktree, plus `dependency_sources` read-only), `git_diff`, `write_file`/`edit_file` (builders anywhere in the worktree except `.git`, testers under `test_paths`), `run` (sandboxed; denied commands refused) |
+| Checks | `gates.py`, `verification.py` | Conflict markers, plan untouched, the test commit's `acceptance_untouched` lock, and the configured session-log, e2e, unit and verification checks. Zero tests selected counts as failed |
 | GitHub | `github.py` | Which identity: a `GH_TOKEN`/`GITHUB_TOKEN` when set (`gh` reads it; git's github.com fetches and pushes go over HTTPS with it), else the gh login and git's own credentials |
 | Isolation | `sandbox.py` | bubblewrap: read-only host, empty `$HOME`/`/tmp`/`/run`, cleared environment, no network unless asked |
 | State | `db.py` | SQLite `tasks` (status, branch, SHAs, PR, pid, heartbeat, activity, cost) and `runs` (every role step: outcome, report, steps, tokens, cost, refused calls, transcript path, model and `prompt_version`) |
@@ -154,7 +154,8 @@ What moves between agents is only what the pipeline hands over:
 | From | To | What |
 |---|---|---|
 | Planner | Builder | The plan text |
-| Reviewer (`VERDICT: CHANGES`) | Builder | The review, as feedback to address first |
+| Test step | Builder | The `# Acceptance tests (locked)` block: the test files, the commands that were red at the test commit, and the rule that the files may gain lines but no tester-written line may change or be removed |
+| Reviewer (`VERDICT: CHANGES`) | Builder | The review, as feedback to address first; a proving review includes its `## Proof` section |
 | Gates (fail) | Builder | The failing gates' output, as feedback |
 | Gates (pass) | Verifier | The gate table, plus each review step's report from this attempt (cleaned and capped), for the PR summary |
 | CI (failing checks) | Builder | The failing checks and their jobs' logs, as feedback, on every attempt of a CI fix |
@@ -275,7 +276,7 @@ The run ends when nothing more can start, and prints each task's outcome and the
 
 ## Pull requests
 
-A factory PR leads with the human summary and keeps the longer evidence collapsed. Its body has this shape (the three opening lines appear only when they apply, and there is one reviewer block per review step, in flow order):
+A factory PR leads with the human summary and keeps the longer evidence collapsed. Its body has this shape (the three opening lines and Acceptance tests block appear only when they apply, and there is one reviewer block per review step, in flow order):
 
 ```markdown
 **Stacked** on DEPENDENCIES: merge those first. …
@@ -293,6 +294,7 @@ All N gates passed on CANDIDATE after N build attempts. …
 
 <details><summary>Gate table</summary> … </details>
 <details><summary>The task</summary> goal, non-goals, acceptance criteria, verification commands </details>
+<details><summary>Acceptance tests (test)</summary> tester report and red commands </details>
 <details><summary>Reviewer report (first-review)</summary> … </details>
 <details><summary>Reviewer report (second-review)</summary> … </details>
 
@@ -309,6 +311,7 @@ The parts, in order, come from:
 | `## Checks` | The factory | Gate results, build attempts, command and test counts, skipped gates and each review run's outcome |
 | Collapsed **Gate table** | The factory | The gate table, with detail lines shortened |
 | Collapsed **The task** | The factory | The contract's goal, non-goals, acceptance criteria and verification commands |
+| Collapsed **Acceptance tests (NAME)**, when a test step committed tests | The tester | Its report, cleaned and capped, including the red commands and any commands that already passed |
 | One collapsed **Reviewer report (NAME)** per review step, in flow order | The reviewers | Each report's last draft only, cleaned and capped |
 | `---`, then the `<sub>` footer | The factory | Factory task and plan, flow and its steps, candidate and base, recorded cost, and the full-report pointer |
 
@@ -327,7 +330,7 @@ The verifier's whole report stays in its run record rather than being pasted int
 
 The verifier prompt asks for 1–5 What changed bullets and 0–6 What to check bullets; the factory allows up to 8 in the latter so a bounded summary can carry all the reviewers' findings. When bullets are omitted, the replacement reads `N more bullets: factory show ID --step STEP`. A capped report ends `… kept N of M characters: factory show ID --step STEP`.
 
-When the assembled body exceeds 60,000 characters, it shrinks in a fixed order: reviewer blocks shrink to 2,000 characters each, longest first; each reviewer block then becomes its `factory show` line; The task becomes its pointer; then the gate table becomes its pointer; finally the whole body is capped if necessary.
+When the assembled body exceeds 60,000 characters, it shrinks in a fixed order: reviewer blocks shrink to 2,000 characters each, longest first; each reviewer block then becomes its `factory show` line; an Acceptance tests block shrinks and then becomes its pointer; The task becomes its pointer; then the gate table becomes its pointer; finally the whole body is capped if necessary.
 
 **Fallback summary.** If the verifier's response cannot be parsed in the fixed shape (there is no readable What changed bullet), or the flow has no verify step, the factory writes the summary itself. The title is the contract goal shortened to 72 characters; What changed contains the goal and a count of changed files with up to 10 paths; What to check collects every reviewer's findings, labelled by step. There is no second verifier call. An unparseable verify run gets outcome `report (fallback)` instead of `report`; a verify-less flow has no verify run to label. The PR still opens with the fallback summary.
 
@@ -393,7 +396,11 @@ sequenceDiagram
   Note over A,P: at max_steps the loop ends early and is logged as a step-limit stop
 ```
 
-- **Context grows every step.** Each step re-sends the entire conversation. In practice 95–98% of tokens are re-read input, and output is small. `factory trace` shows the growth step by step.
+- **Context grows every step by default.** Each step re-sends the entire conversation. In practice 95–98% of tokens are re-read input, and output is small. `factory trace` shows the growth step by step. A step's `loop` option can add the behaviours below; without them, the loop is unchanged.
+- **`trim` caps reads and clears old results in batches.** `read_file` returns at most `READ_CAP` (400) lines from `start`, with a final line giving the remaining and total line counts and the next `start`. Before a model call whose conversation exceeds `TRIM_AT` (60,000 approximate tokens), every tool result except the latest `TRIM_KEEP` (8) is replaced by a one-line placeholder naming the tool and arguments and saying to call it again. Cleared results stay cleared, and another batch waits until the trimmed conversation again exceeds the threshold. The transcript keeps every result in full and records each batch as a `trim` event.
+- **`map` starts with the repository and spec references.** The first task message ends with at most `MAP_LINES` (120) lines of repository map: tracked top-level files and every tracked directory to depth 2 with its file count, plus a truncation count when needed. A following spec-reference list gives each tracked reference's line count and marks non-files. The map costs no model call, is omitted outside a git work tree, and is not sent again on a resumed attempt.
+- **`nudge` interrupts repetition without extending the limit.** One budget warning arrives before the next model call once three quarters of the step limit (rounded up) has been used, giving the calls used and allowed and asking the agent to finish, run its checks and report. The first combined total of `NUDGE_EDITS` (6) successful writes to one path, and the first `NUDGE_FAILS` (3) consecutive non-zero exits of one `run` command, each produce one human message naming the path or command. Each path and command is nudged at most once in an attempt, as is the budget; nudges are transcript events, not model calls, and the step limit still ends the run.
+- **`resume` carries a build across attempts.** On a build step, attempt 2 and later continue the earlier conversation as `trim` left it, followed by the attempt number, feedback and any earlier build reports from this attempt; the plan and repository map are not sent again. Each attempt keeps its own step limit, counts and transcript, which opens with a `resumed` event. A new run, a conflict resolution, or an earlier attempt that ended in an error starts fresh; hitting the step limit does not.
 - **Step limits.** Each step is 4 LangGraph nodes (call-limit hook, model, call-limit hook, tools). `ModelCallLimitMiddleware` enforces `max_steps`; the graph recursion limit (`4 × max_steps + 25`) is only a backstop.
 - **Recoverable errors.** These come back to the model as results so the agent can adjust:
   - a write into `.git` or outside the worktree, or a denied command, returns `refused: …`;
@@ -407,11 +414,12 @@ sequenceDiagram
 | Role | Default model (OpenRouter) | `max_steps` | Tools | Decides |
 |---|---|---|---|---|
 | planner | `z-ai/glm-5.3` | 40 | read | The implementation plan |
+| tester | `openrouter:z-ai/glm-5.3` | 60 | read, write/edit limited to `test_paths`, sandboxed `run` | The task's tests, written before the build |
 | builder | `deepseek/deepseek-v4-pro-0813` | 120 | read, write anywhere in the worktree except `.git`, sandboxed `run` | The change, or a conflicting PR's resolution |
-| reviewer | `z-ai/glm-5.3` | 60 | read, `git_diff` | `VERDICT: APPROVE` or `CHANGES` (missing verdict = CHANGES) |
+| reviewer | `z-ai/glm-5.3` | 60 | read, `git_diff`; sandboxed `run` under `prove` | `VERDICT: APPROVE` or `CHANGES` (missing verdict = CHANGES) |
 | verifier | `deepseek/deepseek-v4-flash-0731` | 30 | read, `git_diff`, sandboxed `run` | Nothing: it writes the PR's title and summary (what changed, what to check); **the gates decide** |
 
-Roles are **step kinds**: a flow step of kind `build` gets the builder's tools and default prompt whatever its name. Set models and step limits per kind with `models` and `max_steps` in `.factory/config.yaml`; `--model` overrides every step for one run. To replace a kind's whole prompt, put it in `.factory/agents/<planner|builder|reviewer|verifier>.md` (frontmatter `model` and `max_steps` optional); the config's settings still win over its frontmatter. Any `provider:model` that LangChain's `init_chat_model` supports works, with the provider's key in the environment (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
+The tester's prompt ships as `factory/prompts/tester.md`. Roles are **step kinds**: a flow step of kind `build` gets the builder's tools and default prompt whatever its name. Set models and step limits per kind with `models` and `max_steps` in `.factory/config.yaml`; `--model` overrides every step for one run. To replace a kind's whole prompt, put it in `.factory/agents/<planner|tester|builder|reviewer|verifier>.md` (frontmatter `model` and `max_steps` optional); the config's settings still win over its frontmatter. `factory prompt test` prints the shipped or overridden tester prompt. Any `provider:model` that LangChain's `init_chat_model` supports works, with the provider's key in the environment (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
 
 A **custom step** (a mapping step whose `name` differs from its `kind`) gets its own prompt from `.factory/agents/<name>.md` when that file exists, else its kind's prompt. Model precedence is `--model` > the step's `model` > `models[kind]` > prompt frontmatter > the default; step-limit precedence is the step's `max_steps` > `max_steps[kind]` > prompt frontmatter > 60.
 
@@ -429,14 +437,17 @@ No agent can commit, push, call `gh`, run `factory`, or touch the database. The 
 
 ## Agent flows
 
-A **flow** is a named, ordered list of agent steps under `flows:` in `.factory/config.yaml`; `flow:` picks the default for runs. `factory run TASK|PLAN --flow NAME` overrides it for one run, and a plan run passes it to every child. The built-in `default` flow — plan, build, review, gates, verify — is today's pipeline and can't be redefined. A step is a kind string (`plan`, `build`, `review`, `verify`, `gates`) or a mapping with `kind` required and optional `name`, `model` and `max_steps` (`gates` itself is a bare string). A step's kind fixes its tools, task message and output, as the [Roles](#roles) table describes.
+A **flow** is a named, ordered list of agent steps under `flows:` in `.factory/config.yaml`; `flow:` picks the default for runs. `factory run TASK|PLAN --flow NAME` overrides it for one run, and a plan run passes it to every child. The built-in `default` flow — plan, build, review, gates, verify — is today's pipeline and can't be redefined. A step is a kind string (`plan`, `test`, `build`, `review`, `verify`, `gates`) or a mapping with `kind` required and optional `name`, `model`, `max_steps`, `loop` and `prove` (`gates` itself is a bare string). A step's kind fixes its tools, task message and output, as the [Roles](#roles) table describes.
 
 ```mermaid
 flowchart TD
   fresh(["fresh build"]) --> plan{"plan step in the flow?"}
-  plan -->|"yes, once"| p["PLAN"] --> builds
-  plan -->|"no"| builds
-  rework(["rework entry: resolve | ci | human_review<br/>no plan step; build on the PR's head"]) --> builds
+  plan -->|"yes, once"| p["PLAN"]
+  p --> tests{"test step in the flow?"}
+  plan -->|"no"| tests
+  tests -->|"yes, once"| t["TEST<br/>write, red-check and lock acceptance tests"] --> builds
+  tests -->|"no"| builds
+  rework(["rework entry: resolve | ci | human_review<br/>no plan or test step, no test lock; build on the PR's head"]) --> builds
   subgraph attempt["attempt N"]
     builds["every build step in order<br/>each commits what it leaves"] --> checks{"review steps and the gates step<br/>in flow order"}
   end
@@ -449,17 +460,76 @@ flowchart TD
 The order rules are:
 
 ```text
-[plan]?   build+   ( review | gates )*   [verify]?
-  once    contiguous  any order              last
+[plan]?  [test]?  build+   ( review | gates )*   [verify]?
+  once     once   contiguous   any order            last
 ```
 
-The effective flow has exactly one gates step: when omitted, one is inserted after the last review step, else after the last build step. Step names are unique, match `^[a-z][a-z0-9-]*$`, and aren't reserved (`resolve`, `ci`, `pr`, `human_review`, `planner`, `builder`, `reviewer`, `verifier`); a step named after a kind must have that kind.
+There is at most one test step, directly before the first build step. The new step options are:
+
+| Key or kind | On | Effect |
+|---|---|---|
+| `loop: [trim]` | any agent step | Reads are capped, and old tool results are cleared in batches |
+| `loop: [map]` | any agent step | The first task message ends with a repository map and the spec references |
+| `loop: [nudge]` | any agent step | One message near the step limit, on repeated edits to one file, or on one command that keeps failing |
+| `loop: [resume]` | build steps only | Later attempts continue the first attempt's conversation with the new feedback |
+| kind `test` | once, before the build steps | A tester writes the task's tests under `test_paths`; they are committed, shown to fail, then locked |
+| `prove: true` | review steps only | The reviewer can run commands; CHANGES needs a reproduced failure or a scope finding |
+
+`loop` must be a list containing only `trim`, `map`, `nudge` and `resume`, with no repeats; the first three work on any agent step, while `resume` is build-only. Their limits and exact behaviour are under [Inside one agent: the loop](#inside-one-agent-the-loop). `prove` must be a boolean and is valid only on review steps.
+
+The effective flow has exactly one gates step: when omitted, one is inserted after the last review step, else after the last build step. Step names are unique, match `^[a-z][a-z0-9-]*$`, and aren't reserved (`resolve`, `ci`, `pr`, `human_review`, `planner`, `tester`, `builder`, `reviewer`, `verifier`); a step named after a kind, including `test`, must have that kind.
+
+### The strict flow
+
+Beside `default`, `strict` is the second built-in flow; neither can be redefined. Choose it with `flow: strict` or `factory run TASK --flow strict`. It combines every stricter behaviour and has no planner:
+
+```yaml
+strict:                                        # built in, like `default`; it can't be redefined
+  - {kind: test, loop: [map, trim, nudge]}
+  - {kind: build, loop: [map, trim, nudge, resume]}
+  - gates
+  - {kind: review, prove: true, loop: [trim]}
+  - verify
+```
+
+| | `default` | `strict` |
+|---|---|---|
+| Who plans | A planner agent | The builder, from the contract, the map and the locked tests |
+| Who writes the tests that decide | The builder | The tester, on another model, before the build |
+| A failed attempt | A new conversation | The same conversation, with the feedback |
+| Context | Grows with every read | Capped reads, cleared in batches |
+| Order after the build | review, gates | gates, review |
+| A reviewer's CHANGES | Its word | A reproduced failure or a scope finding |
+
+One strict run in which the first candidate fails a gate and the second passes looks like this:
+
+```text
+TEST (once) ─► commit acceptance tests ─► red check: at least one command red
+                                                │
+                                                ▼
+                         attempt 1: BUILD ─► GATES fail
+                                                │
+                                                ▼ feedback
+                    attempt 2: BUILD (resumes attempt 1) ─► GATES pass
+                                                │
+                                                ▼
+                         REVIEW (prove: true): APPROVE
+                                                │
+                                                ▼
+                                      VERIFY ─► push + PR
+```
+
+A flow with a test step requires non-empty `test_paths`. On a fresh build, the tester's write tools and the commit check confine its tests to those globs. The factory commits the tests, then runs the contract's test commands (and configured new-e2e commands) at that test commit. A try that changes nothing, leaves `test_paths`, selects no tests, or has no red command is discarded; the tester gets one more try, for `TEST_TRIES` (2) in total, before the task fails without a build. With no test command and no `e2e` configuration, the test step is skipped.
+
+The builder receives the test files and red commands in its `# Acceptance tests (locked)` handover. It may add lines and other tests, but may not change or remove a tester-written line; [`acceptance_untouched`](#gates) checks that lock. Conflict resolutions, CI fixes and human-review reworks skip the test step and the lock.
+
+Under `prove: true`, a blocker or major behavioural finding carries a `REPRO:` command that fails on the candidate, while a scope finding is tagged `[scope]` and cites `path:line`. The factory reruns at most `PROVE_MAX` (5) distinct commands, each for at most `PROVE_TIMEOUT` (300) seconds, and appends their output in `## Proof`. CHANGES stands with a reproduced failure or a `[scope]` blocker or major. Otherwise it becomes APPROVE with run outcome `APPROVE (unproven)`; the findings stay in the report and PR for the human. The worktree is restored to the candidate after the proof commands.
 
 **How attempts end.** The first review step to return `CHANGES`, or a gates failure, ends the attempt; the next starts again at the first build step with that feedback (a custom reviewer's feedback is labelled ``Reviewer `NAME` requested changes``). Later build steps also see the earlier build steps' final messages from the same attempt. A no-change attempt ends with the no-change feedback, and no review or gates run. `--max-attempts` and the stop on identical gates failures are unchanged. When the gates pass, the run continues to the next review step if the flow puts reviewers after gates (gates-first), so those reviewers only see changes that passed the gates. Review and verify steps never commit, so the candidate the gates passed is the one pushed.
 
-**Where reworks enter.** Conflict resolution, CI fixes and human-review reworks keep their fixed entry, skip the plan step and build on the PR's head; from there they run the flow's build steps, review steps, gates and verify step. The resolve agent uses the flow's first build step's model and step limit; a clean conflict replay goes straight to the gates. CI and human-review reworks keep the brief in view on every attempt, and every review step of a human-review rework gets the review brief.
+**Where reworks enter.** Conflict resolution, CI fixes and human-review reworks keep their fixed entry, skip the plan and test steps and build on the PR's head without the acceptance-test lock; from there they run the flow's build steps, review steps, gates and verify step. The resolve agent uses the flow's first build step's model and step limit; a clean conflict replay goes straight to the gates. CI and human-review reworks keep the brief in view on every attempt, and every review step of a human-review rework gets the review brief.
 
-**What runs record.** `runs.role` is still the kind: the gates run is role `verify`, step `gates`, and `resolve`, `ci`, `pr` and `human_review` keep their existing roles. The `runs.flow` and `runs.step` columns hold the flow and step names. `factory show TASK --step NAME` filters runs, and `factory show` labels each run with its flow and step; `factory top`'s progress label is the step name. The PR body has one `Reviewer report (<step>)` block per review step, What changed and What to check from the verify step's summary or the factory's fallback, and the flow and its steps in the footer; it has no Plan block. See [Pull requests](#pull-requests).
+**What runs record.** `runs.role` is still the kind, including `test`: the gates run is role `verify`, step `gates`, and `resolve`, `ci`, `pr` and `human_review` keep their existing roles. The `runs.flow` and `runs.step` columns hold the flow and step names. `factory show TASK --step NAME` filters runs, and `factory show` labels each run with its flow and step; `factory top`'s progress label is the step name. The PR body has one `Reviewer report (<step>)` block per review step, an Acceptance tests block when a test step committed tests, What changed and What to check from the verify step's summary or the factory's fallback, and the flow and its steps in the footer; it has no Plan block. See [Pull requests](#pull-requests).
 
 ---
 
@@ -575,7 +645,7 @@ With `--parallel N`, in-flight cells share the remaining budget and can overshoo
 
 - **`run`:** run id, UTC start and end, factory version, whether the sandbox was on, total maximum cost, per-cell maximum attempts and repeat count. The end stays null until the run finishes.
 - **`cases`:** per case, its kind, deterministic base commit sha once materialized, and `fixture_sha`, a hash of every file and relative path in the case directory.
-- **`variants`:** per variant, its flow and model override, then every agent step's name, kind, resolved model, step limit and `prompt_sha` (a hash of the whole resolved prompt file, including frontmatter).
+- **`variants`:** per variant, its flow and model override, then every agent step's name, kind, resolved model, step limit, `loop` behaviours, `prove` setting and `prompt_sha` (a hash of the whole resolved prompt file, including frontmatter).
 - **`cells`:** per cell, variant, case and repeat; outcome, attempts, cost, seconds, model calls, input and output tokens, reviewer `CHANGES` verdicts, step-limit stops, failing gates from the last gates report and its run-relative directory.
 
 The file is atomically rewritten after every cell, so an interrupted run retains every finished cell and can still be reported or compared.
@@ -596,6 +666,7 @@ They run in the sandbox against the exact candidate commit, in this order. Gates
 | `diff` | The candidate changes something. Changed `lockfiles` are noted |
 | `conflict_markers` | No added line opens, splits or closes a merge-conflict hunk |
 | `plan_untouched` | The task's plan doc was not edited |
+| `acceptance_untouched` *(with a test commit)* | Every file the test step wrote still exists, and the test-commit→candidate diff removes no line from those files. The detail lists the locked files and red commands, or each file with removed lines; the gate is absent without a test commit |
 | `session_log` *(configured)* | A `<session_log>/*.md` entry was added |
 | `e2e_written` *(configured)* | A new test was added under `e2e.dir` |
 | `verification` | Every command in the contract's `verification` passes |
@@ -639,10 +710,11 @@ The agent interface is a single seam: a role receives a `Ctx` with `log`, `progr
 
 ## Known limitations and next steps
 
-- **The default flow reviews before the gates**, so its reviewer can approve builds that then fail mechanical checks. A flow can put the gates first; see [Agent flows](#agent-flows).
+- **The default flow reviews before the gates**, so its reviewer can approve builds that then fail mechanical checks. The default keeps that behaviour; [strict](#the-strict-flow) puts the gates first and makes its reviewer prove CHANGES. Other custom flows can also put the gates first.
 - **A few cases and repeats make bench comparisons noisy.** Five cases and one repeat can't tell two good flows apart; use `--repeat` (3 or more) and read counts and means, not a single percentage. See [Evaluating flows](#evaluating-flows-factory-bench).
-- **Context cost:** whole files stay in context for every later step. Planned: capped tool output, a slimmer system prompt, summarizing old steps.
-- **The builder re-explores what the planner already read.** Planned: the planner hands over exact files and line ranges.
+- **Context cost in the default flow:** whole files stay in context for every later step. The default keeps that behaviour; under [strict](#the-strict-flow), [`trim`](#inside-one-agent-the-loop) caps reads at 400 lines and clears old tool results in batches while leaving the transcript full.
+- **The default builder re-explores what the planner already read.** The default keeps that behaviour; under [strict](#the-strict-flow), `map` supplies the repository and spec references up front and `resume` carries the builder's conversation into later attempts instead of starting exploration again.
+- **Strict does not supply holdout tests or a gate that runs the tests again with the change taken out of the candidate.** Its tester-written tests are red-checked at the pre-build test commit and locked thereafter; those two stronger checks remain open.
 - **Conflicts and CI failures are found on refresh, not live.** GitHub computes `mergeable` lazily, so a PR that just started conflicting may show up one `status --refresh` later.
 - **Restacked PRs aren't re-gated.** After a rebase the PR comment names the commit the gates ran on. CI runs on the new one, and a refresh marks it `ci_failed` if that fails.
 - **A CI fix is gated, but the gates can't run CI's own checks.** The builder is told to reproduce each failure with `run`, and CI on the new head decides. A fix that doesn't hold shows up red again on the next refresh.

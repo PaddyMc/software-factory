@@ -6,14 +6,14 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 |---|---|---|---|
 | ✓ | Read CI on open PRs and fix failures. Done: [CI failures](docs/architecture.md#ci-failures) | — | — |
 | ✓ | Act on human PR review comments. Done: [Review comments](docs/architecture.md#review-comments) | — | — |
-| 2 | The builder writes the test that judges it. Planned as a test step: [strict-flow](docs/plans/strict-flow.md) | small | — |
+| ✓ | The builder writes the test that judges it. Done: [The strict flow](docs/architecture.md#the-strict-flow); the without-change gate and holdout tests stay open | — | — |
 | ✓ | Nothing measures the factory itself. Done: `factory stats` ([Measuring the factory](docs/architecture.md#measuring-the-factory)) and `factory bench` ([Evaluating flows](docs/architecture.md#evaluating-flows-factory-bench)) | — | — |
 | 4 | Learn from feedback. Planned as a knowledge crew: [wiki](docs/plans/wiki.md) | medium | 1, 3 |
 | 5 | Steer a running agent | small | — |
 | 6 | Runs need this machine | large | a shared board |
 | ✓ | Reshape the agent flow. Done: [Agent flows](docs/architecture.md#agent-flows) | — | — |
 | ✓ | Compare flows and setups. Done: [Evaluating flows (factory bench)](docs/architecture.md#evaluating-flows-factory-bench) | — | — |
-| 9 | The steps of a flow are still the first version's. Planned: [strict-flow](docs/plans/strict-flow.md) | large | 3, 7, 8 |
+| ✓ | The steps of a flow are still the first version's. Done: [The strict flow](docs/architecture.md#the-strict-flow) | — | — |
 | ✓ | Managing the factory takes many terminal commands. Done: [The web page](docs/architecture.md#the-web-page) | — | — |
 | ✓ | Factory PR descriptions are long and hard to read. Done: [Pull requests](docs/architecture.md#pull-requests) | — | — |
 | 12 | The models' reasoning is thrown away. Planned: [thoughts](docs/plans/thoughts.md) | small | 10 (its web task) |
@@ -50,10 +50,10 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 
 Later, holdout tests could be written at plan time by `/plan-workstream` and kept out of the worktree. That needs a contract schema change (a 9th key), so lock it as a decision first.
 
-**Plan.** [docs/plans/strict-flow.md](docs/plans/strict-flow.md) (planned 2026-11-13, tasks `strict-flow-t04` and `t05`) takes a different route from this sketch:
+**Plan.** Landed: [The strict flow](docs/architecture.md#the-strict-flow), from [docs/plans/strict-flow.md](docs/plans/strict-flow.md) (tasks `strict-flow-t04` and `t05`), takes a different route from this sketch:
 - A `test` step in the flow, on another model than the builder, writes the task's tests before the build, and the factory commits them.
-- The contract's test commands must fail at that commit, and a new `acceptance_untouched` gate fails a candidate that changed or removed a line the step wrote. The contract keeps its 8 keys.
-- Still open after it: the gate above, which runs the tests with the change taken out, and holdout tests.
+- The red check requires at least one failing test command at that commit and rejects a command that selects no tests. The `acceptance_untouched` gate then fails a candidate that changed or removed a line the step wrote. The contract keeps its 8 keys.
+- **Still open:** the `e2e_fails_without_change` gate above, which runs the tests with the change taken out of the candidate, and holdout tests kept outside the worktree.
 
 ## 3. Nothing measures the factory itself
 
@@ -135,11 +135,11 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 
 **Seen in.** LangChain raised one model from 52.8% to 66.5% on Terminal-Bench 2.0 by [changing only the harness](https://www.langchain.com/blog/improving-deep-agents-with-harness-engineering). Anthropic's [harness for long-running builds](https://www.anthropic.com/engineering/harness-design-long-running-apps) keeps a separate evaluator, and adds or removes one part at a time and measures.
 
-**Plan.** [docs/plans/strict-flow.md](docs/plans/strict-flow.md) (planned 2026-11-13, tasks `strict-flow-t01`…`t09`, after [measure](docs/plans/measure.md) and [bench](docs/plans/bench.md), before [wiki](docs/plans/wiki.md)):
+**Plan.** Landed: [The strict flow](docs/architecture.md#the-strict-flow), from [docs/plans/strict-flow.md](docs/plans/strict-flow.md) (tasks `strict-flow-t01`…`t09`):
 - Step options, each off unless a flow sets it. `loop: [trim, map, nudge, resume]` caps reads and clears old tool results, opens with a map of the repository, nudges a looping agent, and continues a builder's conversation across attempts. `prove: true` gives a reviewer the `run` tool and makes `CHANGES` need a reproduced failure or a scope finding.
 - A `test` step kind (item 2).
-- A built-in flow, `strict`, turns them all on: test, build, gates, a proving review, verify. `default` stays today's pipeline, and [bench](docs/plans/bench.md) compares the two.
-- Parallel build candidates and a flow chosen by the contract's `risk` are out of scope.
+- The built-in flow `strict` turns them all on: test, build, gates, a proving review, verify. `default` stays today's pipeline, and [bench](docs/plans/bench.md) compares the two.
+- Parallel build candidates and a flow chosen by the contract's `risk` remain out of scope.
 
 ## 10. Manage the factory from a browser
 
