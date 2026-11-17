@@ -1432,7 +1432,7 @@ def _flow_config(repo, yaml_tail: str):
     git(repo, "push", "-q", "origin", "main")
 
 
-def _test_flow(repo, paths=True, model="fake:tester", planner=True):
+def _test_flow(repo, paths=True, model="fake:tester", planner=True, strict=False):
     """A tested flow, its fake tester prompt, and a stdlib acceptance command on demo-t01."""
     (repo / ".factory/agents/tester.md").write_text(
         f"---\nmodel: {model}\nmax_steps: 20\n---\nYou are the TESTER for one task.\n")
@@ -1443,8 +1443,77 @@ def _test_flow(repo, paths=True, model="fake:tester", planner=True):
         'verification: ["grep -q hello src/greet.txt"]',
         'verification: ["grep -q hello src/greet.txt", "python3 -m unittest tests.test_greet"]'))
     steps = ("    - plan\n" if planner else "") + "    - test\n    - build\n    - review\n    - verify\n"
-    _flow_config(repo, ("test_paths: ['tests/**']\n" if paths else "")
-                       + "flow: tested\nflows:\n  tested:\n" + steps)
+    selected = "flow: strict\n" if strict else "flow: tested\nflows:\n  tested:\n" + steps
+    _flow_config(repo, ("test_paths: ['tests/**']\n" if paths else "") + selected)
+
+
+def test_the_strict_flow_tests_builds_gates_and_proves_before_a_pr(factory_repo, home, fake_gh, monkeypatch):
+    _test_flow(factory_repo, planner=False, strict=True)
+    weakened = TEST.replace(
+        '        self.assertTrue(Path("src/greet.txt").read_text().startswith("hello"))\n', '        pass\n')
+    repro = "grep -q absent src/greet.txt"
+    plays = scripts(review_verdicts=[])
+    plays["BUILDER"] = [
+        call("write_file", path="src/greet.txt", content="hello\n"),
+        call("write_file", path="crates/e2e/tests/greet.rs", content=E2E),
+        call("write_file", path="docs/sessions/2026-10-09.md", content="## [12:00] demo-t01\n"),
+        call("write_file", path="tests/test_greet.py", content=weakened),
+        AIMessage("Wrote the change but weakened its acceptance test.\nRESULT: DONE"),
+        call("write_file", path="tests/test_greet.py", content=TEST),
+        AIMessage("Restored the locked acceptance test.\nRESULT: DONE"),
+    ]
+    plays["REVIEWER"] = [
+        call("git_diff", stat=True),
+        call("run", command=repro),
+        AIMessage(f"## Findings\n1. [minor] src/greet.txt:1 — inspect the greeting\n"
+                  f"   REPRO: {repro}\n\nVERDICT: APPROVE"),
+    ]
+    calls = _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    assert row["status"] == "pr_open" and row["attempts"] == 2
+    runs = [(r["flow"], r["role"], r["step"], r["attempt"], r["outcome"]) for r in db.runs("demo-t01")]
+    assert runs == [
+        ("strict", "test", "test", 1, "committed"),
+        ("strict", "build", "build", 1, "committed"),
+        ("strict", "verify", "gates", 1, "fail"),
+        ("strict", "build", "build", 2, "committed"),
+        ("strict", "verify", "gates", 2, "pass"),
+        ("strict", "review", "review", 2, "APPROVE"),
+        ("strict", "verify", "verify", 2, "report"),
+        ("strict", "pr", "pr", 2, "opened"),
+    ]
+    gates = [r for r in db.runs("demo-t01") if r["step"] == "gates"]
+    assert "acceptance_untouched" in gates[0]["report"] and "tests/test_greet.py" in gates[0]["report"]
+    builds = [r for r in db.runs("demo-t01") if r["role"] == "build"]
+    events = [json.loads(line) for line in open(builds[1]["transcript"])]
+    assert events[0]["type"] == "resumed" and events[0]["messages"] > 0
+    review = next(r for r in db.runs("demo-t01") if r["role"] == "review")
+    assert "## Proof" in review["report"] and "Result: **reproduced**" in review["report"]
+    assert git(home / "worktrees/demo-t01", "show", "HEAD:tests/test_greet.py") == TEST.strip()
+    assert "PLANNER" not in {role for role, _ in calls} and calls.count(("REVIEWER", 0)) == 1
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    assert "**Flow** `strict`: test, build, gates, review, verify" in body and "#### Proof" in body
+
+
+def test_a_tester_and_builder_on_one_model_are_warned_about(factory_repo, home, fake_gh, monkeypatch, capsys):
+    _test_flow(factory_repo, planner=False, strict=True)
+    _flow_config(factory_repo, "models:\n  test: fake:same\n  build: fake:same\ntest_paths: ['tests/**']\n")
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    warning = ("⚠ flow strict: the test step `test` and the build step `build` both run on fake:same; "
+               "the tests share the builder's blind spots")
+
+    assert main(["run", "demo-t01", "--flow", "strict", "--skip-gates", SKIP, *SANDBOX]) == 0
+    captured = capsys.readouterr()
+    assert warning in captured.err
+    assert warning in (home / "logs/demo-t01.log").read_text()
+    assert open_db(home).task("demo-t01")["status"] == "pr_open"       # the warning does not stop the run
+
+    assert main(["prompt", "test", "--flow", "strict"]) == 0
+    captured = capsys.readouterr()
+    assert warning in captured.err
 
 
 def test_a_proving_review_leaves_the_worktree_at_the_candidate(factory_repo, home, fake_gh, monkeypatch):
@@ -2073,7 +2142,7 @@ def test_the_flow_flag_overrides_the_configured_flow(factory_repo, home, fake_gh
 def test_an_unknown_flow_is_refused_before_any_work(factory_repo, home, monkeypatch, capsys):
     assert main(["run", "demo-t01", "--flow", "nope", *SANDBOX]) == 1
     err = capsys.readouterr().err
-    assert "unknown flow nope (flows: default)" in err
+    assert "unknown flow nope (flows: default, strict)" in err
     assert not (home / "worktrees/demo-t01").exists()
     assert open_db(home).task("demo-t01") is None and open_db(home).runs("demo-t01") == []
 

@@ -1484,7 +1484,7 @@ def test_run_form_lists_what_will_run_and_previews_the_command(home, repo, monke
             '<input id="attempts" name="max_attempts" inputmode="numeric" value="3">',
             '<span class="hint">How often review or the gates may send it back.</span>',
             '<label for="flow">Agent flow</label>',
-            '<select id="flow" name="flow"><option selected>default</option></select>',
+            '<select id="flow" name="flow"><option selected>default</option><option>strict</option></select>',
             '<span class="hint">From .factory/config.yaml.</span>'):
         assert field in body
     assert ('<div class="cmd" data-preview><code>factory run form --max-cost 5.00 --parallel 3 '
@@ -1571,9 +1571,6 @@ def test_a_run_needs_a_valid_cost_cap_and_limits(home, repo):
 
 
 def test_starting_a_run_launches_factory_run_with_the_forms_flags(home, repo):
-    config_path = repo / ".factory/config.yaml"
-    config_path.write_text(config_path.read_text()
-                           + "\nflows:\n  strict: [plan, build, review, gates, verify]\n")
     db = _board(home, [_contract("go-t01")], "docs/plans/go/go.md")
     db.update("go-t01", status="failed")
     db.close()

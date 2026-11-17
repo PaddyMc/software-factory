@@ -149,7 +149,7 @@ def cmd_run_plan(a, plan: Path, tasks: dict) -> int:
 def cmd_run_one(a) -> int:
     import os
 
-    from .agents import LangChainRoles, flow_models, missing_keys
+    from .agents import LangChainRoles, flow_models, missing_keys, same_model_warning
     from .pipeline import KINDS, Options, Pipeline, PipelineError, Stopped, create_worktree, git
 
     root = repo_root()
@@ -170,6 +170,7 @@ def cmd_run_one(a) -> int:
         print(f"{task.id}: {why}", file=sys.stderr)
         return 1
     models = flow_models(root, flow, cfg, a.model)
+    warn = same_model_warning(flow, models)
     missing = missing_keys(models, os.environ)
     if missing:
         print(f"set {', '.join(missing)} first (models: {', '.join(f'{r}={m}' for r, m in models.items())})",
@@ -265,6 +266,9 @@ def cmd_run_one(a) -> int:
                   if resolution else "")
                + (f", {KINDS[rework.kind].log(rework)}" if rework else "")
                + f"; models {', '.join(f'{r}={m}' for r, m in models.items())}")
+    if warn:
+        log("run", warn)
+        print(warn, file=sys.stderr)
     print(f"log: {log.path}  (follow elsewhere: factory logs {task.id} -f)", flush=True)
     try:
         result = Pipeline(db, LangChainRoles(root, a.model, cfg=cfg), task, wt, base_sha, sbx, opts, log=log,
@@ -978,7 +982,8 @@ def cmd_init(a) -> int:
 
 def cmd_prompt(a) -> int:
     """A role's or a flow step's prompt as the agents get it: the repository's override, else the shipped one."""
-    from .agents import ROLE_FILES, load_step, prompt_source, role_model, step_limit, step_model, step_prompt_source
+    from .agents import (ROLE_FILES, flow_models, load_step, prompt_source, role_model, same_model_warning,
+                         step_limit, step_model, step_prompt_source)
 
     root = repo_root()
     cfg = C.load(root)
@@ -986,6 +991,8 @@ def cmd_prompt(a) -> int:
     if flow is None:
         print(f"unknown flow {a.flow} (flows: {', '.join(sorted(cfg.flows))})", file=sys.stderr)
         return 2
+    if warn := same_model_warning(flow, flow_models(root, flow, cfg)):
+        print(warn, file=sys.stderr)
     role = next((r for r, f in ROLE_FILES.items() if a.role in (r, f)), None)
     if role is not None:
         src = prompt_source(root, role)

@@ -15,9 +15,27 @@ from fake_model import ScriptedModel
 
 def test_without_flows_the_default_flow_is_todays_pipeline():
     cfg = C.parse({})
-    assert cfg.flow == "default" and cfg.flows == {"default": F.DEFAULT}
+    assert cfg.flow == "default" and cfg.flows == {"default": F.DEFAULT, "strict": F.STRICT}
     assert [s.kind for s in F.DEFAULT.steps] == ["plan", "build", "review", "gates", "verify"]
     assert all(s.name == s.kind and s.model is None and s.max_steps is None for s in F.DEFAULT.steps)
+
+
+def test_strict_is_built_in_and_cannot_be_redefined():
+    cfg = C.parse({})
+    assert cfg.flow == "default"                                     # strict is opt-in
+    assert cfg.flows["default"] is F.DEFAULT and cfg.flows["strict"] is F.STRICT
+    assert F.STRICT.name == "strict"
+    assert F.STRICT.steps == (
+        F.Step("test", "test", loop=("map", "trim", "nudge")),
+        F.Step("build", "build", loop=("map", "trim", "nudge", "resume")),
+        F.Step("gates", "gates"),
+        F.Step("review", "review", prove=True, loop=("trim",)),
+        F.Step("verify", "verify"),
+    )
+    assert all(s.name == s.kind and s.model is None and s.max_steps is None for s in F.STRICT.steps)
+    assert all(s.kind != "plan" for s in F.STRICT.steps)
+    with pytest.raises(C.ConfigError, match="strict"):
+        C.parse({"flows": {"strict": ["build", "review"]}})
 
 
 def test_a_flow_is_a_list_of_steps_with_kinds_models_and_step_limits():
@@ -93,7 +111,7 @@ def test_default_cannot_be_redefined_and_flow_must_name_a_flow():
     with pytest.raises(C.ConfigError, match="unknown flow nope"):
         C.parse({"flow": "nope", "flows": {"lean": ["build", "review"]}})
     cfg = C.parse({"flow": "lean", "flows": {"lean": ["build", "review"]}})
-    assert cfg.flow == "lean" and set(cfg.flows) == {"lean", "default"}
+    assert cfg.flow == "lean" and set(cfg.flows) == {"lean", "default", "strict"}
 
 
 def test_factory_config_prints_the_flows(repo, monkeypatch, capsys):

@@ -43,6 +43,16 @@ class Flow:
 DEFAULT = Flow("default", (Step("plan", "plan"), Step("build", "build"), Step("review", "review"),
                            Step("gates", "gates"), Step("verify", "verify")))
 
+# Every stricter behaviour together: independently written tests, bounded and resumed builds,
+# gates before a proving review, and the verifier's report. No planner: the builder plans.
+STRICT = Flow("strict", (
+    Step("test", "test", loop=("map", "trim", "nudge")),
+    Step("build", "build", loop=("map", "trim", "nudge", "resume")),
+    Step("gates", "gates"),
+    Step("review", "review", prove=True, loop=("trim",)),
+    Step("verify", "verify"),
+))
+
 
 def parse_step(flow: str, raw) -> Step:
     """One step: a bare kind, or a mapping with `kind`, its optional settings and `loop` behaviours."""
@@ -95,8 +105,8 @@ def validate(flow: str, steps: tuple[Step, ...]) -> None:
     """The rules a flow's steps must satisfy; every error names the flow and the offending step."""
     if not NAME_RE.match(flow):
         raise ConfigError(f"flows.{flow}: flow names must match {NAME_RE.pattern}")
-    if flow == "default":
-        raise ConfigError("flows.default: the built-in `default` flow cannot be redefined")
+    if flow in ("default", "strict"):
+        raise ConfigError(f"flows.{flow}: the built-in `{flow}` flow cannot be redefined")
     seen: set[str] = set()
     for s in steps:
         where = f"flows.{flow}.{s.name}"

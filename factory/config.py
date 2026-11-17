@@ -32,8 +32,8 @@ class ConfigError(ValueError):
 
 
 def _default_flows() -> dict[str, Flow]:
-    from .flows import DEFAULT                    # lazy: flows.py imports ConfigError from this module
-    return {"default": DEFAULT}
+    from .flows import DEFAULT, STRICT            # lazy: flows.py imports ConfigError from this module
+    return {"default": DEFAULT, "strict": STRICT}
 
 
 @dataclass(frozen=True)
@@ -82,7 +82,7 @@ class Config:
     models: dict[str, str] = field(default_factory=dict)      # role -> `provider:model`, over the prompt's own
     max_steps: dict[str, int] = field(default_factory=dict)   # role -> model calls allowed per agent run
     flow: str = "default"                                     # the flow `factory run` uses; a key of `flows`
-    flows: dict[str, Flow] = field(default_factory=_default_flows)   # name -> flow; `default` is built in
+    flows: dict[str, Flow] = field(default_factory=_default_flows)   # name -> flow; default and strict are built in
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
 
     def dependency_dirs(self, home: Path | None = None) -> tuple[Path, ...]:
@@ -153,7 +153,7 @@ def parse(data: dict | None, default_name: str = "default") -> Config:
         kw[key] = v
     from . import flows as F                                  # lazy: flows.py imports ConfigError from this module
     defined = F.parse_flows(d["flows"]) if d.get("flows") is not None else {}
-    kw["flows"] = {**defined, "default": F.DEFAULT}           # the built-in default flow always exists
+    kw["flows"] = {**defined, "default": F.DEFAULT, "strict": F.STRICT}  # the built-in flows always exist
     kw["flow"] = str(d.get("flow") or "default")
     if kw["flow"] not in kw["flows"]:
         raise ConfigError(f"flow: unknown flow {kw['flow']} (flows: {', '.join(sorted(kw['flows']))})")
