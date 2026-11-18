@@ -9,7 +9,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | ✓ | The builder writes the test that judges it. Done: [The strict flow](docs/architecture.md#the-strict-flow); the without-change gate and holdout tests stay open | — | — |
 | ✓ | Nothing measures the factory itself. Done: `factory stats` ([Measuring the factory](docs/architecture.md#measuring-the-factory)) and `factory bench` ([Evaluating flows](docs/architecture.md#evaluating-flows-factory-bench)) | — | — |
 | 4 | Learn from feedback. Planned as a knowledge crew: [wiki](docs/plans/wiki.md) | medium | 1, 3 |
-| 5 | Steer a running agent | small | — |
+| 5 | Steer a running agent. Planned: [steer](docs/plans/steer.md) | small | flow-tuning |
 | 6 | Runs need this machine | large | a shared board |
 | ✓ | Reshape the agent flow. Done: [Agent flows](docs/architecture.md#agent-flows) | — | — |
 | ✓ | Compare flows and setups. Done: [Evaluating flows (factory bench)](docs/architecture.md#evaluating-flows-factory-bench) | — | — |
@@ -101,6 +101,12 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 **Seen in.** [Open SWE](https://blog.langchain.com/introducing-open-swe-an-open-source-asynchronous-coding-agent) lets you interrupt and nudge a task without restarting it.
 
 **Sketch.** `factory say TASK "…"` appends to `$FACTORY_HOME/inbox/TASK`. A `before_model` middleware in `agents.py` drains the inbox into a `HumanMessage` on the agent's next step and records it in the transcript. The message goes to whichever role is running. It's cheap to build, and it doesn't touch the pipeline.
+
+**Plan.** [docs/plans/steer.md](docs/plans/steer.md) (planned 2026-11-18, tasks `steer-t01`…`t05`, after `flow-tuning-t04`). Decisions the plan locked differ from this sketch:
+- Messages live on the board, in a `messages` table tied to the run, not in an inbox file, so `factory show`, the web page and the PR body can read them.
+- The running agent keeps a message in its conversation, and every later agent in the run gets the run's messages in its task message. Messages end with the run.
+- A message is guidance only: the contract still decides scope. The reviewer reports work a message asked for outside the contract without blocking on it, and the PR body lists the messages.
+- `factory say` refuses a task that isn't running. A running task's web page has a box that runs it.
 
 ## 6. Runs need this machine
 

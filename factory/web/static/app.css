@@ -254,6 +254,22 @@ form.inline { display: inline; }
 .next-step .acts { display: flex; gap: 0.5rem; }
 .next-step pre { grid-column: 1 / -1; margin: 0; padding: 0.85rem 1rem; background: var(--bg); border: 1px solid var(--border);
   color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 14rem; overflow: auto; }
+/* a running task's panel: a box to tell its agent something, and what became of this run's messages */
+.say { grid-column: 1 / -1; display: grid; gap: 0.5rem; }
+.say label { font-size: 0.875rem; color: var(--text-bright); }
+.say textarea { font: 400 0.875rem/1.5 var(--font-mono); color: var(--text-bright); background: var(--bg);
+  border: 1px solid var(--border-accent); padding: 0.6rem 0.75rem; width: 100%; min-height: 4.5rem; resize: vertical; border-radius: 0; }
+.say textarea:focus { border-color: var(--text-bright); outline: none; }
+.say-end { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem 1rem; flex-wrap: wrap; }
+.say-end .hint { font-size: 0.8125rem; color: var(--text-secondary); max-width: 62ch; }
+.messages { grid-column: 1 / -1; border-top: 1px solid var(--border); }
+.messages li { display: grid; grid-template-columns: 4.5rem minmax(0, 1fr) auto; column-gap: 1rem; align-items: baseline;
+  padding: 0.55rem 0; border-bottom: 1px solid var(--border); }
+.messages li:last-child { border-bottom: 0; }
+.messages time { font: 400 0.75rem var(--font-mono); color: var(--text-secondary); }
+.messages .text { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+.messages .fate { font: 400 0.75rem var(--font-mono); color: var(--text-secondary); white-space: nowrap; }
+.messages .fate.is-waiting { color: var(--text-bright); }
 
 .cols { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 3.5rem; }
 .contract h3, .runs-head { font: 600 0.8125rem var(--font-body); color: var(--text-secondary); margin: 1.5rem 0 0.5rem; }
@@ -303,6 +319,10 @@ form.inline { display: inline; }
   white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-secondary); max-height: 18rem; overflow: auto; }
 .result.refused { border-left-color: var(--bad); color: var(--bad); }
 .stopped { margin-top: 0.9rem; font: 400 0.8125rem var(--font-mono); color: var(--bad); }
+/* a message you sent, where the agent received it: between the steps, ruled in the brightest text colour */
+.said > div:last-child { border-left: 2px solid var(--text-bright); padding-left: 0.85rem; }
+.said .step-n, .said .says { color: var(--text-bright); }
+.said-via { margin-top: 0.35rem; font: 400 0.75rem var(--font-mono); color: var(--text-secondary); }
 .fold > summary { cursor: pointer; font: 400 0.8125rem var(--font-mono); color: var(--text-secondary); margin-top: 0.4rem; }
 .fold > summary:hover { color: var(--text-bright); }
 
@@ -319,6 +339,10 @@ form.inline { display: inline; }
   .fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .plan > summary { grid-template-columns: minmax(0, 1fr) auto; row-gap: 0.6rem; }
   .plan-counts { grid-column: 1 / -1; grid-row: 2; }
+}
+@media (max-width: 45rem) {
+  .messages li { grid-template-columns: minmax(0, 1fr) auto; row-gap: 0.2rem; }
+  .messages .text { grid-column: 1 / -1; grid-row: 2; }
 }
 @media (max-width: 45rem) {
   :root { --gutter: 1.25rem; }
