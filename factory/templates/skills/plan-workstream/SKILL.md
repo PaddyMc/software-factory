@@ -1,6 +1,6 @@
 ---
 name: plan-workstream
-description: PM-mode workstream planning for a repository run by the software factory. Grounds in the project's settings (.factory/config.yaml), roadmap, existing plans and code; locks strategic decisions with the user before writing; produces a plan doc whose fenced-YAML task contracts `factory run` can execute; updates the roadmap; and on request emits a handoff brief. Explicit-invocation only — invoke when the user selects this skill in Codex (`$plan-workstream` or `/skills`) or types `/plan-workstream`. Do not auto-trigger on phrases like "plan X" or "let's plan a workstream".
+description: PM-mode workstream planning for a repository run by the software factory. Grounds in the project's settings (.factory/config.yaml), roadmap, existing plans and code; locks strategic decisions with the user before writing; produces a plan doc whose fenced-YAML task contracts `factory run` can execute; opens a PR for the plan and roadmap changes before loading merged contracts onto the board; and on request emits a handoff brief. Explicit-invocation only — invoke when the user selects this skill in Codex (`$plan-workstream` or `/skills`) or types `/plan-workstream`. Do not auto-trigger on phrases like "plan X" or "let's plan a workstream".
 ---
 
 # Plan Workstream
@@ -75,11 +75,13 @@ Use a fenced YAML list whose items contain exactly these keys and no others: `id
   - with `session_log`, every task adds its own `<session_log>/<today>-<task id>.md`.
 - **Work the factory can't run.** For example, a change to the factory itself, or one needing secrets or spending money. Keep it as a contract and state in prose that it's done by hand. A contract whose verification runs a command the factory refuses (`sudo`, `gh`, `terraform apply`, the project's `denied_commands`) is refused by `factory run`, and `factory validate-plan` warns about it.
 
-### Phase 4: Coordinate
+### Phase 4: Coordinate and open the plan PR
 
 - Slot the workstream into the project's roadmap or priority doc, if there is one. Give it a number, plus its dependencies and what depends on it.
 - Cross-link related plans in their own "Cross-Workstream Coordination" sections so dependencies are bidirectional.
-- Run `factory validate-plan <plan>`, then `factory sync` to load the new tasks.
+- Validate the proposed contracts with `factory validate-plan <plan>`. The CLI reads the repository’s main checkout. If you prepared the branch in a linked worktree, validate its commit in a standalone clone checked out at that commit. Resolve errors and explain any expected manual-task warnings.
+- For every new plan, commit the plan, roadmap and coordination edits on a dedicated branch, push it, and open a pull request against the intended integration branch. If a PR already exists for this plan, update it. Give the reviewer the locked decisions, task boundaries and validation results, and return the PR link.
+- Leave the plan PR open for human review. If publication fails or the PR closes without merging, keep the tasks off the board. After the PR merges, run `factory sync` from an up-to-date checkout of the target branch containing the reviewed contracts. If handing off at review time, report that sync is pending merge.
 
 ### Phase 5: Hand off (on request)
 
