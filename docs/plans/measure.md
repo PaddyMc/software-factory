@@ -114,7 +114,7 @@
     - measure-t03
   non_goals:
     - "Changing code, or tests beyond what tests/test_templates.py needs for the new template text"
-    - "Editing the installed skill copies under .claude/skills or .agents/skills: `factory init --force` refreshes them"
+    - "Editing .claude/skills/ beyond copying the changed factory-ops template files there, which tests/test_templates.py requires to match the templates"
     - "Describing the wiki or the knowledge crew (wiki-t07)"
   acceptance:
     - "docs/architecture.md has a `Measuring the factory` section: what a prompt version covers and leaves out, the merge record and how it tells the human's commits from base merges, and what stats computes, by flow and step. Known limitations say that before/after comparisons by prompt version are confounded by the task mix until `factory bench` exists"
@@ -283,6 +283,7 @@ The repository configures no `e2e` gate. `test_prompt_versions.py` and `test_mer
 - **Required by:**
   - [wiki](wiki.md). `wiki-t01` depends on `measure-t04`. The knowledge crew ingests t02's `edited` merge runs as human signals, and t01's prompt version covers the wiki pages injected into task prompts, so `factory stats` shows their effect.
   - [strict-flow](strict-flow.md). `strict-flow-t01` depends on `measure-t03`, the last task here to change `agents.py`, `pipeline.py`, `db.py` and `cli.py`, and `strict-flow-t09` on `measure-t04`, which edits the same docs. Its proof rules join the reviewer's system prompt, so t01's prompt version covers them, and stats sees its `test` run role and its `APPROVE (unproven)` review outcome as new values.
+  - [flow-tuning](flow-tuning.md). `flow-tuning-t01` stacks on `measure-t01`, which changes the same `factory/agents.py` and `factory/pipeline.py`, and adds the review outcomes `CHANGES (no verdict)` and `(asked again)`, which `factory stats` can count.
   - Related: [pr-descriptions](pr-descriptions.md), which runs alongside `measure-t01` and changes the same `factory/agents.py` and `factory/pipeline.py`, so whichever merges second gets a conflict the factory resolves. Its t02 rewrites the verifier's prompt, which gives the verifier a new prompt version, and adds the verify outcome `report (fallback)`, which `factory stats` can count.
   - `factory bench`, the rest of NEXT.md item 3 (not yet planned). It will replay merged tasks and compare prompt versions.
 

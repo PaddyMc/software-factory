@@ -177,7 +177,7 @@
     - agent-flows-t05
   non_goals:
     - "Changing code, or tests beyond what tests/test_templates.py needs for the new template text"
-    - "Editing the installed skill copies under .claude/skills or .agents/skills: `factory init --force` refreshes them"
+    - "Editing .claude/skills/ beyond copying the changed factory-ops template files there, which tests/test_templates.py requires to match the templates"
     - "Rewriting sections unrelated to bench"
   acceptance:
     - "docs/architecture.md has an `## Evaluating flows (factory bench)` section with: a diagram of a run (cases × variants × repeats into isolated cells, each a pipeline run without a PR, then hidden scoring); the cell outcomes; how the hidden tests are kept from agents; the budget; and what results.json records. The Components table has a factory/bench/ row, and Known limitations say that a few cases and repeats make comparisons noisy"
@@ -435,7 +435,7 @@ default@…   7/10 → 8/10     2 → 1   $0.55 → $0.52    1.6 → 1.4
 ## Cross-Workstream Coordination
 
 - **Depends on:** [agent-flows](agent-flows.md). `bench-t03` waits for `agent-flows-t04`: it runs `Pipeline` with a flow and reads `runs.flow` and `runs.step` (agent-flows-t02, t03), and t04 is the last task to change `factory/cli.py`'s run path. `bench-t06` waits for `agent-flows-t05`, which edits the same docs.
-- **Required by:** NEXT.md item 4, "Learn from feedback", which needs a controlled way to check whether a proposed prompt change helps. NEXT.md item 2, "The builder writes the test that judges it": `false_pass` cells measure exactly that gap, across flows. [strict-flow](strict-flow.md): `strict-flow-t01` depends on `bench-t05`, the last task here to change `factory/cli.py`, and `strict-flow-t09` on `bench-t06`, which edits the same docs. `strict-flow-t08` adds `test_paths` to the shipped cases' configs and records each step's `loop` and `prove` in results.json, so a run of `default` against its `strict` flow is the comparison that plan is judged by.
+- **Required by:** NEXT.md item 4, "Learn from feedback", which needs a controlled way to check whether a proposed prompt change helps. NEXT.md item 2, "The builder writes the test that judges it": `false_pass` cells measure exactly that gap, across flows. [strict-flow](strict-flow.md): `strict-flow-t01` depends on `bench-t05`, the last task here to change `factory/cli.py`, and `strict-flow-t09` on `bench-t06`, which edits the same docs. `strict-flow-t08` adds `test_paths` to the shipped cases' configs and records each step's `loop` and `prove` in results.json, so a run of `default` against its `strict` flow is the comparison that plan is judged by. [flow-tuning](flow-tuning.md): `flow-tuning-t04` records each step's `candidates` in results.json and counts each cell's candidates, and `flow-tuning-t06` runs the trial that sets this repository's default flow.
 - **Related:** measure ([PR #18](https://github.com/PaddyMc/software-factory/pull/18), not yet on main). It's independent: `factory stats` reads the board, and bench reads its own cells. Bench runs the real pipeline, so once `measure-t01` lands, every cell's runs carry prompt versions too. measure's "Required by: `factory bench` (not yet planned)" and its NEXT.md line saying bench isn't planned should point here once both plans are on main.
 
 ## Notes / Out of Scope
