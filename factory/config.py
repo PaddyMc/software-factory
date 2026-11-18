@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 CONFIG_PATH = ".factory/config.yaml"
 E2E_LANGUAGES = ("rust", "python")
-ROLES = ("plan", "build", "review", "verify")
+ROLES = ("plan", "test", "build", "review", "verify")
 
 
 class ConfigError(ValueError):
@@ -70,6 +70,7 @@ class Config:
     home: str | None = None                      # $FACTORY_HOME default; else ~/.local/share/factory/<name>
     plans: tuple[str, ...] = ("docs/plans/**/*.md",)
     exclude: tuple[str, ...] = ()                # globs never read as backlog (e.g. "docs/user/**")
+    test_paths: tuple[str, ...] = ()             # globs a test step may write (e.g. "tests/**")
     guidance: tuple[str, ...] = ("AGENTS.md", "CLAUDE.md")   # the first that exists joins every agent's prompt
     session_log: str | None = None               # e.g. "docs/sessions": every task adds <dir>/<today>-<task id>.md
     e2e: E2E | None = None
@@ -131,7 +132,8 @@ def parse(data: dict | None, default_name: str = "default") -> Config:
     for key in ("home", "session_log"):
         if d.get(key) is not None:
             kw[key] = str(d[key])
-    for key in ("plans", "exclude", "guidance", "unit_tests", "lockfiles", "denied_commands", "dependency_sources"):
+    for key in ("plans", "exclude", "test_paths", "guidance", "unit_tests", "lockfiles", "denied_commands",
+                "dependency_sources"):
         v = _strs(d, key, CONFIG_PATH)
         if v is not None:
             kw[key] = v

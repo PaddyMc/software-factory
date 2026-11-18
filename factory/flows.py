@@ -3,7 +3,8 @@
 A repository defines flows under `flows:` in `.factory/config.yaml` and picks one with `flow:`;
 without either, the built-in `default` flow runs, which is today's plan -> build -> review ->
 gates -> verify pipeline. Each step has a kind, which fixes the agent's tools and how its output
-is used, plus an optional name, model, step limit and loop behaviours. A flow without a `gates` step gets one
+is used, plus an optional name, model, step limit and loop behaviours. An optional test step writes
+acceptance tests directly before the builds. A flow without a `gates` step gets one
 inserted after its last review step (or its last build step), so gates always decide the PR.
 This module only parses and validates the config; running a flow lives in the pipeline.
 """
@@ -15,17 +16,17 @@ from dataclasses import dataclass
 
 from .config import ConfigError
 
-KINDS = ("plan", "build", "review", "verify", "gates")
+KINDS = ("plan", "test", "build", "review", "verify", "gates")
 LOOP = ("trim", "map", "nudge", "resume")
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
-RESERVED = ("resolve", "ci", "pr", "human_review", "planner", "builder", "reviewer", "verifier")
+RESERVED = ("resolve", "ci", "pr", "human_review", "planner", "tester", "builder", "reviewer", "verifier")
 
 
 @dataclass(frozen=True)
 class Step:
     """One step of a flow. The kind fixes its tools and output; the rest may stay unset."""
     name: str
-    kind: str                             # plan | build | review | verify | gates
+    kind: str                             # plan | test | build | review | verify | gates
     model: str | None = None              # `provider:model`; None = the kind's model
     max_steps: int | None = None          # model calls allowed; None = the kind's limit
     loop: tuple[str, ...] = ()            # loop behaviours, e.g. ("trim",)
@@ -108,13 +109,16 @@ def validate(flow: str, steps: tuple[Step, ...]) -> None:
 
 
 def _order(flow: str, steps: tuple[Step, ...]) -> None:
-    """[plan]? build+ (review | gates)* [verify]? — with at most one gates step."""
+    """[plan]? [test]? build+ (review | gates)* [verify]? — with at most one gates step."""
     kinds = [s.kind for s in steps]
     plans = [s for s in steps if s.kind == "plan"]
     if len(plans) > 1:
         raise ConfigError(f"flows.{flow}.{plans[1].name}: at most one plan step")
     if plans and kinds[0] != "plan":
         raise ConfigError(f"flows.{flow}.{plans[0].name}: the plan step must be first")
+    tests = [s for s in steps if s.kind == "test"]
+    if len(tests) > 1:
+        raise ConfigError(f"flows.{flow}.{tests[1].name}: at most one test step")
     verifies = [s for s in steps if s.kind == "verify"]
     if len(verifies) > 1:
         raise ConfigError(f"flows.{flow}.{verifies[1].name}: at most one verify step")
@@ -128,9 +132,12 @@ def _order(flow: str, steps: tuple[Step, ...]) -> None:
         bad = steps[1] if plans and len(steps) > 1 else steps[0]
         raise ConfigError(f"flows.{flow}.{bad.name}: at least one build step is required")
     start = 1 if plans else 0
+    if tests and (kinds[start] != "test" or start + 1 >= len(steps) or kinds[start + 1] != "build"):
+        raise ConfigError(f"flows.{flow}.{tests[0].name}: the test step must be directly before the first build step")
+    start += 1 if tests else 0
     if builds != list(range(start, start + len(builds))):
         bad = steps[next(i for i in builds if i not in set(range(start, start + len(builds))))]
-        raise ConfigError(f"flows.{flow}.{bad.name}: build steps come first (after any plan step) and are contiguous")
+        raise ConfigError(f"flows.{flow}.{bad.name}: build steps come first (after any plan or test step) and are contiguous")
 
 
 def parse_flow(name: str, raw) -> Flow:

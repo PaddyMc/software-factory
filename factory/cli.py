@@ -88,6 +88,13 @@ def _child_args(a) -> list[str]:
     return out
 
 
+def _refuse_test_step_without_paths(flow, cfg: C.Config) -> bool:
+    if any(s.kind == "test" for s in flow.steps) and not cfg.test_paths:
+        print(f"flow {flow.name} has a test step: set test_paths in .factory/config.yaml", file=sys.stderr)
+        return True
+    return False
+
+
 def cmd_run_plan(a, plan: Path, tasks: dict) -> int:
     """Every task of one plan: one PR each, dependents stacked on their dependencies' open PRs."""
     import os
@@ -113,6 +120,8 @@ def cmd_run_plan(a, plan: Path, tasks: dict) -> int:
     flow = cfg.flows.get(a.flow or cfg.flow)
     if flow is None:
         print(f"unknown flow {a.flow} (flows: {', '.join(sorted(cfg.flows))})", file=sys.stderr)
+        return 1
+    if _refuse_test_step_without_paths(flow, cfg):
         return 1
     models = flow_models(root, flow, cfg, a.model)
     missing = missing_keys(models, os.environ)
@@ -149,6 +158,8 @@ def cmd_run_one(a) -> int:
     flow = cfg.flows.get(a.flow or cfg.flow)
     if flow is None:
         print(f"unknown flow {a.flow} (flows: {', '.join(sorted(cfg.flows))})", file=sys.stderr)
+        return 1
+    if _refuse_test_step_without_paths(flow, cfg):
         return 1
     task = contracts.find_task(root, a.task_id)
     errs = contracts.validate_tasks([task], contracts.load_all(root))

@@ -26,7 +26,7 @@ from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from . import flows
+from . import flows, globs
 from . import gates as G
 from . import github
 from . import prbody
@@ -151,6 +151,10 @@ class State(TypedDict, total=False):
     attempt: int
     plan: str
     feedback: str
+    test_sha: str
+    test_step: str
+    test_report: str
+    test_failed: bool
     sha: str
     verdict: str
     gates_ok: bool
@@ -227,6 +231,7 @@ def trunk_tip(root: Path, trunk: str, remote: str = "origin") -> str:
 DIFF_LIMIT = 20000
 GATE_TABLE_WIDTH = 160
 SHRUNK_LIMIT = 2000
+TEST_TRIES = 2
 
 
 def _diff(root: Path, a: str, b: str, paths: tuple[str, ...]) -> str:
@@ -277,14 +282,18 @@ class Pipeline:
         self.transcript: Path | None = None
         self.pr_url: str | None = None
         self.run_id: int | None = None
-        # A build that leaves HEAD here changed nothing: the base, or the PR head being reworked.
+        # A build that leaves HEAD at the base (or the PR head being reworked) changed nothing. A fresh
+        # flow with a test step gets a second no-change baseline once its acceptance tests are committed.
         self.start_sha = opts.rework.old_candidate if opts.rework else base_sha
-        # The flow's shape: [plan]? build+ (review | gates)* [verify]? (validated in flows.py).
+        self.test_sha: str | None = None
+        # The flow's shape: [plan]? [test]? build+ (review | gates)* [verify]? (validated in flows.py).
         steps = opts.flow.steps
         self.plan_step = steps[0] if steps[0].kind == "plan" else None
+        test_at = 1 if self.plan_step else 0
+        self.test_step = steps[test_at] if len(steps) > test_at and steps[test_at].kind == "test" else None
         self.build_steps = tuple(s for s in steps if s.kind == "build")
         self.verify_step = steps[-1] if steps[-1].kind == "verify" else None
-        first_post = (1 if self.plan_step else 0) + len(self.build_steps)
+        first_post = test_at + (1 if self.test_step else 0) + len(self.build_steps)
         self.post_steps = steps[first_post: len(steps) - (1 if self.verify_step else 0)]
 
     # ------------------------------------------------------------ helpers
@@ -356,6 +365,44 @@ class Pipeline:
                         lambda: (o := self.roles.step(step, self.ctx(s)), "done", o.text, None), step=step.name)
         return {"plan": out.text, "attempt": 0, "feedback": ""}
 
+    def _test_try(self, ctx: Ctx):
+        """Run the tester once and classify its staged change against the original base."""
+        out = self.roles.step(self.test_step, ctx)
+        git(self.wt, "add", "-A")
+        paths = git(self.wt, "diff", "--cached", "--name-only", self.base_sha).splitlines()
+        if not paths:
+            return out, "no-changes", "The try wrote no tests.", None
+        outside = [p for p in paths if not globs.matches_any(p, self.opts.config.test_paths)]
+        if outside:
+            allowed = ", ".join(self.opts.config.test_paths)
+            reason = f"The try changed paths outside test_paths ({allowed}): {', '.join(outside)}"
+            return out, "out-of-scope", reason, None
+        git(self.wt, "commit", "-q", "-m", f"factory({self.task.id}): acceptance tests")
+        return out, "committed", "", git(self.wt, "rev-parse", "HEAD")
+
+    def test(self, s: State) -> State:
+        """Write and commit the acceptance tests once, before the first build; discard invalid tries."""
+        step = self.test_step
+        feedback = s.get("feedback", "")
+        for number in range(1, TEST_TRIES + 1):
+            ctx = self.ctx({**s, "attempt": number, "feedback": feedback})
+            result = {}
+
+            def run():
+                out, outcome, reason, sha = self._test_try(ctx)
+                result.update(outcome=outcome, reason=reason, sha=sha)
+                return out, outcome, out.text, sha
+
+            out = self.role("test", "building", number, run, step=step.name)
+            if result["outcome"] == "committed":
+                self.test_sha = result["sha"]
+                return {"test_sha": result["sha"], "test_step": step.name, "test_report": out.text,
+                        "feedback": ""}
+            feedback = result["reason"]
+            git(self.wt, "reset", "-q", "--hard", self.base_sha)
+            git(self.wt, "clean", "-q", "-fd")
+        return {"feedback": feedback, "test_failed": True}
+
     def _commit(self, out, message: str):
         """Commit whatever the agent left in the worktree; returns (out, outcome, report, sha) for `role`."""
         git(self.wt, "add", "-A")
@@ -392,6 +439,9 @@ class Pipeline:
         self.role(r.kind, "building", 0, lambda: (None, KINDS[r.kind].entry_outcome, r.brief, r.old_candidate))
         return {"plan": self.db.last_report(self.task.id, "plan", "done"), "attempt": 0, "feedback": r.brief}
 
+    def _no_build_changes(self, sha: str) -> bool:
+        return sha == self.start_sha or (self.test_sha is not None and sha == self.test_sha)
+
     def attempt(self, s: State) -> State:
         """One attempt: every build step of the flow in order, each committing what it leaves."""
         attempt = s.get("attempt", 0) + 1
@@ -413,7 +463,7 @@ class Pipeline:
                             step=step.name)
             earlier.append(out.text)
         sha = git(self.wt, "rev-parse", "HEAD")
-        if sha == self.start_sha:
+        if self._no_build_changes(sha):
             if r and r.kind == "human_review" and attempt == 1:
                 # The builder answered a review that needs no code change: it goes to the PR, not to a retry.
                 return {"attempt": attempt, "sha": sha, "answer": out.text}
@@ -426,7 +476,7 @@ class Pipeline:
     def review_step(self, step: flows.Step):
         """The graph node of one review step: the first CHANGES ends the attempt."""
         def node(s: State) -> State:
-            if s["sha"] == self.start_sha:
+            if self._no_build_changes(s["sha"]):
                 return {"verdict": "CHANGES"}
             extra = {"review_brief": self.opts.rework.brief} \
                 if (self.opts.rework and self.opts.rework.kind == "human_review") else {}
@@ -575,7 +625,9 @@ class Pipeline:
 
     def fail(self, s: State) -> State:
         reason = s.get("feedback") or "unknown"
-        why = "no progress (same failure twice)" if s.get("stuck") else f"gave up after {s.get('attempt', 0)} builds"
+        why = (f"the test step gave up after {TEST_TRIES} tries" if s.get("test_failed")
+               else "no progress (same failure twice)" if s.get("stuck")
+               else f"gave up after {s.get('attempt', 0)} builds")
         headline = reason.splitlines()[0] if reason.strip() else "unknown"
         self.db.update(self.task.id, status="failed", progress=None, note=f"{why}: {headline}\n\n{reason[:4000]}")
         self._event("stage", f"failed — {why}: {clip(headline, 300)}")
@@ -611,6 +663,17 @@ class Pipeline:
                       + prbody.demote("## Gates\n\n" + s.get("gates_pr", "")) + "\n\n</details>")
         task_report = prbody.cap(prbody.demote(prbody.task_text(t)), prbody.BLOCK_LIMIT, f"factory show {t.id}")
         task_block = f"<details><summary>The task</summary>\n\n{task_report}\n\n</details>"
+        test_report = s.get("test_report", "")
+        test_name = s.get("test_step", self.test_step.name if self.test_step else "test")
+        test_pointer = f"factory show {t.id} --step {test_name}"
+        cleaned_test = prbody.clean_report(test_report, "## Acceptance criteria")
+
+        def acceptance_tests_block(limit: int) -> str:
+            report = prbody.cap(cleaned_test, limit, test_pointer)
+            return (f"<details><summary>Acceptance tests ({test_name})</summary>\n\n"
+                    + prbody.demote(report) + "\n\n</details>")
+
+        test_block = acceptance_tests_block(prbody.BLOCK_LIMIT) if test_report else ""
 
         def assemble(with_tail: bool = True) -> str:
             # HTML closes a formatting element at the end of the document. Leaving `sub` open keeps
@@ -629,6 +692,7 @@ class Pipeline:
                 "## Checks\n\n" + checks,
                 gate_block,
                 task_block,
+                *([test_block] if test_report else []),
                 *blocks.values(),
                 "---\n\n" + end,
             ])
@@ -641,6 +705,14 @@ class Pipeline:
         def replace(step: flows.Step) -> None:
             blocks[step.name] = f"Reviewer report ({step.name}): `{pointers[step.name]}`"
 
+        def shrink_test() -> None:
+            nonlocal test_block
+            test_block = acceptance_tests_block(SHRUNK_LIMIT)
+
+        def replace_test() -> None:
+            nonlocal test_block
+            test_block = f"Acceptance tests ({test_name}): `{test_pointer}`"
+
         def replace_task() -> None:
             nonlocal task_block
             task_block = f"The task: `factory show {t.id}`"
@@ -650,7 +722,8 @@ class Pipeline:
             gate_block = f"Gate table: `factory show {t.id} --step gates`"
 
         steps = [*(lambda step=step: shrink(step) for step in longest),
-                 *(lambda step=step: replace(step) for step in longest), replace_task, replace_gates]
+                 *(lambda step=step: replace(step) for step in longest),
+                 *([shrink_test, replace_test] if test_report else []), replace_task, replace_gates]
 
         def last_resort() -> str:
             room = prbody.BODY_LIMIT - len(tail) - 2
@@ -670,9 +743,12 @@ class Pipeline:
         after = dict(zip([s.name for s in self.post_steps], post))
         for name in ("resolve", "rework", "attempt", "gates", "pr", "answer", "fail"):
             g.add_node(name, getattr(self, name))
+        if self.test_step:
+            g.add_node("test", self.test)
+            g.add_conditional_edges("test", lambda s: "fail" if s.get("test_failed") else "attempt")
         if self.plan_step:
             g.add_node("plan", self.plan)
-            g.add_edge("plan", "attempt")
+            g.add_edge("plan", "test" if self.test_step else "attempt")
         for step in self.post_steps:
             if step.kind == "review":
                 g.add_node(after[step.name], self.review_step(step))
@@ -680,11 +756,11 @@ class Pipeline:
             g.add_node("verify", self.verify)
             g.add_edge("verify", "pr")
         g.set_entry_point("resolve" if self.opts.resolution else "rework" if self.opts.rework
-                          else "plan" if self.plan_step else "attempt")
+                          else "plan" if self.plan_step else "test" if self.test_step else "attempt")
         g.add_edge("rework", "attempt")
         more = lambda s: s["attempt"] < self.opts.max_attempts and not s.get("stuck")
         g.add_conditional_edges("attempt", lambda s: "answer" if s.get("answer") is not None
-                                else ("attempt" if more(s) else "fail") if s["sha"] == self.start_sha
+                                else ("attempt" if more(s) else "fail") if self._no_build_changes(s["sha"])
                                 else post[0])
         g.add_conditional_edges("resolve", lambda s: "gates" if s["verdict"] == "APPROVE"
                                 else post[0] if not s["verdict"]

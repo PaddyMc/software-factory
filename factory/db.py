@@ -1,7 +1,7 @@
 """Local task database (SQLite). The only place task state lives.
 
 tasks: one row per contract that has entered the factory.
-runs:  one row per role invocation (plan/build/review/verify/pr/merge, and resolve/ci/human_review), with its report.
+runs:  one row per role invocation (plan/test/build/review/verify/pr/merge, and resolve/ci/human_review), with its report.
        A run's role stays its kind; `flow` and `step` name the flow and the flow step it ran under.
 """
 
@@ -16,7 +16,7 @@ from .contracts import Task
 
 STATUSES = ("queued", "planning", "building", "reviewing", "verifying", "pr_open", "conflict", "ci_failed",
             "changes_requested", "merged", "failed", "abandoned")
-ROLES = ("plan", "build", "resolve", "ci", "human_review", "review", "verify", "pr", "merge")
+ROLES = ("plan", "test", "build", "resolve", "ci", "human_review", "review", "verify", "pr", "merge")
 ACTIVE = ("planning", "building", "reviewing", "verifying")
 
 SCHEMA = """

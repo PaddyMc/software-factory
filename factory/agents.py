@@ -1,4 +1,4 @@
-"""The agent steps of a flow (LangChain `create_agent`), each of one of the four kinds. Prompts ship in
+"""The agent steps of a flow (LangChain `create_agent`), each of one of the five kinds. Prompts ship in
 factory/prompts/<role>.md; a repository may override one with .factory/agents/<role>.md, give a custom step
 its own .factory/agents/<step>.md, and set models and step limits in .factory/config.yaml."""
 
@@ -21,7 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.errors import GraphRecursionError
 
-from . import prices
+from . import prices, verification
 from .config import Config
 from .contracts import Task
 from .flows import Flow, Step
@@ -29,7 +29,7 @@ from .log import NullLog, clip
 from .tools import READ_CAP, PathGuard, ToolLog, diff_tool, read_tools, run_tool, write_tools
 
 OVERRIDE_DIR = ".factory/agents"                 # per-repository prompt overrides, in the main checkout
-ROLE_FILES = {"plan": "planner", "build": "builder", "review": "reviewer", "verify": "verifier"}
+ROLE_FILES = {"plan": "planner", "test": "tester", "build": "builder", "review": "reviewer", "verify": "verifier"}
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 _VERDICT = re.compile(r"^VERDICT:\s*(APPROVE|CHANGES)\s*$", re.M)
 DEFAULT_MODEL = "openrouter:z-ai/glm-5.3"
@@ -180,8 +180,9 @@ def role_model(root: Path, role: str, cfg: Config, override: str | None = None) 
 
 
 def role_models(root: Path, override: str | None = None, cfg: Config | None = None) -> dict[str, str]:
+    """The original four roles, for callers not running a flow; optional steps use `flow_models`."""
     cfg = cfg or Config()
-    return {role: role_model(root, role, cfg, override) for role in ROLE_FILES}
+    return {role: role_model(root, role, cfg, override) for role in ROLE_FILES if role != "test"}
 
 
 def step_model(root: Path, step: Step, cfg: Config, override: str | None = None) -> str:
@@ -528,6 +529,18 @@ class LangChainRoles:
         cap = READ_CAP if "trim" in step.loop else None
         if step.kind == "plan":
             return read_tools(ctx.worktree, guard, cap), f"Plan task {ctx.task.id}.", None
+        if step.kind == "test":
+            log = ToolLog()
+            tools = (read_tools(ctx.worktree, guard, cap)
+                     + write_tools(ctx.worktree, guard, log, allowed=self.cfg.test_paths)
+                     + run_tool(ctx.sandbox, log, self.cfg.denied_commands))
+            commands = [c for c in ctx.task.verification if verification.is_test_command(c)]
+            msg = (f"Write the acceptance tests for task {ctx.task.id}.\n\n# Test paths\n\n"
+                   + _bullets(f"`{p}`" for p in self.cfg.test_paths) + "\n\n# Test commands\n\n"
+                   + _bullets(f"`{c}`" for c in commands))
+            if ctx.feedback:
+                msg += f"\n\n# Feedback to address first\n\n{ctx.feedback}"
+            return tools, msg, None
         if step.kind == "build":
             log = ToolLog()
             tools = (read_tools(ctx.worktree, guard, cap) + write_tools(ctx.worktree, guard, log)

@@ -1,7 +1,8 @@
 """LangChain tools, scoped per role.
 
 planner/reviewer: read-only. builder: + write/edit anywhere in the worktree + sandboxed run.
-verifier: read-only + sandboxed run. Nobody gets commit, push, or database access.
+tester: + write/edit under test_paths + sandboxed run. verifier: read-only + sandboxed run.
+Nobody gets commit, push, or database access.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from langchain_core.tools import tool
+
+from . import globs
 
 DENIED_COMMANDS = (
     r"\bgit\s+(push|commit|reset|checkout|switch|rebase|merge|tag|worktree|remote)\b",
@@ -112,12 +115,14 @@ def diff_tool(root: Path, base_sha: str) -> list:
     return [git_diff]
 
 
-def write_tools(root: Path, guard: PathGuard, log: ToolLog) -> list:
+def write_tools(root: Path, guard: PathGuard, log: ToolLog, allowed: tuple[str, ...] | None = None) -> list:
     @tool
     def write_file(path: str, content: str) -> str:
         """Create or overwrite a worktree-relative file."""
         try:
             rel = guard.check_write(path)
+            if allowed is not None and not globs.matches_any(rel, allowed):
+                raise PermissionError(f"{rel} is outside test_paths ({', '.join(allowed)})")
         except PermissionError as e:
             return f"refused: {e}"
         p = root / rel
@@ -131,6 +136,8 @@ def write_tools(root: Path, guard: PathGuard, log: ToolLog) -> list:
         """Replace exactly one occurrence of `old` with `new` in a worktree-relative file."""
         try:
             rel = guard.check_write(path)
+            if allowed is not None and not globs.matches_any(rel, allowed):
+                raise PermissionError(f"{rel} is outside test_paths ({', '.join(allowed)})")
         except PermissionError as e:
             return f"refused: {e}"
         p = root / rel
