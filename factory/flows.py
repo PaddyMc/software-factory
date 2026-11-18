@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from .config import ConfigError
 
 KINDS = ("plan", "build", "review", "verify", "gates")
-LOOP = ("trim", "map", "nudge")
+LOOP = ("trim", "map", "nudge", "resume")
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 RESERVED = ("resolve", "ci", "pr", "human_review", "planner", "builder", "reviewer", "verifier")
 
@@ -79,6 +79,8 @@ def parse_step(flow: str, raw) -> Step:
         if behaviour in seen_loop:
             raise ConfigError(f"{where}: loop behaviour {behaviour!r} appears more than once")
         seen_loop.add(behaviour)
+    if "resume" in seen_loop and kind != "build":
+        raise ConfigError(f"{where}: loop behaviour 'resume' is only valid on build steps")
     return Step(name, kind, model, max_steps, tuple(loop or ()))
 
 
