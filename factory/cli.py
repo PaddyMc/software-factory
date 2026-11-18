@@ -150,7 +150,7 @@ def cmd_run_one(a) -> int:
     import os
 
     from .agents import LangChainRoles, flow_models, missing_keys, same_model_warning
-    from .pipeline import KINDS, Options, Pipeline, PipelineError, Stopped, create_worktree, git
+    from .pipeline import KINDS, Options, Pipeline, PipelineError, Stopped, create_worktree, git, remove_worktree
 
     root = repo_root()
     home = factory_home()
@@ -188,8 +188,13 @@ def cmd_run_one(a) -> int:
               f"(use --force to override)", file=sys.stderr)
         return 1
     old_wt = home / "worktrees" / task.id
-    if old_wt.exists() and not (row["status"] in ACTIVE and pid_alive(row["pid"])):
-        git(root, "worktree", "remove", "--force", str(old_wt))      # a finished run's leftovers
+    if not (row["status"] in ACTIVE and pid_alive(row["pid"])):
+        if old_wt.exists():
+            git(root, "worktree", "remove", "--force", str(old_wt))  # a finished run's leftovers
+        for number in range(2, 6):
+            candidate = home / "worktrees" / f"{task.id}.c{number}"
+            if candidate.exists():
+                remove_worktree(candidate, root)
     resolution = rework = None
     try:
         if row["status"] == "conflict" and not a.force:    # resolve the open PR's conflicts; --force rebuilds it
@@ -774,9 +779,17 @@ def cmd_show(a) -> int:
         stats = f"{r['steps']} steps, {r['tokens_in']} in / {r['tokens_out']} out"
         stats += f", ${r['cost_usd']:.4f}" if r["cost_usd"] is not None else ""
         stats += f", {r['refused']} tool calls refused" if r["refused"] else ""
+        candidate = ""
+        if r["candidate"] is not None:
+            total = db.conn.execute(
+                "SELECT MAX(candidate) FROM runs WHERE task_id=? AND flow IS ? AND attempt=? "
+                "AND candidate IS NOT NULL", (a.task_id, r["flow"], r["attempt"])).fetchone()[0]
+            candidate = f" · candidate {r['candidate']} of {total}"
+            if r["sha"] is not None and r["sha"] == row["candidate_sha"]:
+                candidate += " · chosen"
         print(f"\n## {r['role']} #{r['attempt']} — {r['outcome']} (flow {r['flow'] or '-'}, "
               f"step {r['step'] or r['role']}, {r['model'] or '-'}, prompt {r['prompt_version'] or '-'}, "
-              f"{r['started_at']}; {stats})")
+              f"{r['started_at']}; {stats}){candidate}")
         if r["transcript"]:
             hint = f"factory transcript {a.task_id} --role {r['role']} --attempt {r['attempt']}"
             if r["step"]:
@@ -916,13 +929,19 @@ def cmd_stop(a) -> int:
 
 
 def cmd_clean(a) -> int:
-    from .pipeline import git
+    from .pipeline import git, remove_worktree
 
     root = repo_root()
-    wt = factory_home() / "worktrees" / a.task_id
+    home = factory_home()
+    wt = home / "worktrees" / a.task_id
     if wt.exists():
         git(root, "worktree", "remove", "--force", str(wt))
         print(f"removed {wt}")
+    for number in range(2, 6):
+        candidate = home / "worktrees" / f"{a.task_id}.c{number}"
+        if candidate.exists():
+            remove_worktree(candidate, root)
+            print(f"removed {candidate}")
     db = _db()
     if db.task(a.task_id) and db.task(a.task_id)["status"] in ACTIVE + ("queued",):
         db.update(a.task_id, status="failed", note="cleaned while in progress")

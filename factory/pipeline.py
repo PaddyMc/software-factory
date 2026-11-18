@@ -15,10 +15,12 @@ reviewer requested changes is reworked with the review's brief, or answered on t
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import json
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -161,6 +163,7 @@ class State(TypedDict, total=False):
     sha: str
     verdict: str
     gates_ok: bool
+    gates_ran: bool          # a candidates attempt already ran the gates once per candidate
     gates: str
     gates_pr: str           # gate details cut for the PR; `gates` stays whole for the verifier
     checks: list[prbody.Check]  # gate results and command/test counts for the PR's Checks paragraph
@@ -222,6 +225,13 @@ def create_worktree(root: Path, home: Path, task_id: str, base_ref: str,
                                 f"merge one of their PRs first. {p.stdout.strip()} {p.stderr.strip()}".strip())
         base_sha = git(wt, "rev-parse", "HEAD")
     return wt, base_sha
+
+
+def remove_worktree(wt: Path, cwd: Path) -> None:
+    """Remove a worktree, including an unregistered directory left by an interrupted cleanup."""
+    git(cwd, "worktree", "remove", "--force", str(wt), check=False)
+    if wt.exists():
+        shutil.rmtree(wt, ignore_errors=True)
 
 
 def trunk_tip(root: Path, trunk: str, remote: str = "origin") -> str:
@@ -302,9 +312,11 @@ class Pipeline:
     # ------------------------------------------------------------ helpers
 
     def ctx(self, s: State, **extra) -> Ctx:
-        return Ctx(task=self.task, worktree=self.wt, base_sha=self.base_sha, attempt=s.get("attempt", 0),
-                   sandbox=self.sandbox, plan=s.get("plan", ""), feedback=s.get("feedback", ""),
-                   log=self._event, progress=self._progress, record=self._record, **extra)
+        kw = dict(task=self.task, worktree=self.wt, base_sha=self.base_sha, attempt=s.get("attempt", 0),
+                  sandbox=self.sandbox, plan=s.get("plan", ""), feedback=s.get("feedback", ""),
+                  log=self._event, progress=self._progress, record=self._record)
+        kw.update(extra)
+        return Ctx(**kw)
 
     def _event(self, tag: str, message: str) -> None:
         """Log line + heartbeat/activity in the db, so `factory top` shows what is happening now."""
@@ -321,8 +333,11 @@ class Pipeline:
 
     def _progress(self, steps: int, max_steps: int, tin: int, tout: int, cost: float | None = None,
                   refused: int = 0) -> None:
-        run = self.db.conn.execute("SELECT role, step, attempt FROM runs WHERE id=?", (self.run_id,)).fetchone()
+        run = self.db.conn.execute("SELECT role, step, attempt, candidate FROM runs WHERE id=?",
+                                   (self.run_id,)).fetchone()
         label = f"{run['step'] or run['role']}#{run['attempt']}" if run else "?"
+        if run and run["candidate"] is not None:
+            label += f".{run['candidate']}"
         text = f"{label} step {steps}/{max_steps} · {tin // 1000}k in / {tout // 1000}k out"
         text += f" · ${cost:.3f}" if cost is not None else ""
         text += f" · {refused} refused" if refused else ""
@@ -333,31 +348,35 @@ class Pipeline:
             if spent > self.opts.max_cost:
                 raise PipelineError(f"cost limit exceeded: ${spent:.2f} > ${self.opts.max_cost:.2f}")
 
-    def role(self, role: str, status: str, attempt: int, fn, flow: str | None = None, step: str | None = None):
-        self.db.update(self.task.id, status=status, progress=f"{role}#{attempt} starting")
+    def role(self, role: str, status: str, attempt: int, fn, flow: str | None = None, step: str | None = None,
+             candidate: int | None = None):
+        label = f"{step or role}#{attempt}" + (f".{candidate}" if candidate is not None else "")
+        progress_label = label if candidate is not None else f"{role}#{attempt}"
+        stage_label = label if candidate is not None else f"{role} #{attempt}"
+        self.db.update(self.task.id, status=status, progress=f"{progress_label} starting")
         run_id = self.db.start_run(self.task.id, role, attempt,
-                                   flow=flow or self.opts.flow.name, step=step or role)
+                                   flow=flow or self.opts.flow.name, step=step or role, candidate=candidate)
         self.run_id = run_id
         if self.transcript_dir is not None:
             self.transcript_dir.mkdir(parents=True, exist_ok=True)
             self.transcript = self.transcript_dir / f"{run_id:05d}-{role}-{attempt}.jsonl"
             self.db.conn.execute("UPDATE runs SET transcript=? WHERE id=?", (str(self.transcript), run_id))
-        self._event("stage", f"{status} ({role} #{attempt})")
+        self._event("stage", f"{status} ({stage_label})")
         try:
             out, outcome, report, sha = fn()
         except Exception as e:  # record, then stop the pipeline
             self.db.finish_run(run_id, "error", f"{type(e).__name__}: {e}")
-            self._event("stage", f"{role} #{attempt} error: {clip(f'{type(e).__name__}: {e}', 300)}")
+            self._event("stage", f"{stage_label} error: {clip(f'{type(e).__name__}: {e}', 300)}")
             raise
         if getattr(out, "stopped", None):
             outcome = f"{outcome} ({out.stopped})"
         self.db.conn.execute("UPDATE runs SET model=?, prompt_version=? WHERE id=?",
                              (getattr(out, "model", None), getattr(out, "prompt_version", None), run_id))
         if hasattr(out, "steps"):
-            self.db.progress(self.task.id, run_id, f"{role}#{attempt} {outcome}", out.steps, out.tokens_in,
+            self.db.progress(self.task.id, run_id, f"{progress_label} {outcome}", out.steps, out.tokens_in,
                              out.tokens_out, out.cost_usd, out.refused)
         self.db.finish_run(run_id, outcome, report, sha)
-        self._event("stage", f"{role} #{attempt} → {outcome}" + (f" @ {sha[:12]}" if sha else ""))
+        self._event("stage", f"{stage_label} → {outcome}" + (f" @ {sha[:12]}" if sha else ""))
         return out
 
     # ------------------------------------------------------------ nodes
@@ -440,13 +459,14 @@ class Pipeline:
             git(self.wt, "clean", "-q", "-fd")
         return {"feedback": feedback, "test_failed": True}
 
-    def _commit(self, out, message: str):
+    def _commit(self, out, message: str, wt: Path | None = None):
         """Commit whatever the agent left in the worktree; returns (out, outcome, report, sha) for `role`."""
-        git(self.wt, "add", "-A")
-        if not git(self.wt, "diff", "--cached", "--name-only"):
+        wt = wt or self.wt
+        git(wt, "add", "-A")
+        if not git(wt, "diff", "--cached", "--name-only"):
             return out, "no-changes", out.text, None
-        git(self.wt, "commit", "-q", "-m", message)
-        return out, "committed", out.text, git(self.wt, "rev-parse", "HEAD")
+        git(wt, "commit", "-q", "-m", message)
+        return out, "committed", out.text, git(wt, "rev-parse", "HEAD")
 
     def resolve(self, s: State) -> State:
         """Entry point when resolving: commit the replayed change, having the builder fix any conflicts first.
@@ -479,6 +499,10 @@ class Pipeline:
     def _no_build_changes(self, sha: str) -> bool:
         return sha == self.start_sha or (self.test_sha is not None and sha == self.test_sha)
 
+    def _candidates_run(self, attempt: int) -> bool:
+        return (self.build_steps[0].candidates > 1 and attempt == 1
+                and self.opts.resolution is None and self.opts.rework is None)
+
     def attempt(self, s: State) -> State:
         """One attempt: every build step of the flow in order, each committing what it leaves."""
         attempt = s.get("attempt", 0) + 1
@@ -491,6 +515,8 @@ class Pipeline:
             plan = "(This flow has no plan step: plan from the contract.)"
         message = commit_message(self.task.id, self.task.goal,
                                  KINDS[r.kind].commit_body(attempt) if r else f"Build attempt {attempt}.")
+        if self._candidates_run(attempt):
+            return self._candidates(s, attempt, plan, feedback, message)
 
         earlier, out = [], None
         for step in self.build_steps:
@@ -505,12 +531,83 @@ class Pipeline:
         if self._no_build_changes(sha):
             if r and r.kind == "human_review" and attempt == 1:
                 # The builder answered a review that needs no code change: it goes to the PR, not to a retry.
-                return {"attempt": attempt, "sha": sha, "answer": out.text}
-            return {"attempt": attempt, "sha": sha, "verdict": "CHANGES",
+                return {"attempt": attempt, "sha": sha, "answer": out.text, "gates_ran": False}
+            return {"attempt": attempt, "sha": sha, "verdict": "CHANGES", "gates_ran": False,
                     "feedback": KINDS[r.kind].no_change
                     if r else "The previous attempt produced no changes. Implement the task."}
         self.db.update(self.task.id, candidate_sha=sha)
-        return {"attempt": attempt, "sha": sha, "reviews": {}, "review_outcomes": {}}
+        return {"attempt": attempt, "sha": sha, "reviews": {}, "review_outcomes": {}, "gates_ran": False}
+
+    def _candidate_worktree(self, number: int, start: str) -> tuple[Path, object]:
+        wt = self.opts.config.home_dir() / "worktrees" / f"{self.task.id}.c{number}"
+        if wt.exists():
+            raise PipelineError(f"worktree {wt} exists from a previous run; `factory clean {self.task.id}` first")
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        git(self.wt, "worktree", "add", "-q", "--detach", str(wt), start)
+        self._event("stage", f"candidate {number}: worktree {wt} at {start[:12]}")
+        return wt, dataclasses.replace(self.sandbox, worktree=wt)
+
+    def _remove_candidate_worktrees(self) -> None:
+        if not self.build_steps or self.build_steps[0].candidates <= 1:
+            return
+        for number in range(2, self.build_steps[0].candidates + 1):
+            wt = self.opts.config.home_dir() / "worktrees" / f"{self.task.id}.c{number}"
+            remove_worktree(wt, self.wt)
+
+    def _changed_lines(self, start: str, sha: str) -> int:
+        lines = git(self.wt, "diff", "--numstat", f"{start}..{sha}").splitlines()
+        return sum(int(added) + int(deleted) for line in lines
+                   for added, deleted, _ in [line.split("\t", 2)]
+                   if added.isdigit() and deleted.isdigit())
+
+    def _candidates(self, s: State, attempt: int, plan: str, feedback: str, message: str) -> State:
+        """Build and gate each first-attempt candidate in turn, then keep the closest or smallest one."""
+        step = self.build_steps[0]
+        n = step.candidates
+        start = self.test_sha or self.base_sha
+        results, snapshots = [], {}
+        try:
+            for number in range(1, n + 1):
+                wt, sbx = (self.wt, self.sandbox) if number == 1 else self._candidate_worktree(number, start)
+                ctx = self.ctx({**s, "plan": plan, "attempt": attempt, "feedback": feedback},
+                               worktree=wt, sandbox=sbx, earlier=(),
+                               test_files=tuple(s.get("test_files") or ()),
+                               red_commands=tuple(s.get("red_commands") or ()))
+                self.role("build", "building", attempt,
+                          lambda wt=wt, ctx=ctx, number=number: self._commit(
+                              self.roles.step(step, ctx, tag=f"{step.name}#{attempt}.{number}"), message, wt=wt),
+                          step=step.name, candidate=number)
+                if "resume" in step.loop:
+                    snapshots[number] = self.roles.resumes[step.name]
+                sha = git(wt, "rev-parse", "HEAD")
+                gs, table, table_pr, checks = self._gates_once(s, attempt, wt, sbx, sha, candidate=number)
+                results.append({"number": number, "sha": sha, "gs": gs, "table": table,
+                                "table_pr": table_pr, "checks": checks})
+
+            passing = [r for r in results if G.passed(r["gs"])]
+            if passing:
+                chosen = min(passing, key=lambda r: (self._changed_lines(start, r["sha"]), r["number"]))
+                self._event("stage", f"chose candidate {chosen['number']} of {n} "
+                                     f"({len(passing)} passed the gates; smallest diff)")
+            else:
+                chosen = min(results, key=lambda r: (sum(g.ok is False for g in r["gs"]), r["number"]))
+                self._event("stage", f"no candidate passed the gates; candidate {chosen['number']} of {n} "
+                                     "carries on (fewest failing gates)")
+            sha = chosen["sha"]
+            git(self.wt, "reset", "-q", "--hard", sha)
+            git(self.wt, "clean", "-q", "-fd")
+            self.db.update(self.task.id, candidate_sha=sha)
+            if "resume" in step.loop:
+                self.roles.resumes[step.name] = snapshots[chosen["number"]]
+            out = {"attempt": attempt, "sha": sha, "reviews": {}, "review_outcomes": {}, "gates_ran": True,
+                   "gates_ok": bool(passing), "gates": chosen["table"], "gates_pr": chosen["table_pr"],
+                   "checks": chosen["checks"]}
+            if not passing:
+                feedback, sig, stuck = self._gate_failure(chosen["gs"], s)
+                out.update(feedback=feedback, failure_sig=sig, stuck=stuck)
+            return out
+        finally:
+            self._remove_candidate_worktrees()
 
     def review_step(self, step: flows.Step):
         """The graph node of one review step: the first CHANGES ends the attempt."""
@@ -550,16 +647,16 @@ class Pipeline:
                     "feedback": fb}
         return node
 
-    def gates(self, s: State) -> State:
-        """The gates step (role verify, step gates): any failure ends the attempt."""
+    def _gates_once(self, s: State, attempt: int, wt: Path, sbx, sha: str, candidate: int | None = None):
+        """Run and record the gates once, on either the task worktree or one candidate's worktree."""
         def run():
-            gs = G.run_gates(self.task, self.wt, self.base_sha, s["sha"], self.sandbox, self.opts.config,
+            gs = G.run_gates(self.task, wt, self.base_sha, sha, sbx, self.opts.config,
                              skip=self.opts.skip_gates, full_e2e=self.opts.full_e2e,
                              test_commit=s.get("test_sha"), test_files=tuple(s.get("test_files") or ()),
                              test_red=tuple(s.get("red_commands") or ()))
-            return gs, "pass" if G.passed(gs) else "fail", G.table(gs), s["sha"]
+            return gs, "pass" if G.passed(gs) else "fail", G.table(gs), sha
 
-        gs = self.role("verify", "verifying", s["attempt"], run, step="gates")
+        gs = self.role("verify", "verifying", attempt, run, step="gates", candidate=candidate)
         table = G.table(gs)
         table_pr = G.table(gs, width=GATE_TABLE_WIDTH)
         checks = []
@@ -572,16 +669,25 @@ class Pipeline:
                 commands, tests = len(lines), sum(counts) if counts else None
             checks.append(prbody.Check(g.name, g.ok, commands, tests))
             self._event("gate", f"{g.mark:<4} {g.name}: {clip(g.detail, 200)}")
+        return gs, table, table_pr, checks
+
+    def _gate_failure(self, gs, s: State) -> tuple[str, str, bool]:
+        bad = [g for g in gs if g.ok is False]
+        failed = "\n\n".join(f"### {g.name}\n{g.detail}" for g in bad)
+        sig = json.dumps([(g.name, g.detail) for g in bad])
+        stuck = sig == s.get("failure_sig")
+        if stuck:
+            self._event("stage", "no progress: the same gates failed with the same output twice in a row")
+        feedback = f"Verification gates failed: {', '.join(g.name for g in bad)}\n\n{failed}"
+        return feedback, sig, stuck
+
+    def gates(self, s: State) -> State:
+        """The gates step (role verify, step gates): any failure ends the attempt."""
+        gs, table, table_pr, checks = self._gates_once(s, s["attempt"], self.wt, self.sandbox, s["sha"])
         if not G.passed(gs):
-            bad = [g for g in gs if g.ok is False]
-            failed = "\n\n".join(f"### {g.name}\n{g.detail}" for g in bad)
-            sig = json.dumps([(g.name, g.detail) for g in bad])
-            stuck = sig == s.get("failure_sig")
-            if stuck:
-                self._event("stage", "no progress: the same gates failed with the same output twice in a row")
+            feedback, sig, stuck = self._gate_failure(gs, s)
             return {"gates_ok": False, "gates": table, "gates_pr": table_pr, "checks": checks,
-                    "failure_sig": sig, "stuck": stuck,
-                    "feedback": f"Verification gates failed: {', '.join(g.name for g in bad)}\n\n{failed}"}
+                    "failure_sig": sig, "stuck": stuck, "feedback": feedback}
         return {"gates_ok": True, "gates": table, "gates_pr": table_pr, "checks": checks}
 
     def _cleaned_reviews(self, s: State) -> dict[str, str]:
@@ -821,17 +927,23 @@ class Pipeline:
                           else "plan" if self.plan_step else "test" if self.test_step else "attempt")
         g.add_edge("rework", "attempt")
         more = lambda s: s["attempt"] < self.opts.max_attempts and not s.get("stuck")
-        g.add_conditional_edges("attempt", lambda s: "answer" if s.get("answer") is not None
-                                else ("attempt" if more(s) else "fail") if self._no_build_changes(s["sha"])
-                                else post[0])
-        g.add_conditional_edges("resolve", lambda s: "gates" if s["verdict"] == "APPROVE"
-                                else post[0] if not s["verdict"]
-                                else ("attempt" if more(s) else "fail"))
         # A flow may put the gates step before some review steps; on pass the gates node routes on
         # to the next post step (or verify/pr when it is last), never past the remaining reviewers.
         gates_at = next(i for i, s in enumerate(self.post_steps) if s.kind == "gates")
         next_after_gates = post[gates_at + 1] if gates_at + 1 < len(post) else (
             "verify" if self.verify_step else "pr")
+
+        def attempt_next(s):
+            if s.get("answer") is not None:
+                return "answer"
+            if s.get("gates_ran"):
+                return next_after_gates if s["gates_ok"] else ("attempt" if more(s) else "fail")
+            return (("attempt" if more(s) else "fail") if self._no_build_changes(s["sha"]) else post[0])
+
+        g.add_conditional_edges("attempt", attempt_next)
+        g.add_conditional_edges("resolve", lambda s: "gates" if s["verdict"] == "APPROVE"
+                                else post[0] if not s["verdict"]
+                                else ("attempt" if more(s) else "fail"))
         g.add_conditional_edges("gates", lambda s, nxt=next_after_gates: nxt if s["gates_ok"]
                                 else ("attempt" if more(s) else "fail"))
         for i, step in enumerate(self.post_steps):
@@ -862,3 +974,5 @@ class Pipeline:
             self.db.update(self.task.id, status="failed", progress=None, note=f"error: {type(e).__name__}: {e}"[:2000])
             self._event("stage", f"failed: {clip(f'{type(e).__name__}: {e}', 300)}")
             raise
+        finally:
+            self._remove_candidate_worktrees()
