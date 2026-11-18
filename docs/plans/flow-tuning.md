@@ -28,7 +28,7 @@
 | **M5** | Docs | Architecture, reference, NEXT.md, the config template and the factory-ops skill describe candidates; `tests/test_templates.py` passes | M6 |
 | **M6** | The trial (by hand) | `docs/flow-trials.md` records a bench run of six variants; `.factory/config.yaml` sets `flow:` by its rule | M5 |
 
-**Sequence:** `(measure-t01 ∥ thoughts-t01) → M1 → strict-flow-t01 … strict-flow-t08 → M2 → M3 → M4 → (M5 after strict-flow-t09) ∥ M6`, then `M4 → wiki-t01` and `M5 → wiki-t07`. M2 to M4 run one after another: each changes `factory/flows.py`, `factory/pipeline.py` or `factory/bench/`.
+**Sequence:** `(measure-t01 ∥ thoughts-t01) → M1 → strict-flow-t01 … strict-flow-t08 → M2 → M3 → M4 → (M5 after strict-flow-t09) ∥ M6`, then `M4 → wiki-t01` and `M5 → wiki-t07`. M6 also waits for `evals-t09`, this repository's mined bench suite. M2 to M4 run one after another: each changes `factory/flows.py`, `factory/pipeline.py` or `factory/bench/`.
 
 ### Task Contracts
 
@@ -187,15 +187,16 @@
     - "docs/plans/bench.md#results"
   depends_on:
     - flow-tuning-t04
+    - evals-t09
   non_goals:
     - "Changing code, cases, prompts or models"
-    - "A trial on cases beyond the shipped ones"
+    - "A trial on cases other than the dev split of this repository's mined suite (evals-t09): the shipped cases are solved by every flow"
     - "Choosing a flow per task or by the contract's risk"
   acceptance:
     - ".factory/config.yaml defines `gates-first-x3` (plan, build with candidates: 3, gates, review, verify) and `strict-x3` (strict's steps with candidates: 3 on its build step), next to the existing gates-first and lean"
-    - "One run of `factory bench run --flow default --flow gates-first --flow lean --flow strict --flow gates-first-x3 --flow strict-x3 --repeat 3 --max-cost 100` on the shipped cases has finished or reached its budget"
-    - "docs/flow-trials.md has a section headed with the run's date that gives the factory version (`factory version`), the bench run id, the cases, the repeats and the budget, and a table with one row per variant: solved rate, false passes, mean attempts, cost per cell and minutes per cell, copied from `factory bench report`"
-    - "The section applies the trial's rule and names its pick: the highest solved rate wins; variants within one solved cell of the best are compared by fewer false passes, then by lower cost per cell"
+    - "One run of `factory bench run --cases SUITE --split dev --screen 8 --baseline BASELINE --flow default --flow gates-first --flow lean --flow strict --flow gates-first-x3 --flow strict-x3 --repeat 3 --max-cost 150 --note trial` has finished or reached its budget, where SUITE is this repository's mined suite and BASELINE the baseline run evals-t09 recorded, so default and gates-first reuse its cells"
+    - "docs/flow-trials.md has a section headed with the run's date that gives the factory version (`factory version`), the bench run id, the cases, the repeats and the budget, and a table with one row per variant: solved rate with its interval, pass^3, false passes, regressions, gamed impossible cells, cost per cell and minutes per cell, and its comparison with default (verdicts for solved rate and cost), copied from `factory bench report` and `factory bench compare --json`"
+    - "The section applies the trial's rule and names its pick: among the variants whose solved comparison with default is `better`, the highest solved rate wins; if none is, the cheapest variant whose solved comparison is `inconclusive` with an interval whose lower bound is above −5 points and whose cost comparison is `cheaper` wins; otherwise default stays. A variant that gamed an impossible cell more often than default can't be picked"
     - ".factory/config.yaml sets `flow:` to the pick, and tests/test_templates.py passes"
     - "docs/sessions/ has this task's session log entry, as the project rules require"
   verification:
@@ -231,7 +232,7 @@ Tasks t01 to t05 are factory-runnable on this repository: their verification com
 5. **Candidate worktrees are left behind.** A crash between builds leaves `TASK.cK` directories. **Action:** they are removed however the run ends, and `factory clean TASK` removes leftovers; a test covers each path.
 6. **t01 can't stack on two open PRs that conflict.** `measure-t01` and `thoughts-t01` both change `factory/agents.py`. **Action:** merge both PRs (#55, #57) before running t01, so it builds on main; otherwise the factory refuses with `its open dependencies conflict`.
 7. **Older docs tasks forbid editing the skill copies that #50's test now requires.** `bench-t06`, `measure-t04`, `strict-flow-t09` and `wiki-t07` had the non-goal "Editing the installed skill copies under .claude/skills". **Action:** this plan's PR rewrites that non-goal in the four contracts to require the copies, so their builders can pass `tests/test_templates.py`.
-8. **The trial is expensive.** Six variants, five cases and three repeats are 90 cells, and the candidates variants cost more per cell. **Action:** `--max-cost 100` stops the run; results.json keeps every finished cell, and the trial's write-up names any variant that didn't finish.
+8. **The trial is expensive.** Replayed cases cost about $1 a cell, and the candidates variants more. **Action:** the trial screens on 8 dev cases and reuses the evals baseline's default and gates-first cells, so four variants run 96 cells; `--max-cost 150` stops it, results.json keeps every finished cell, and the write-up names any variant that didn't finish.
 
 ---
 
@@ -316,7 +317,7 @@ results.json records each step's `candidates`, and compare flags a change, as st
 | `gates-first-x3` | `gates-first` with candidates: 3 |
 | `strict-x3` | `strict` with candidates: 3 |
 
-`factory bench run --flow default --flow gates-first --flow lean --flow strict --flow gates-first-x3 --flow strict-x3 --repeat 3 --max-cost 100`, then `factory bench report`. The rule: the highest solved rate wins; variants within one solved cell of the best are compared by fewer false passes, then by lower cost per cell.
+It runs on the dev split of this repository's mined suite ([evals](evals.md), after `evals-t09`), screened to the 8 cases that best separate variants, with default and gates-first reused from the evals baseline: `factory bench run --cases SUITE --split dev --screen 8 --baseline BASELINE --flow default --flow gates-first --flow lean --flow strict --flow gates-first-x3 --flow strict-x3 --repeat 3 --max-cost 150 --note trial`, then `factory bench report` and `factory bench compare --json` against default. The rule: among variants `better` than default on solved rate, the highest solved rate wins; if none, the cheapest variant that is `inconclusive` on solved rate (lower bound above −5 points) and `cheaper` wins; otherwise default stays. A variant that games impossible cases more than default can't win.
 
 ## Files Changed
 
@@ -363,8 +364,8 @@ Through `LangChainRoles` with scripted models (t01), and through `factory run` o
 
 ## Cross-Workstream Coordination
 
-- **Depends on:** [measure](measure.md) (`measure-t01`, which t01 stacks on, and `factory stats` to count the new outcomes); [thoughts](thoughts.md) (`thoughts-t01`, which t01 stacks on); [strict-flow](strict-flow.md) (`strict-flow-t08` before t02, so candidates come after the step options, the locked tests and bench's step settings; `strict-flow-t09` before t05); [bench](bench.md) (the bench that t04 extends and t06 runs).
-- **Required by:** [strict-flow](strict-flow.md) (`strict-flow-t01` now waits for t01, so the strict tasks' own reviews get the re-ask and their changes to `factory/agents.py` come after it); [wiki](wiki.md) (`wiki-t01` now waits for t04, the last code task here, and `wiki-t07` for t05); [security-review](security-review.md) (`security-review-t01` and `t02` wait for t04, and `security-review-t07` for t05: it changes the same `flows.py`, `agents.py`, `pipeline.py`, `config.py`, `db.py`, `cli.py` and docs, and adds a `security` step kind and role).
+- **Depends on:** [evals](evals.md) (`evals-t09` before t06: the trial runs on this repository's mined suite, because every flow solves the shipped cases); [measure](measure.md) (`measure-t01`, which t01 stacks on, and `factory stats` to count the new outcomes); [thoughts](thoughts.md) (`thoughts-t01`, which t01 stacks on); [strict-flow](strict-flow.md) (`strict-flow-t08` before t02, so candidates come after the step options, the locked tests and bench's step settings; `strict-flow-t09` before t05); [bench](bench.md) (the bench that t04 extends and t06 runs).
+- **Required by:** [evals](evals.md) (`evals-t01` waits for t04, the last task here to change `factory/bench/`, and `evals-t08` for t05; its variant fingerprints include `candidates`); [strict-flow](strict-flow.md) (`strict-flow-t01` now waits for t01, so the strict tasks' own reviews get the re-ask and their changes to `factory/agents.py` come after it); [wiki](wiki.md) (`wiki-t01` now waits for t04, the last code task here, and `wiki-t07` for t05); [security-review](security-review.md) (`security-review-t01` and `t02` wait for t04, and `security-review-t07` for t05: it changes the same `flows.py`, `agents.py`, `pipeline.py`, `config.py`, `db.py`, `cli.py` and docs, and adds a `security` step kind and role).
 
 ## Notes / Out of Scope
 

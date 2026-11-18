@@ -21,6 +21,8 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 14 | A review without a verdict costs a rebuild, a task gets one build per attempt, and nothing picks the default flow from data. Planned: [flow-tuning](docs/plans/flow-tuning.md) | medium | 8, 9 |
 | 15 | Specify the shipped factory for implementers. Planned in [factory-spec](docs/plans/factory-spec.md) | medium | shipped factory |
 | 16 | Nothing reviews a change for security, and a builder can rewrite its reviewer's guidance. Planned: [security-review](docs/plans/security-review.md) | medium | 9, 14 |
+| 17 | The bench can't rank flows: every variant solves every shipped case, and comparisons have no error bars. Planned: [evals](docs/plans/evals.md) | medium | 8, 14 |
+| 18 | Agents can't look anything up: no web search or page reading, no planner shell, installed Python packages unreadable. Planned: [web-tools](docs/plans/web-tools.md) | medium | 16, 17 |
 
 ## 1. Act on human PR review comments
 
@@ -218,3 +220,34 @@ The [factory-spec plan](docs/plans/factory-spec.md) covers the behavior shipped 
 - `security:` in `.factory/config.yaml` turns on two gates. `secrets` fails on credential-shaped strings in added lines. `guarded_paths` fails on changes to CI, `.factory/`, skills, guidance, lockfiles and configured globs that the contract doesn't name.
 - A `security` step kind ships with its own prompt, the repository's threat model, and a verdict the factory computes from its findings. Only critical or high findings with high confidence and an exploit block, and the builder gets only those. The rest go to a visible Security section in the PR.
 - A built-in flow, `secure`, is gates-first plus a security step. A command that reviews any ref or PR, and a crew that audits the existing codebase, are out of scope.
+
+## 17. Evals that rank flows
+
+**Gap.** `factory bench` works, but its scores can't tell setups apart:
+- The five shipped cases are small standard-library projects. The first real run solved all 60 of its cells across four variants, so only cost and time differed.
+- `factory bench compare` prints counts with no error bars and no verdict, and run-to-run spread is several points even on large suites.
+- Hidden tests are the only grade. Nothing checks that a case's tests catch a bad change, that a candidate didn't break the rest of the suite, or that it didn't edit the tests that judge it.
+- There's nothing a goal loop needs: no holdout, no screening, no reusable baseline, no machine-readable verdict, no record of experiments.
+
+**Seen in.** SWE-bench mines real merged PRs into cases, and SWE-rebench keeps mining fresh ones to stay ahead of training data. Maintainers would reject about half of SWE-bench patches that pass its tests ([METR](https://metr.org/notes/2026-03-10-many-swe-bench-passing-prs-would-not-be-merged-into-main/)), and mutation testing exposes weak tests ([SWE-ABS](https://arxiv.org/abs/2603.00520)). Anthropic's [error bars for evals](https://arxiv.org/abs/2411.00640) recommend comparing case by case with intervals. [ImpossibleBench](https://arxiv.org/abs/2510.20270) measures test gaming with tasks no honest change can pass.
+
+**Plan.** [docs/plans/evals.md](docs/plans/evals.md) (planned 2026-11-17, tasks `evals-t01`…`t09`, after [strict-flow](docs/plans/strict-flow.md) and [flow-tuning](docs/plans/flow-tuning.md)):
+- `factory bench mine` replays this repository's merged factory tasks as cases: the base without history, the contract, the merged tests as hidden tests and the merged code as the reference. `factory bench check` proves each case's tests fail before the change, pass with the reference and kill mutants of it.
+- Cells are also graded `regressed` (the rest of the suite broke) and `tampered` (a protected test edited), with scope beside the reference, and three impossible cases measure gaming.
+- Rates come with intervals clustered by case. Comparisons are case by case, with a verdict for solved rate and one for cost, and print as JSON.
+- For a goal loop: dev and holdout splits, `--screen`, `--baseline` reuse, a ledger with notes, per-cell failure reasons, and docs/goal-loop.md with the protocol.
+
+## 18. Agents can't look anything up
+
+**Gap.** Agents can't consult documentation:
+- No web tools. The sandbox is offline unless `--network` opens it, and then every step and gate of the task can reach any host. There is no search, no safe page reading, and no way to give one step access without the others.
+- The planner has only read tools, so it can't run `git log` or ask an installed library for its own documentation.
+- `dependency_sources` can't point at a Python virtualenv's `site-packages`, so installed packages, the version-exact docs, are out of reach.
+
+How much this costs is unclear. On this repository's board, 1,092 agent commands hit the missing network once and never tried to look anything up. Elsewhere, version-specific code is where models do worst, and documentation retrieval is the usual fix. The same access lets agents find answers instead of writing them ([imec](https://aistack.imec-int.com/blog/agents-peeking)), so it has to be safe and measured.
+
+**Plan.** [docs/plans/web-tools.md](docs/plans/web-tools.md) (planned 2026-11-18, tasks `web-tools-t01`…`t06`, after [security-review](docs/plans/security-review.md), before [wiki](docs/plans/wiki.md)):
+- A plan, test or build step can set `web: true` for `web_fetch` and `web_search`, which the factory runs itself, so the sandbox stays offline. Search goes through one engine named in config (SearXNG, Brave, Exa or Tavily), so there's no provider lock-in.
+- Every fetch refuses private addresses and the repository's own remote, honours allow and block lists, caps sizes, frames pages as untrusted and is recorded in the transcript.
+- A plan step can set `shell: readonly`, and `dependency_sources` accepts `{root}` and globs for installed packages.
+- A bench trial on the mined suite decides whether strict with web, or with the planner shell, replaces strict.
