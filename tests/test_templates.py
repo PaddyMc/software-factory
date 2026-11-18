@@ -9,8 +9,10 @@ import yaml
 
 from factory import config as C
 from factory import contracts
+from factory import flows
 from factory import prbody
-from factory.agents import ROLE_FILES, load_role, missing_keys, parse_verdict, prompt_source, role_models
+from factory.agents import (ROLE_FILES, load_role, missing_keys, parse_verdict, prompt_source,
+                            role_model, role_models, step_limit)
 from factory.cli import main
 from factory.scaffold import BEGIN, END, SKILLS
 
@@ -281,3 +283,33 @@ def test_config_command_prints_effective_settings(initialised, capsys):
     assert main(["config"]) == 0
     out = capsys.readouterr().out
     assert out.startswith("# .factory/config.yaml;") and "name: repo" in out and "plans:" in out and "models: {}" in out
+
+
+def test_selector_prompt_matches_choice_parser(repo):
+    """The select prompt asks for the CHOICE line the choice parser reads."""
+    from factory.agents import parse_choice
+    meta, body = load_role(repo, "select")
+    assert meta == {"model": "openrouter:z-ai/glm-5.3", "max_steps": 30}
+    assert body.startswith("You are the SELECTOR") and "CHOICE:" in body
+    assert parse_choice("## Choice\n\nCandidate 2 fits the contract best.\n\nCHOICE: 2") == 2
+    assert parse_choice("CHOICE: 1\n\nOn reflection.\n\nCHOICE: 3") == 3      # the last matching line wins
+    assert parse_choice("I could not decide between the candidates.") is None  # a missing line is no choice
+
+
+def test_the_select_role_can_be_configured_overridden_and_printed(repo, monkeypatch, capsys):
+    monkeypatch.chdir(repo)
+    meta, _ = load_role(repo, "select")
+    cfg = C.parse({"models": {"select": "openrouter:z-ai/glm-5.2"}, "max_steps": {"select": 9}})
+    step = flows.Step("select", "select")
+    assert role_model(repo, "select", cfg) == "openrouter:z-ai/glm-5.2"       # models.select
+    assert step_limit(step, cfg, meta) == 9 and step_limit(step, C.parse({}), meta) == 30
+
+    assert main(["prompt", "select"]) == 0                                   # factory prompt select prints it
+    out = capsys.readouterr().out
+    assert out.startswith(f"# {PACKAGE / 'prompts/selector.md'} · model openrouter:z-ai/glm-5.3") and "CHOICE:" in out
+
+    override = repo / ".factory/agents/selector.md"          # a repository can replace the shipped prompt
+    override.parent.mkdir(parents=True)
+    override.write_text("---\nmodel: fake:select\nmax_steps: 5\n---\nYou are our SELECTOR.\n")
+    assert prompt_source(repo, "select") == override
+    assert load_role(repo, "select") == ({"model": "fake:select", "max_steps": 5}, "You are our SELECTOR.\n")

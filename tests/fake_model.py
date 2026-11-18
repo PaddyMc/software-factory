@@ -34,10 +34,12 @@ def scripts(review_verdicts: list[str], greeting: str = "hello") -> dict[str, li
             AIMessage("Wrote the greeting and e2e test.\nRESULT: DONE"),
         ],
         "REVIEWER": [call("git_diff", stat=True), "VERDICT"],
+        "SELECTOR": [call("list_dir", path="."), "CHOICE"],
         "VERIFIER": [call("read_file", path="src/greet.txt"), AIMessage(
             "TITLE: Adds the greeting\n\n## What changed\n- src/greet.txt says hello\n\n"
             "## What to check\n- the greeting is the one the contract asks for\n")],
         "_verdicts": list(review_verdicts),
+        "_choices": [],          # the numbers the fake selector reports; empty = a report with no CHOICE line
         "_calls": [],
     }
 
@@ -50,16 +52,22 @@ class ScriptedModel(BaseChatModel):
         return "scripted"
 
     def bind_tools(self, tools, **kwargs):
+        self.plays.setdefault("_tools", []).append([getattr(t, "name", str(t)) for t in tools])
         return self
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         system = next(m.content for m in messages if isinstance(m, SystemMessage))
-        role = next(r for r in ("PLANNER", "TESTER", "BUILDER", "REVIEWER", "VERIFIER") if f"You are the {r}" in system)
+        role = next(r for r in ("PLANNER", "TESTER", "BUILDER", "SELECTOR", "REVIEWER", "VERIFIER")
+                    if f"You are the {r}" in system)
         step = sum(isinstance(m, AIMessage) for m in messages)
         script = self.plays[role]
         msg = script[min(step, len(script) - 1)]
         if msg == "VERDICT":
             v = self.plays["_verdicts"].pop(0) if self.plays["_verdicts"] else "APPROVE"
             msg = AIMessage(f"## Findings\n1. [minor] ok\n\nVERDICT: {v}")
+        if msg == "CHOICE":
+            choice = self.plays["_choices"].pop(0) if self.plays.get("_choices") else ""
+            msg = AIMessage(f"## Choice\n\nCandidate {choice} fits the contract best.\n\nCHOICE: {choice}" if choice
+                            else "## Choice\n\nThe candidates are evenly matched, so the factory should choose.")
         self.plays["_calls"].append((role, step))
         return ChatResult(generations=[ChatGeneration(message=msg)])
