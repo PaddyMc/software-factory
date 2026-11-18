@@ -609,7 +609,7 @@ None: the project sets no `e2e`. `test_web_serves_the_board_and_its_assets_over_
 - **Required by:** [thoughts](thoughts.md). `thoughts-t03` waits for `webui-t05`: it adds each step's thoughts to the transcript page, and renames the page's model time from "thinking" to "in the model". The mockup `transcript.html` and the `.thinks` rules in `app.css` already show it.
 - **Overlaps:** [measure](measure.md), [bench](bench.md) and [strict-flow](strict-flow.md) also change `factory/cli.py`, `factory/db.py`, `factory/pipeline.py` and `factory/scheduler.py`. This plan only adds to them (see Risk 8), so whichever lands second has a small conflict for the factory's conflict resolution.
 - **Related:** [pr-descriptions](pr-descriptions.md). `webui-t05` failed when GitHub refused its PR body as over 65,536 characters; it runs again after `pr-descriptions-t01`, which keeps every body under the limit. Factory PRs then point to `factory show` and this plan's task page for the planner's plan and every agent's full report.
-- **Later:** once measure's `factory stats` lands, a stats page can render its numbers. Once NEXT.md item 5 (steer a running agent) lands, the task page can have a box to message the running agent.
+- **Later:** once measure's `factory stats` lands, a stats page can render its numbers. NEXT.md item 5 (steer a running agent) is planned in [steer](steer.md): `steer-t04` adds a box to a running task's page that runs `factory say`, and a "You said" block to the transcript page.
 - **Supersedes** the unmerged `web-board` plan on branch `plan/web-board`, which was read-only and used system fonts and a different palette.
 
 ## Notes / Out of Scope
