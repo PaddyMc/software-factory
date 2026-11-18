@@ -280,6 +280,19 @@ def flow_models(root: Path, flow: Flow, cfg: Config, override: str | None = None
     return {s.name: step_model(root, s, cfg, override) for s in flow.steps if s.kind != "gates"}
 
 
+def same_model_warning(flow: Flow, models: dict[str, str]) -> str | None:
+    """Warn when independently written tests would share a build step's model and blind spots."""
+    tests = [s for s in flow.steps if s.kind == "test"]
+    builds = [s for s in flow.steps if s.kind == "build"]
+    for test in tests:
+        for build in builds:
+            model = models.get(test.name)
+            if model is not None and model == models.get(build.name):
+                return (f"⚠ flow {flow.name}: the test step `{test.name}` and the build step `{build.name}` "
+                        f"both run on {model}; the tests share the builder's blind spots")
+    return None
+
+
 def missing_keys(models: dict[str, str], env: dict) -> list[str]:
     """Env vars the configured providers need but that are unset (checked before any work starts)."""
     need = {PROVIDER_KEYS.get(spec.split(":", 1)[0]) for spec in models.values()}

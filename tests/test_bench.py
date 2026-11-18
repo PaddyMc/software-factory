@@ -333,7 +333,7 @@ def test_bench_run_refuses_before_any_work(bench_repo, home, tmp_path, monkeypat
     assert main(_args(max_cost=None)) == 1
     assert "--max-cost is required" in capsys.readouterr().err
     assert not (home / "bench").exists()
-    refuse(("--flow", "nope"), "unknown flow nope (flows: default, lean)")
+    refuse(("--flow", "nope"), "unknown flow nope (flows: default, lean, strict)")
     refuse(("--case", "nope"), "unknown case nope (cases: adder)")
 
     broken = tmp_path / "broken-cases" / "adder"
