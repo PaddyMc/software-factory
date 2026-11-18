@@ -26,7 +26,7 @@ from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from . import flows, globs
+from . import agents, flows, globs
 from . import gates as G
 from . import github
 from . import prbody
@@ -519,13 +519,34 @@ class Pipeline:
                 return {"verdict": "CHANGES"}
             extra = {"review_brief": self.opts.rework.brief} \
                 if (self.opts.rework and self.opts.rework.kind == "human_review") else {}
-            out = self.role("review", "reviewing", s["attempt"],
-                            lambda: (o := self.roles.step(step, self.ctx(s, **extra)), o.verdict, o.text, s["sha"]),
-                            step=step.name)
+            result = {}
+
+            def restore_candidate():
+                removed = git(self.wt, "status", "--porcelain")
+                git(self.wt, "reset", "-q", "--hard", s["sha"])
+                git(self.wt, "clean", "-q", "-fd")
+                if removed:
+                    self._event(step.name, "review: reset the worktree to the candidate, removed:\n" + removed)
+
+            def run():
+                out = self.roles.step(step, self.ctx(s, **extra))
+                report, verdict, outcome = out.text, out.verdict, out.verdict
+                if step.prove:
+                    # Prove against the committed candidate, never against files the reviewer wrote.
+                    restore_candidate()
+                    report, verdict, outcome = agents.apply_proof(
+                        out.text, out.verdict, self.sandbox, self.opts.config.denied_commands)
+                    # A REPRO can write too; leave the candidate clean for the remaining steps and gates.
+                    restore_candidate()
+                result.update(report=report, verdict=verdict, outcome=outcome)
+                return out, outcome, report, s["sha"]
+
+            self.role("review", "reviewing", s["attempt"], run, step=step.name)
+            report, verdict, outcome = result["report"], result["verdict"], result["outcome"]
             who = "Reviewer" if step.name == step.kind else f"Reviewer `{step.name}`"
-            fb = "" if out.verdict == "APPROVE" else f"{who} requested changes:\n\n{out.text}"
-            return {"verdict": out.verdict, "reviews": {**s.get("reviews", {}), step.name: out.text},
-                    "review_outcomes": {**s.get("review_outcomes", {}), step.name: out.verdict},
+            fb = "" if verdict == "APPROVE" else f"{who} requested changes:\n\n{report}"
+            return {"verdict": verdict, "reviews": {**s.get("reviews", {}), step.name: report},
+                    "review_outcomes": {**s.get("review_outcomes", {}), step.name: outcome},
                     "feedback": fb}
         return node
 

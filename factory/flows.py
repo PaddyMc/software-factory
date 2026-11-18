@@ -30,6 +30,7 @@ class Step:
     model: str | None = None              # `provider:model`; None = the kind's model
     max_steps: int | None = None          # model calls allowed; None = the kind's limit
     loop: tuple[str, ...] = ()            # loop behaviours, e.g. ("trim",)
+    prove: bool = False                   # review only: CHANGES needs a reproduced failure or scope finding
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,7 @@ def parse_step(flow: str, raw) -> Step:
     if not isinstance(name, str):
         raise ConfigError(f"flows.{flow}: a step's `name` must be a string")
     where = f"flows.{flow}.{name}"
-    extra = sorted(str(k) for k in set(raw) - {"kind", "name", "model", "max_steps", "loop"})
+    extra = sorted(str(k) for k in set(raw) - {"kind", "name", "model", "max_steps", "loop", "prove"})
     if extra:
         raise ConfigError(f"{where}: unknown key(s) {', '.join(extra)}")
     if kind == "gates":
@@ -82,7 +83,12 @@ def parse_step(flow: str, raw) -> Step:
         seen_loop.add(behaviour)
     if "resume" in seen_loop and kind != "build":
         raise ConfigError(f"{where}: loop behaviour 'resume' is only valid on build steps")
-    return Step(name, kind, model, max_steps, tuple(loop or ()))
+    prove = raw.get("prove", False)
+    if not isinstance(prove, bool):
+        raise ConfigError(f"{where}: prove must be a boolean")
+    if prove and kind != "review":
+        raise ConfigError(f"{where}: 'prove' is only valid on review steps")
+    return Step(name, kind, model, max_steps, tuple(loop or ()), prove)
 
 
 def validate(flow: str, steps: tuple[Step, ...]) -> None:
