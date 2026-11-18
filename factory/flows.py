@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from .config import ConfigError
 
 KINDS = ("plan", "build", "review", "verify", "gates")
-LOOP = ("trim",)
+LOOP = ("trim", "map", "nudge")
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 RESERVED = ("resolve", "ci", "pr", "human_review", "planner", "builder", "reviewer", "verifier")
 

@@ -8,6 +8,7 @@ import datetime as dt
 import hashlib
 from importlib import resources
 import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol
@@ -211,6 +212,47 @@ CALL_LIMIT_MARKER = "Model call limits exceeded"
 MODEL_RETRY = {"max_retries": 4, "initial_delay": 2.0}
 TRIM_AT = 60_000      # approximate conversation tokens that trigger a clearing batch
 TRIM_KEEP = 8         # most recent tool results kept in full
+MAP_LINES = 120       # repository-map lines, including its heading and any truncation line
+NUDGE_EDITS = 6       # combined successful writes to one path before an edits nudge
+NUDGE_FAILS = 3       # consecutive non-zero exits of one command before a failing nudge
+
+
+def repository_map(worktree: Path, spec_refs: tuple[str, ...]) -> str:
+    """A compact map of tracked files and the contract's tracked spec references, or "" outside git."""
+    try:
+        result = subprocess.run(["git", "ls-files"], cwd=worktree, capture_output=True, text=True)
+    except FileNotFoundError:
+        return ""
+    if result.returncode:
+        return ""
+    tracked = result.stdout.splitlines()
+    files = set(tracked)
+    top = [path for path in tracked if "/" not in path]
+    counts: dict[str, int] = {}
+    for path in tracked:
+        parts = path.split("/")
+        for depth in range(1, min(2, len(parts) - 1) + 1):
+            directory = "/".join(parts[:depth])
+            counts[directory] = counts.get(directory, 0) + 1
+    directories = sorted(counts)
+    lines = ["# Repository map"]
+    if top:
+        lines.append("  ".join(top))
+    lines.extend(f"{directory}/ {counts[directory]} files" for directory in directories)
+    if len(lines) > MAP_LINES:
+        kept = lines[:max(0, MAP_LINES - 1)]
+        kept_directories = max(0, len(kept) - 1 - bool(top))
+        lines = kept + [f"… ({len(directories) - kept_directories} more directories)"]
+    references = ["# Spec references"]
+    for ref in spec_refs:
+        path = ref.split("#", 1)[0]
+        if path not in files:
+            references.append(f"- {ref} (not a file)")
+            continue
+        line_count = len((worktree / path).read_text(errors="replace").splitlines())
+        detail = f"{path}, {line_count} lines" if "#" in ref else f"{line_count} lines"
+        references.append(f"- {ref} ({detail})")
+    return "\n".join(lines + [""] + references)
 
 
 def recursion_limit(max_steps: int) -> int:
@@ -240,6 +282,20 @@ def _cleared(name, args) -> str:
     return f"{CLEARED_MARK}{name}({details}): call it again if you need it]"
 
 
+def _tool_details(messages) -> dict[int, tuple[str, dict]]:
+    """Tool result position -> (name, args), paired with its nearest preceding issuing AI message."""
+    calls = {}
+    details = {}
+    for i, m in enumerate(messages):
+        if isinstance(m, AIMessage):
+            # Ids can be reused: a result belongs to its nearest preceding issuer.
+            calls.update({call.get("id"): call for call in m.tool_calls})
+        elif isinstance(m, ToolMessage):
+            call = calls.get(m.tool_call_id, {})
+            details[i] = (m.name or call.get("name") or "tool", call.get("args") or {})
+    return details
+
+
 class TrimMiddleware(AgentMiddleware):
     """Clear old tool results in the model request, leaving the transcript and graph untouched."""
     def __init__(self, tag: str, ctx: Ctx):
@@ -250,15 +306,7 @@ class TrimMiddleware(AgentMiddleware):
 
     def wrap_model_call(self, request, handler):
         messages = [m for m in request.messages if not isinstance(m, SystemMessage)]
-        calls = {}
-        details = {}
-        for i, m in enumerate(messages):
-            if isinstance(m, AIMessage):
-                # Ids can be reused: a result belongs to its nearest preceding issuer.
-                calls.update({call.get("id"): call for call in m.tool_calls})
-            elif isinstance(m, ToolMessage):
-                call = calls.get(m.tool_call_id, {})
-                details[i] = (m.name or call.get("name") or "tool", call.get("args") or {})
+        details = _tool_details(messages)
 
         def view(positions):
             return [m.model_copy(update={"content": _cleared(*details[i])})
@@ -281,6 +329,68 @@ class TrimMiddleware(AgentMiddleware):
         if not self.cleared:
             return handler(request)
         return handler(request.override(messages=trimmed))
+
+
+class NudgeMiddleware(AgentMiddleware):
+    """Warn once per budget, repeatedly edited path or repeatedly failing command."""
+    def __init__(self, tag: str, ctx: Ctx, max_steps: int):
+        super().__init__()
+        self.tag = tag
+        self.ctx = ctx
+        self.max_steps = max_steps
+        self.budget_nudged = False
+        self.nudged_paths: set[str] = set()
+        self.nudged_commands: set[str] = set()
+
+    def wrap_model_call(self, request, handler):
+        # Trim clears only the outgoing request; the state retains the run's full tool history.
+        state = getattr(request, "state", None) or {}
+        history = state.get("messages") or request.messages
+        messages = [m for m in history if not isinstance(m, SystemMessage)]
+        nudges: list[tuple[str, str]] = []
+        used = sum(isinstance(m, AIMessage) and not str(m.content).startswith(CALL_LIMIT_MARKER)
+                   for m in messages)
+        threshold = (3 * self.max_steps + 3) // 4
+        if used >= threshold and not self.budget_nudged:
+            self.budget_nudged = True
+            nudges.append(("budget", f"You have used {used} of {self.max_steps} allowed model calls. "
+                                     "Finish your changes, run your checks and write your final report."))
+
+        edits: dict[str, int] = {}
+        failures: dict[str, int] = {}
+        for i, (name, args) in _tool_details(messages).items():
+            content = str(messages[i].content)
+            if name in ("write_file", "edit_file"):
+                prefix = "wrote " if name == "write_file" else "edited "
+                if not content.startswith(prefix):
+                    continue
+                path = content[len(prefix):]
+                edits[path] = edits.get(path, 0) + 1
+                if edits[path] >= NUDGE_EDITS and path not in self.nudged_paths:
+                    self.nudged_paths.add(path)
+                    nudges.append(("edits", f"{path} has been written {edits[path]} times in this run. "
+                                            "Re-read the failing output and the contract before editing it again."))
+            elif name == "run" and isinstance(args.get("command"), str):
+                command = args["command"]
+                match = re.match(r"exit (-?\d+)(?:\n|$)", content)
+                if not match:
+                    continue
+                if int(match.group(1)) == 0:
+                    failures[command] = 0
+                    continue
+                failures[command] = failures.get(command, 0) + 1
+                if failures[command] >= NUDGE_FAILS and command not in self.nudged_commands:
+                    self.nudged_commands.add(command)
+                    nudges.append(("failing", f"The command `{command}` has exited non-zero "
+                                              f"{failures[command]} times in a row. This approach isn't working; "
+                                              "re-read its output and the contract before trying again."))
+
+        if not nudges:
+            return handler(request)
+        for kind, text in nudges:
+            self.ctx.record({"type": "nudge", "kind": kind, "text": text})
+            self.ctx.log(self.tag, f"nudge: {kind}: {clip(text, 240)}")
+        return handler(request.override(messages=[*request.messages, *(HumanMessage(text) for _, text in nudges)]))
 
 
 class LangChainRoles:
@@ -307,11 +417,17 @@ class LangChainRoles:
         version = prompt_version(text for text, per_task in parts if text and not per_task)
         tools, default_message, log = self._kit(step, ctx)
         message = message if message is not None else default_message
+        if "map" in step.loop:
+            block = repository_map(ctx.worktree, ctx.task.spec_refs)
+            if block:
+                message = f"{message}\n\n{block}"
         tag = tag or (f"{step.name}#{ctx.attempt}" if step.kind in ("build", "review") else step.name)
         middleware = [ModelCallLimitMiddleware(run_limit=steps, exit_behavior="end"),
                       ModelRetryMiddleware(**MODEL_RETRY, on_failure="error"), tool_errors(ctx.worktree)]
         if "trim" in step.loop:
             middleware.append(TrimMiddleware(tag, ctx))
+        if "nudge" in step.loop:
+            middleware.append(NudgeMiddleware(tag, ctx, steps))
         agent = create_agent(
             (self.model_factory or build_model)(spec), tools, system_prompt=system, middleware=middleware,
         )
