@@ -461,7 +461,7 @@ Through `factory bench` with scripted models:
   - [strict-flow](strict-flow.md). t01 depends on `strict-flow-t08`, which records step loop and prove settings in results.json, and t08 on `strict-flow-t09`, which edits the same docs. Fingerprints (t06) include those settings.
   - [flow-tuning](flow-tuning.md). t01 depends on `flow-tuning-t04`, which records candidates in results.json, and t08 on `flow-tuning-t05`. Fingerprints include candidates.
   - [measure](measure.md), merged: mining reads its `merge` runs for each task's final head.
-- **Required by:** [flow-tuning](flow-tuning.md): `flow-tuning-t06`, the by-hand trial, now depends on `evals-t09` and runs on this repository's mined suite with the comparison verdicts, instead of on the shipped cases every flow solves. The goal loop that follows this plan.
+- **Required by:** [web-tools](web-tools.md): `web-tools-t04` extends t07's fingerprints with each step's `web` and `shell`, `web-tools-t05` waits for t08, and `web-tools-t06` runs its trial on t09's suite. [flow-tuning](flow-tuning.md): `flow-tuning-t06`, the by-hand trial, now depends on `evals-t09` and runs on this repository's mined suite with the comparison verdicts, instead of on the shipped cases every flow solves. The goal loop that follows this plan.
 
 ## Notes / Out of Scope
 

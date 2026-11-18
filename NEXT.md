@@ -22,6 +22,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 15 | Specify the shipped factory for implementers. Planned in [factory-spec](docs/plans/factory-spec.md) | medium | shipped factory |
 | 16 | Nothing reviews a change for security, and a builder can rewrite its reviewer's guidance. Planned: [security-review](docs/plans/security-review.md) | medium | 9, 14 |
 | 17 | The bench can't rank flows: every variant solves every shipped case, and comparisons have no error bars. Planned: [evals](docs/plans/evals.md) | medium | 8, 14 |
+| 18 | Agents can't look anything up: no web search or page reading, no planner shell, installed Python packages unreadable. Planned: [web-tools](docs/plans/web-tools.md) | medium | 16, 17 |
 
 ## 1. Act on human PR review comments
 
@@ -235,3 +236,18 @@ The [factory-spec plan](docs/plans/factory-spec.md) covers the behavior shipped 
 - Cells are also graded `regressed` (the rest of the suite broke) and `tampered` (a protected test edited), with scope beside the reference, and three impossible cases measure gaming.
 - Rates come with intervals clustered by case. Comparisons are case by case, with a verdict for solved rate and one for cost, and print as JSON.
 - For a goal loop: dev and holdout splits, `--screen`, `--baseline` reuse, a ledger with notes, per-cell failure reasons, and docs/goal-loop.md with the protocol.
+
+## 18. Agents can't look anything up
+
+**Gap.** Agents can't consult documentation:
+- No web tools. The sandbox is offline unless `--network` opens it, and then every step and gate of the task can reach any host. There is no search, no safe page reading, and no way to give one step access without the others.
+- The planner has only read tools, so it can't run `git log` or ask an installed library for its own documentation.
+- `dependency_sources` can't point at a Python virtualenv's `site-packages`, so installed packages, the version-exact docs, are out of reach.
+
+How much this costs is unclear. On this repository's board, 1,092 agent commands hit the missing network once and never tried to look anything up. Elsewhere, version-specific code is where models do worst, and documentation retrieval is the usual fix. The same access lets agents find answers instead of writing them ([imec](https://aistack.imec-int.com/blog/agents-peeking)), so it has to be safe and measured.
+
+**Plan.** [docs/plans/web-tools.md](docs/plans/web-tools.md) (planned 2026-11-18, tasks `web-tools-t01`…`t06`, after [security-review](docs/plans/security-review.md), before [wiki](docs/plans/wiki.md)):
+- A plan, test or build step can set `web: true` for `web_fetch` and `web_search`, which the factory runs itself, so the sandbox stays offline. Search goes through one engine named in config (SearXNG, Brave, Exa or Tavily), so there's no provider lock-in.
+- Every fetch refuses private addresses and the repository's own remote, honours allow and block lists, caps sizes, frames pages as untrusted and is recorded in the transcript.
+- A plan step can set `shell: readonly`, and `dependency_sources` accepts `{root}` and globs for installed packages.
+- A bench trial on the mined suite decides whether strict with web, or with the planner shell, replaces strict.
