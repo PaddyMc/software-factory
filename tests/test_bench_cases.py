@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from factory import contracts, gates as G, sandbox, verification
+from factory import contracts, gates as G, globs, sandbox, verification
 from factory.bench import cases
 from conftest import git
 
@@ -76,6 +76,45 @@ def test_every_case_is_solvable_and_not_already_solved(case, tmp_path):
     assert score.passed, [c.output for c in score.commands]
     assert len(score.commands) == len(case.hidden)
     assert all(result.output for result in score.commands)
+
+
+@pytest.mark.parametrize("case", SHIPPED, ids=lambda case: case.id)
+def test_every_shipped_case_works_under_a_test_step(case, tmp_path):
+    assert case.cfg.test_paths == ("tests/**",)
+    repo = tmp_path / "repo"
+    base = cases.materialize(case, repo)
+    make_sandbox = _sandbox_factory(case, tmp_path)
+
+    test_files = []
+    for source in case.solution_dir.rglob("*"):
+        if not source.is_file():
+            continue
+        relative = source.relative_to(case.solution_dir)
+        if not globs.matches_any(relative.as_posix(), case.cfg.test_paths):
+            continue
+        target = repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        test_files.append(relative.as_posix())
+    assert test_files
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "acceptance tests")
+    test_commit = git(repo, "rev-parse", "HEAD")
+
+    acceptance = [cmd for cmd in case.contract.verification if verification.is_test_command(cmd)]
+    assert acceptance
+    for command in acceptance:
+        result = make_sandbox(repo).run(command)
+        assert verification.classify(command, result.code, result.output) == verification.FAIL, result.output
+
+    shutil.copytree(case.solution_dir, repo, dirs_exist_ok=True)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "reference solution")
+    candidate = git(repo, "rev-parse", "HEAD")
+    run = G.run_gates(case.contract, repo, base, candidate, make_sandbox(repo), case.cfg,
+                      test_commit=test_commit, test_files=tuple(test_files), test_red=tuple(acceptance))
+    assert "acceptance_untouched" in {gate.name for gate in run}
+    assert all(gate.ok is True for gate in run), G.table(run)
 
 
 @pytest.mark.parametrize("case", SHIPPED, ids=lambda case: case.id)

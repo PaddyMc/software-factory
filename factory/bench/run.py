@@ -135,6 +135,8 @@ def variant_steps(root: Path, flow: Flow, cfg: C.Config, model_override: str | N
             "model": agents.step_model(root, step, cfg, model_override),
             "max_steps": agents.step_limit(step, cfg, meta),
             "prompt_sha": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "loop": list(step.loop),
+            "prove": step.prove,
         })
     return steps
 
@@ -194,9 +196,23 @@ def _check_hidden_files(case: cases.Case) -> None:
                          f"{', '.join(readable)}")
 
 
+def _check_test_paths(selected_cases: list[cases.Case], selected_variants: list[Variant]) -> None:
+    """A test step needs each case's writable test paths, before any cell is started."""
+    tested_flows = list(dict.fromkeys(
+        variant.flow_name for variant in selected_variants
+        if any(step.kind == "test" for step in variant.flow.steps)
+    ))
+    for case in selected_cases:
+        if case.cfg.test_paths:
+            continue
+        for flow in tested_flows:
+            raise BenchError(f"{case.id}: flow {flow} has a test step: set test_paths in the case's config")
+
+
 def preflight(root: Path, cfg: C.Config, selected_cases: list[cases.Case],
               selected_variants: list[Variant], sandbox_on: bool) -> None:
     """Refuse unsafe or un-runnable benches before creating their run directory."""
+    _check_test_paths(selected_cases, selected_variants)
     entries = _model_entries(root, cfg, selected_variants)
     missing = agents.missing_keys(dict(entries), os.environ)
     if missing:
@@ -672,6 +688,7 @@ def run_bench(root: Path, *, cases_dir: str | None = None, case_ids: list[str] |
     wanted = set(case_ids or [])
     selected_cases = [case for case in loaded if not wanted or case.id in wanted]
     if dry_run:
+        _check_test_paths(selected_cases, selected_variants)
         return _dry_run(root, cfg, selected_cases, selected_variants, repeat)
 
     sandbox_on = not no_sandbox

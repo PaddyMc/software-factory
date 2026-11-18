@@ -2,6 +2,7 @@ title: Implement the token-bucket rate limiter
 kind: algorithm
 requires: [python3]
 config:
+  test_paths: ["tests/**"]
   unit_tests: ["python3 -m unittest -q"]
   dependency_sources: []
   sandbox: {ro_binds: [], rw_binds: [], path: [], hide: []}
