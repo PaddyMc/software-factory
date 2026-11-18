@@ -73,6 +73,7 @@ class Output:
     refused: int = 0                         # tool calls refused (paths, denied commands)
     stopped: str | None = None               # why the loop ended early, e.g. "step limit"
     wants_tools: bool = False                # last model call asked for tools (so it was not finished)
+    reasked: bool = False                    # review only: no VERDICT line, so the reviewer was asked once more
 
 
 class Roles(Protocol):
@@ -88,6 +89,11 @@ def parse_verdict(text: str) -> str:
     """Last VERDICT line; anything else (missing, malformed) fails safe to CHANGES."""
     found = _VERDICT.findall(text)
     return found[-1] if found else "CHANGES"
+
+
+def has_verdict(text: str) -> bool:
+    """Whether the report carries a VERDICT line (parse_verdict fails safe to CHANGES without one)."""
+    return bool(_VERDICT.search(text))
 
 
 def prompt_source(root: Path, role: str):
@@ -312,6 +318,9 @@ NUDGE_FAILS = 3       # consecutive non-zero exits of one command before a faili
 PROVE_MAX = 5         # distinct REPRO commands the factory runs again after a proving review
 PROVE_TIMEOUT = 300   # seconds allowed for each REPRO command
 PROOF_OUTPUT_LINES = 20
+REASK_STEPS = 3       # extra model calls allowed when a review ends without a VERDICT line
+REASK = ("Your review ended without a VERDICT line. Reply with your report in the format your instructions give,\n"
+         "ending with exactly one line: VERDICT: APPROVE or VERDICT: CHANGES.")
 
 
 def repository_map(worktree: Path, spec_refs: tuple[str, ...]) -> str:
@@ -610,6 +619,8 @@ class LangChainRoles:
         if out.stopped:
             ctx.log(tag, f"⚠ stopped: {out.stopped} after {out.steps} steps (raise max_steps for this role in .factory/config.yaml)")
             ctx.record({"type": "stopped", "reason": out.stopped, "steps": out.steps})
+        if step.kind == "review" and not has_verdict(out.text):
+            self._reask(ctx, tag, out, history, spec, tools, system, trimmer, steps)
         cost = f", ${out.cost_usd:.4f}" if out.cost_usd is not None else ""
         refused = f", {out.refused} tool calls refused" if out.refused else ""
         thinking_note = f" ({out.thinking} thinking)" if out.thinking else ""
@@ -619,6 +630,33 @@ class LangChainRoles:
         if step.kind == "review":
             out.verdict = parse_verdict(out.text)
         return out
+
+    def _reask(self, ctx: Ctx, tag: str, out: Output, history: list, spec: str, tools: list, system: str,
+               trimmer: TrimMiddleware | None, steps: int) -> None:
+        """Ask a reviewer once more for its verdict, continuing the conversation with the same tools and prompt."""
+        out.reasked = True
+        ctx.log(tag, "⚠ no VERDICT line: asking once more")
+        ctx.record({"type": "reask", "content": REASK})
+        history.append(HumanMessage(REASK))
+        messages = [m for m in history
+                    if not (isinstance(m, AIMessage) and str(m.content).startswith(CALL_LIMIT_MARKER))]
+        middleware = [ModelCallLimitMiddleware(run_limit=REASK_STEPS, exit_behavior="end"),
+                      ModelRetryMiddleware(**MODEL_RETRY, on_failure="error"), tool_errors(ctx.worktree)]
+        if trimmer:
+            middleware.append(trimmer)
+        agent = create_agent(
+            (self.model_factory or build_model)(spec), tools, system_prompt=system, middleware=middleware,
+        )
+        try:
+            for update in agent.stream({"messages": messages},
+                                       config={"recursion_limit": recursion_limit(REASK_STEPS)}, stream_mode="updates"):
+                for payload in update.values():
+                    for m in (payload or {}).get("messages", []) if isinstance(payload, dict) else []:
+                        history.append(m)
+                        self._observe(m, out, tag, ctx)
+                ctx.progress(out.steps, steps, out.tokens_in, out.tokens_out, out.cost_usd, out.refused)
+        except GraphRecursionError:
+            out.stopped = out.stopped or "graph recursion limit"
 
     def _kit(self, step: Step, ctx: Ctx) -> tuple[list, str, ToolLog | None]:
         """A step kind's tools and task message (exactly what its role method builds today), plus the

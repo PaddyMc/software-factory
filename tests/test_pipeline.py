@@ -76,6 +76,55 @@ def test_run_ends_in_a_working_pr(factory_repo, home, fake_gh, monkeypatch, caps
     assert "demo-t01" in capsys.readouterr().out
 
 
+def test_a_review_without_a_verdict_tells_the_builder_none_came(factory_repo, home, fake_gh, monkeypatch):
+    _use_model(monkeypatch, scripts(review_verdicts=["", ""]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    assert db.task("demo-t01")["status"] == "pr_open" and db.task("demo-t01")["attempts"] == 2
+    runs = db.runs("demo-t01")
+    assert [(r["role"], r["outcome"]) for r in runs] == [
+        ("plan", "done"), ("build", "committed"), ("review", "CHANGES (no verdict)"),
+        ("build", "no-changes"), ("review", "APPROVE"), ("verify", "pass"),
+        ("verify", "report"), ("pr", "opened")]
+    review = next(r for r in runs if r["role"] == "review")
+    assert review["outcome"] == "CHANGES (no verdict)" and review["steps"] == 3
+    assert review["report"].endswith("Final verdict: APPROVE")
+    events = [json.loads(line) for line in open(review["transcript"])]
+    assert any(e["type"] == "reask" and e["content"].startswith("Your review ended without a VERDICT line.")
+               for e in events)
+    assert "[review#1] ⚠ no VERDICT line: asking once more" in (home / "logs/demo-t01.log").read_text()
+
+    second_build = [r for r in runs if r["role"] == "build"][-1]
+    events = [json.loads(line) for line in open(second_build["transcript"])]
+    task_message = next(e["content"] for e in events if e["type"] == "human")
+    feedback = ("# Feedback to address first\n\nReviewer gave no verdict, so the change counts as rejected.\n\n"
+                f"{review['report']}\n\nAddress any blocker or major finding it lists.")
+    assert feedback in task_message
+    assert "1. [major] src/greet.txt:1" in task_message
+
+
+def test_a_review_answered_when_asked_again_routes_on_its_verdict(factory_repo, home, fake_gh, monkeypatch):
+    plays = scripts(review_verdicts=["", "CHANGES", "", "APPROVE"])
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    assert db.task("demo-t01")["status"] == "pr_open" and db.task("demo-t01")["attempts"] == 2
+    runs = db.runs("demo-t01")
+    reviews = [r for r in runs if r["role"] == "review"]
+    assert [r["outcome"] for r in reviews] == ["CHANGES (asked again)", "APPROVE (asked again)"]
+    second_build = [r for r in runs if r["role"] == "build"][-1]
+    events = [json.loads(line) for line in open(second_build["transcript"])]
+    task_message = next(e["content"] for e in events if e["type"] == "human")
+    assert f"Reviewer requested changes:\n\n{reviews[0]['report']}" in task_message
+
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    assert "Reviewed by review: APPROVE (asked again)." in body
+    assert "Reviewer report (review)" in body and "VERDICT: APPROVE" in body
+    assert [step for role, step in plays["_calls"] if role == "REVIEWER"] == [0, 1, 2, 0, 1, 2]
+
+
 def test_a_new_pr_is_titled_with_the_verifiers_title(factory_repo, home, fake_gh, monkeypatch):
     _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
     assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
