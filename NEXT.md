@@ -19,6 +19,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 12 | The models' reasoning is thrown away. Planned: [thoughts](docs/plans/thoughts.md) | small | 10 (its web task) |
 | ✓ | You can't tell which factory version is running. Done: [Commands](docs/reference.md#commands) | — | — |
 | 14 | A review without a verdict costs a rebuild, a task gets one build per attempt, and nothing picks the default flow from data. Planned: [flow-tuning](docs/plans/flow-tuning.md) | medium | 8, 9 |
+| 15 | The bench can't rank flows: every variant solves every shipped case, and comparisons have no error bars. Planned: [evals](docs/plans/evals.md) | medium | 8, 14 |
 
 ## 1. Act on human PR review comments
 
@@ -199,3 +200,19 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 - A review without a verdict is asked once more in the same conversation. Still none counts as CHANGES, recorded as `CHANGES (no verdict)`, and the builder is told so.
 - A build step can set `candidates: N` (2 to 5). The first attempt builds N candidates one after another in their own worktrees, the gates judge each, and a selector agent picks among those that pass, falling back to the smallest diff.
 - bench records candidates, and a by-hand trial of six flows sets this repository's `flow:` by a fixed rule.
+
+## 15. Evals that rank flows
+
+**Gap.** `factory bench` works, but its scores can't tell setups apart:
+- The five shipped cases are small standard-library projects. The first real run solved all 60 of its cells across four variants, so only cost and time differed.
+- `factory bench compare` prints counts with no error bars and no verdict, and run-to-run spread is several points even on large suites.
+- Hidden tests are the only grade. Nothing checks that a case's tests catch a bad change, that a candidate didn't break the rest of the suite, or that it didn't edit the tests that judge it.
+- There's nothing a goal loop needs: no holdout, no screening, no reusable baseline, no machine-readable verdict, no record of experiments.
+
+**Seen in.** SWE-bench mines real merged PRs into cases, and SWE-rebench keeps mining fresh ones to stay ahead of training data. Maintainers would reject about half of SWE-bench patches that pass its tests ([METR](https://metr.org/notes/2026-03-10-many-swe-bench-passing-prs-would-not-be-merged-into-main/)), and mutation testing exposes weak tests ([SWE-ABS](https://arxiv.org/abs/2603.00520)). Anthropic's [error bars for evals](https://arxiv.org/abs/2411.00640) recommend comparing case by case with intervals. [ImpossibleBench](https://arxiv.org/abs/2510.20270) measures test gaming with tasks no honest change can pass.
+
+**Plan.** [docs/plans/evals.md](docs/plans/evals.md) (planned 2026-11-17, tasks `evals-t01`…`t09`, after [strict-flow](docs/plans/strict-flow.md) and [flow-tuning](docs/plans/flow-tuning.md)):
+- `factory bench mine` replays this repository's merged factory tasks as cases: the base without history, the contract, the merged tests as hidden tests and the merged code as the reference. `factory bench check` proves each case's tests fail before the change, pass with the reference and kill mutants of it.
+- Cells are also graded `regressed` (the rest of the suite broke) and `tampered` (a protected test edited), with scope beside the reference, and three impossible cases measure gaming.
+- Rates come with intervals clustered by case. Comparisons are case by case, with a verdict for solved rate and one for cost, and print as JSON.
+- For a goal loop: dev and holdout splits, `--screen`, `--baseline` reuse, a ledger with notes, per-cell failure reasons, and docs/goal-loop.md with the protocol.
