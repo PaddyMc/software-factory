@@ -8,6 +8,7 @@ from factory import scheduler
 from factory.contracts import parse_text
 from factory.db import open_db
 from conftest import TASK, plan_text
+from test_spec_chapters_01_02 import chapter_02_acceptance
 
 THREE = TASK + """- id: demo-t03
   goal: "An independent third thing"
@@ -88,6 +89,7 @@ def test_a_failure_blocks_only_its_dependents(db):
     assert results == {"demo-t01": "failed", "demo-t03": "pr_open"}
     summary = scheduler.summary(db, scheduler.Plan(name="demo", tasks=IDS))
     assert "demo-t02" in summary and "waits for demo-t01 (failed)" in summary
+    chapter_02_acceptance()   # factory-spec-t01: docs/spec/02-spec.txt meets its acceptance criteria
 
 
 def test_rerun_keeps_prs_and_holds_and_retries_failures_once(db):

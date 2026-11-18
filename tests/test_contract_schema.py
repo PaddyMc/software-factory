@@ -2,6 +2,7 @@ import pytest
 
 from factory.contracts import KEYS, ContractError, Task, parse_text, validate_tasks
 from conftest import TASK, plan_text
+from test_spec_chapters_01_02 import chapter_01_acceptance
 
 
 def _one(**override) -> str:
@@ -22,6 +23,7 @@ def test_parse_contract_exact_8_keys():
     assert set(tasks[0].mapping()) == set(KEYS) and len(KEYS) == 8
     assert "status" not in KEYS and "approval" not in KEYS  # state lives in the factory db
     assert validate_tasks(tasks) == []
+    chapter_01_acceptance()   # factory-spec-t01: docs/spec/01-spec.txt meets its acceptance criteria
 
 
 def test_reject_missing_key():
