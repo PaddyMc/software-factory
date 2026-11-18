@@ -1,6 +1,8 @@
 """End to end: a fresh build makes sequential candidates, gates them, and carries one forward."""
 
 import json
+import random
+import re
 import shutil
 
 import pytest
@@ -28,6 +30,7 @@ def factory_repo(repo, home, fake_gh, monkeypatch):
     git(repo, "push", "-q", "origin", "main")
     monkeypatch.setenv("FAKE_API_KEY", "x")
     monkeypatch.setitem(agents.PROVIDER_KEYS, "fake", "FAKE_API_KEY")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "x")     # the shipped selector prompt's model
     monkeypatch.chdir(repo)
     return repo
 
@@ -126,6 +129,7 @@ def test_each_candidate_builds_in_its_own_worktree_from_the_same_start(factory_r
         ("plan", "plan", 0, None), ("test", "test", 1, None),
         ("build", "build", 1, 1), ("verify", "gates", 1, 1),
         ("build", "build", 1, 2), ("verify", "gates", 1, 2),
+        ("select", "select", 1, None),                     # two passed: the selector picks between them
         ("review", "review", 1, None), ("verify", "verify", 1, None), ("pr", "pr", 1, None),
     ]
     assert [r["outcome"] for r in runs if r["candidate"] is not None] == ["committed", "pass"] * 2
@@ -377,3 +381,139 @@ def test_show_labels_each_candidate_and_the_chosen_one(factory_repo, home, fake_
         assert all("candidate " not in line for line in headers if line.startswith(f"## {role} "))
     verify_report = next(line for line in headers if line.startswith("## verify #1") and "step verify" in line)
     assert "candidate " not in verify_report and "chosen" not in verify_report
+
+
+class _SelectorSpy(CandidatesModel):
+    """Record what the selector is given: its bound tools, its task message and its tools' results."""
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        system = next(m.content for m in messages if isinstance(m, SystemMessage))
+        if "You are the SELECTOR" in system:
+            self.plays["_selector_tools"] = self.plays["_tools"][-1]
+            self.plays.setdefault("_selector_seen", []).append([m.content for m in messages])
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+def _selector_flow(repo, candidates=3):
+    _flow_config(repo, "flow: many\nflows:\n  many:\n    - plan\n"
+                       f"    - {{kind: build, candidates: {candidates}}}\n    - gates\n    - review\n    - verify\n")
+
+
+def test_the_selector_picks_among_passing_candidates(factory_repo, home, fake_gh, monkeypatch):
+    _selector_flow(factory_repo)
+    # Candidate 3 has by far the biggest diff: only the selector's choice can pick it.
+    huge = [call("write_file", path="zz.txt",
+                 content="".join(f"zz line {i:05d}\n" for i in range(2000)) + "END-OF-ZZ\n")]
+    plays = _candidate_plays([_candidate(1, greeting="hello one"), _candidate(2, greeting="hello two"),
+                              _candidate(3, greeting="hello three", extra=huge)])
+    plays["_choices"] = ["3"]
+    monkeypatch.setattr(agents, "build_model", lambda spec: _SelectorSpy(plays=plays))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    builds = [r for r in db.runs("demo-t01") if r["role"] == "build"]
+    chosen = builds[2]["sha"]
+    assert row["status"] == "pr_open" and row["candidate_sha"] == chosen
+    assert [(r["role"], r["step"], r["attempt"], r["candidate"]) for r in db.runs("demo-t01")] == [
+        ("plan", "plan", 0, None),
+        ("build", "build", 1, 1), ("verify", "gates", 1, 1),
+        ("build", "build", 1, 2), ("verify", "gates", 1, 2),
+        ("build", "build", 1, 3), ("verify", "gates", 1, 3),
+        ("select", "select", 1, None),                    # the selector: once, on the attempt
+        ("review", "review", 1, None), ("verify", "verify", 1, None), ("pr", "pr", 1, None),
+    ]
+    assert next(r for r in db.runs("demo-t01") if r["role"] == "review")["sha"] == chosen
+    assert "chose candidate 3 of 3 (3 passed the gates; selector)" in (home / "logs/demo-t01.log").read_text()
+
+    # The read tools on the task's worktree at the start commit, and no other tools.
+    tools = plays["_selector_tools"]
+    assert "read_file" in tools and "write_file" not in tools and "run" not in tools
+    listing = plays["_selector_seen"][1][-1]               # the list_dir result the selector read
+    assert "AGENTS.md" in listing and "src" not in listing and "zz.txt" not in listing
+
+    # Its message holds every passing candidate: its number, diffstat, diff and gate table.
+    message = plays["_selector_seen"][0][-1]
+    for number, greeting in ((1, "hello one"), (2, "hello two"), (3, "hello three")):
+        assert re.search(rf"(?i)\bcandidate {number}\b", message), number
+        assert f"+{greeting}" in message
+    assert "4 files changed" in message and "5 files changed" in message
+    assert "| verification | PASS |" in message
+    assert "zz line 00000" in message and "END-OF-ZZ" not in message   # the diff, capped at DIFF_LIMIT
+
+
+def test_a_selector_without_a_valid_choice_falls_back_to_the_smallest_diff(factory_repo, home, fake_gh, monkeypatch):
+    _selector_flow(factory_repo)
+    big = [call("write_file", path="big.txt", content="".join(f"line {i}\n" for i in range(12)))]
+    medium = [call("write_file", path="medium.txt", content="a\nb\n")]
+    plays = _candidate_plays([_candidate(1, extra=big), _candidate(2), _candidate(3, extra=medium)])
+    plays["_choices"] = ["9"]                              # names a candidate the gates never saw
+    _use_candidates(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    builds = [r for r in db.runs("demo-t01") if r["role"] == "build"]
+    select_runs = [r for r in db.runs("demo-t01") if r["role"] == "select"]
+    assert len(select_runs) == 1 and select_runs[0]["outcome"] == "fallback"
+    assert row["status"] == "pr_open" and row["candidate_sha"] == builds[1]["sha"]   # the smallest passing diff
+    log = (home / "logs/demo-t01.log").read_text()
+    assert "selector gave no valid choice: smallest diff" in log
+    assert "chose candidate 2 of 3 (3 passed the gates; smallest diff)" in log
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    assert "Chosen from 3 candidates (3 passed the gates; smallest diff)" in body
+
+
+def test_one_passing_candidate_needs_no_selector(factory_repo, home, fake_gh, monkeypatch):
+    _selector_flow(factory_repo)
+    plays = _candidate_plays([_candidate(1, greeting="bye"), _candidate(2, greeting="bye"), _candidate(3)])
+    _use_candidates(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    builds = [r for r in db.runs("demo-t01") if r["role"] == "build"]
+    assert row["status"] == "pr_open" and row["candidate_sha"] == builds[2]["sha"]
+    assert not any(r["role"] == "select" for r in db.runs("demo-t01"))     # nothing to choose between
+    assert all(role != "SELECTOR" for role, _ in plays["_calls"])
+    assert "chose candidate 3 of 3 (1 passed the gates; smallest diff)" in (home / "logs/demo-t01.log").read_text()
+
+
+def test_the_selector_sees_candidates_in_a_seeded_order(factory_repo, home, fake_gh, monkeypatch):
+    _selector_flow(factory_repo)
+    big = [call("write_file", path="big.txt", content="".join(f"line {i}\n" for i in range(12)))]
+    medium = [call("write_file", path="medium.txt", content="a\nb\n")]
+    # No `_choices`: the report ends without a CHOICE line, so the run falls back as well.
+    plays = _candidate_plays([_candidate(1, extra=big), _candidate(2, extra=medium), _candidate(3)])
+    monkeypatch.setattr(agents, "build_model", lambda spec: _SelectorSpy(plays=plays))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    select_run = next(r for r in db.runs("demo-t01") if r["role"] == "select")
+    message = plays["_selector_seen"][0][-1]
+    order = list(dict.fromkeys(int(n) for n in re.findall(r"(?i)\bcandidate (\d+)\b", message)))
+    expected = [1, 2, 3]
+    random.Random("demo-t01").shuffle(expected)            # the task id is the shuffle's seed
+    assert order == expected
+
+    builds = [r for r in db.runs("demo-t01") if r["role"] == "build"]
+    assert select_run["outcome"] == "fallback"             # a missing CHOICE line is no choice either
+    assert db.task("demo-t01")["candidate_sha"] == builds[2]["sha"]
+    assert "selector gave no valid choice: smallest diff" in (home / "logs/demo-t01.log").read_text()
+
+
+def test_the_pr_says_how_its_change_was_chosen(factory_repo, home, fake_gh, monkeypatch):
+    _selector_flow(factory_repo)
+    plays = _candidate_plays([_candidate(1, greeting="hello one"), _candidate(2, greeting="hello two"),
+                              _candidate(3, greeting="hello three")])
+    plays["_choices"] = ["2"]
+    _use_candidates(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    builds = [r for r in db.runs("demo-t01") if r["role"] == "build"]
+    assert row["status"] == "pr_open" and row["candidate_sha"] == builds[1]["sha"]
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    assert "Chosen from 3 candidates (3 passed the gates; selector)" in body
+    assert body.index("## Checks") < body.index("Chosen from 3 candidates") < body.index("Gate table")

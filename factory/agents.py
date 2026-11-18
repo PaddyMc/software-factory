@@ -29,9 +29,11 @@ from .log import NullLog, clip
 from .tools import DENIED_COMMANDS, READ_CAP, PathGuard, ToolLog, diff_tool, read_tools, run_tool, write_tools
 
 OVERRIDE_DIR = ".factory/agents"                 # per-repository prompt overrides, in the main checkout
-ROLE_FILES = {"plan": "planner", "test": "tester", "build": "builder", "review": "reviewer", "verify": "verifier"}
+ROLE_FILES = {"plan": "planner", "test": "tester", "build": "builder", "review": "reviewer", "verify": "verifier",
+              "select": "selector"}
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 _VERDICT = re.compile(r"^VERDICT:\s*(APPROVE|CHANGES)\s*$", re.M)
+_CHOICE = re.compile(r"^CHOICE:\s*(\d+)\s*$", re.M)
 DEFAULT_MODEL = "openrouter:z-ai/glm-5.3"
 PROVIDER_KEYS = {"openrouter": "OPENROUTER_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 
@@ -88,6 +90,12 @@ def parse_verdict(text: str) -> str:
     """Last VERDICT line; anything else (missing, malformed) fails safe to CHANGES."""
     found = _VERDICT.findall(text)
     return found[-1] if found else "CHANGES"
+
+
+def parse_choice(text: str) -> int | None:
+    """The last CHOICE line's candidate number, or None when the selector gave no valid line."""
+    found = _CHOICE.findall(text)
+    return int(found[-1]) if found else None
 
 
 def prompt_source(root: Path, role: str):
@@ -262,7 +270,7 @@ def role_model(root: Path, role: str, cfg: Config, override: str | None = None) 
 def role_models(root: Path, override: str | None = None, cfg: Config | None = None) -> dict[str, str]:
     """The original four roles, for callers not running a flow; optional steps use `flow_models`."""
     cfg = cfg or Config()
-    return {role: role_model(root, role, cfg, override) for role in ROLE_FILES if role != "test"}
+    return {role: role_model(root, role, cfg, override) for role in ROLE_FILES if role not in ("test", "select")}
 
 
 def step_model(root: Path, step: Step, cfg: Config, override: str | None = None) -> str:
@@ -277,7 +285,10 @@ def step_limit(step: Step, cfg: Config, meta: dict) -> int:
 
 def flow_models(root: Path, flow: Flow, cfg: Config, override: str | None = None) -> dict[str, str]:
     """The model each agent step of a flow resolves to, by step name (a gates step has no model)."""
-    return {s.name: step_model(root, s, cfg, override) for s in flow.steps if s.kind != "gates"}
+    models = {s.name: step_model(root, s, cfg, override) for s in flow.steps if s.kind != "gates"}
+    if any(s.candidates > 1 for s in flow.steps):
+        models["select"] = role_model(root, "select", cfg, override)
+    return models
 
 
 def same_model_warning(flow: Flow, models: dict[str, str]) -> str | None:
@@ -661,6 +672,8 @@ class LangChainRoles:
                 seen = "\n\n".join(f"{i}. {m}" for i, m in enumerate(ctx.earlier, 1))
                 msg += f"\n\n# Earlier build steps in this attempt\n\n{seen}"
             return tools, msg, log
+        if step.kind == "select":
+            return read_tools(ctx.worktree, guard, cap), f"Choose a passing candidate for task {ctx.task.id}.", None
         if step.kind == "review":
             tools = read_tools(ctx.worktree, guard, cap) + diff_tool(ctx.worktree, ctx.base_sha)
             if step.prove:

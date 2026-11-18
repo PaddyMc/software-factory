@@ -19,6 +19,7 @@ import dataclasses
 import datetime as dt
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -167,6 +168,7 @@ class State(TypedDict, total=False):
     gates: str
     gates_pr: str           # gate details cut for the PR; `gates` stays whole for the verifier
     checks: list[prbody.Check]  # gate results and command/test counts for the PR's Checks paragraph
+    selection: tuple[int, int, str]  # first-attempt candidates: total, passing, "selector" | "smallest diff"
     reviews: dict[str, str]  # review step name -> its report (one PR-body block per review step)
     review_outcomes: dict[str, str]  # review step name -> its run's verdict, in this attempt
     verify: str
@@ -560,8 +562,40 @@ class Pipeline:
                    for added, deleted, _ in [line.split("\t", 2)]
                    if added.isdigit() and deleted.isdigit())
 
+    def _select(self, s: State, attempt: int, start: str, passing: list[dict]) -> tuple[dict, str]:
+        """Ask the selector to choose among passing candidates, falling back to the smallest diff."""
+        ordered = list(passing)
+        random.Random(self.task.id).shuffle(ordered)
+        sections = []
+        for result in ordered:
+            sha = result["sha"]
+            stat = git(self.wt, "diff", "--stat", f"{start}..{sha}")[:DIFF_LIMIT]
+            patch = git(self.wt, "diff", f"{start}..{sha}")[:DIFF_LIMIT]
+            sections.append(f"## Candidate {result['number']}\n\n### Diffstat\n\n```text\n{stat}\n```\n\n"
+                            f"### Diff against start commit {start}\n\n```diff\n{patch}\n```\n\n"
+                            f"### Gates\n\n{result['table']}")
+        message = ("# Contract\n\n" + agents.contract_block(self.task)
+                   + "\n\n# Passing candidates\n\n" + "\n\n".join(sections))
+        git(self.wt, "reset", "-q", "--hard", start)
+        git(self.wt, "clean", "-q", "-fd")
+        chosen = None
+
+        def run():
+            nonlocal chosen
+            out = self.roles.step(flows.Step("select", "select"), self.ctx({**s, "attempt": attempt}),
+                                  tag=f"select#{attempt}", message=message)
+            number = agents.parse_choice(out.text)
+            chosen = next((r for r in passing if r["number"] == number), None)
+            return out, "ok" if chosen is not None else "fallback", out.text, None
+
+        self.role("select", "building", attempt, run, step="select")
+        if chosen is None:
+            self._event("stage", "selector gave no valid choice: smallest diff")
+            return min(passing, key=lambda r: (self._changed_lines(start, r["sha"]), r["number"])), "smallest diff"
+        return chosen, "selector"
+
     def _candidates(self, s: State, attempt: int, plan: str, feedback: str, message: str) -> State:
-        """Build and gate each first-attempt candidate in turn, then keep the closest or smallest one."""
+        """Build and gate each first-attempt candidate in turn, then select one or keep the closest."""
         step = self.build_steps[0]
         n = step.candidates
         start = self.test_sha or self.base_sha
@@ -585,10 +619,15 @@ class Pipeline:
                                 "table_pr": table_pr, "checks": checks})
 
             passing = [r for r in results if G.passed(r["gs"])]
+            selection = None
             if passing:
-                chosen = min(passing, key=lambda r: (self._changed_lines(start, r["sha"]), r["number"]))
+                if len(passing) > 1:
+                    chosen, how = self._select(s, attempt, start, passing)
+                else:
+                    chosen, how = passing[0], "smallest diff"
+                selection = (n, len(passing), how)
                 self._event("stage", f"chose candidate {chosen['number']} of {n} "
-                                     f"({len(passing)} passed the gates; smallest diff)")
+                                     f"({len(passing)} passed the gates; {how})")
             else:
                 chosen = min(results, key=lambda r: (sum(g.ok is False for g in r["gs"]), r["number"]))
                 self._event("stage", f"no candidate passed the gates; candidate {chosen['number']} of {n} "
@@ -602,6 +641,8 @@ class Pipeline:
             out = {"attempt": attempt, "sha": sha, "reviews": {}, "review_outcomes": {}, "gates_ran": True,
                    "gates_ok": bool(passing), "gates": chosen["table"], "gates_pr": chosen["table_pr"],
                    "checks": chosen["checks"]}
+            if selection is not None:
+                out["selection"] = selection
             if not passing:
                 feedback, sig, stuck = self._gate_failure(chosen["gs"], s)
                 out.update(feedback=feedback, failure_sig=sig, stuck=stuck)
@@ -816,6 +857,9 @@ class Pipeline:
         outcomes = s.get("review_outcomes", {})
         reviews = [(step.name, outcomes.get(step.name)) for step in review_steps]
         checks = prbody.checks_paragraph(s.get("checks", []), reviews, s["sha"], s.get("attempt", 1))
+        if selection := s.get("selection"):
+            total, passing, how = selection
+            checks += f" Chosen from {total} candidates ({passing} passed the gates; {how})."
         row = self.db.task(t.id)
         footer = prbody.footer(t, flow, s["sha"], self.opts.base_ref, self.base_sha,
                                row["cost_usd"] if row else None)

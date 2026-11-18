@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 CONFIG_PATH = ".factory/config.yaml"
 E2E_LANGUAGES = ("rust", "python")
-ROLES = ("plan", "test", "build", "review", "verify")
+ROLES = ("plan", "test", "build", "review", "verify", "select")
 
 
 class ConfigError(ValueError):
