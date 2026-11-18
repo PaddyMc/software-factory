@@ -364,7 +364,7 @@ Through `LangChainRoles` with scripted models (t01), and through `factory run` o
 ## Cross-Workstream Coordination
 
 - **Depends on:** [measure](measure.md) (`measure-t01`, which t01 stacks on, and `factory stats` to count the new outcomes); [thoughts](thoughts.md) (`thoughts-t01`, which t01 stacks on); [strict-flow](strict-flow.md) (`strict-flow-t08` before t02, so candidates come after the step options, the locked tests and bench's step settings; `strict-flow-t09` before t05); [bench](bench.md) (the bench that t04 extends and t06 runs).
-- **Required by:** [strict-flow](strict-flow.md) (`strict-flow-t01` now waits for t01, so the strict tasks' own reviews get the re-ask and their changes to `factory/agents.py` come after it); [wiki](wiki.md) (`wiki-t01` now waits for t04, the last code task here, and `wiki-t07` for t05).
+- **Required by:** [strict-flow](strict-flow.md) (`strict-flow-t01` now waits for t01, so the strict tasks' own reviews get the re-ask and their changes to `factory/agents.py` come after it); [wiki](wiki.md) (`wiki-t01` now waits for t04, the last code task here, and `wiki-t07` for t05); [security-review](security-review.md) (`security-review-t01` and `t02` wait for t04, and `security-review-t07` for t05: it changes the same `flows.py`, `agents.py`, `pipeline.py`, `config.py`, `db.py`, `cli.py` and docs, and adds a `security` step kind and role).
 
 ## Notes / Out of Scope
 

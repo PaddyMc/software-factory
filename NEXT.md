@@ -20,6 +20,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | ✓ | You can't tell which factory version is running. Done: [Commands](docs/reference.md#commands) | — | — |
 | 14 | A review without a verdict costs a rebuild, a task gets one build per attempt, and nothing picks the default flow from data. Planned: [flow-tuning](docs/plans/flow-tuning.md) | medium | 8, 9 |
 | 15 | Specify the shipped factory for implementers. Planned in [factory-spec](docs/plans/factory-spec.md) | medium | shipped factory |
+| 16 | Nothing reviews a change for security, and a builder can rewrite its reviewer's guidance. Planned: [security-review](docs/plans/security-review.md) | medium | 9, 14 |
 
 ## 1. Act on human PR review comments
 
@@ -204,3 +205,16 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 The architecture and reference explain how to run the factory. An implementer also needs to know the expected outcome when a dependency has an open PR, a check selects zero tests, or a human requests changes on a candidate.
 
 The [factory-spec plan](docs/plans/factory-spec.md) covers the behavior shipped at `8bd7012` in ten plain-text chapters under `docs/spec/`. Five tasks cover the subsystems and a sixth checks the complete series and publishes its reading guide in `00-spec.txt`. No other planned workstream is a prerequisite or waits on this edition.
+
+## 16. Nothing reviews a change for security
+
+**Gap.** No step or gate looks at a change for security:
+- The reviewer's checklist has one line on unchecked input. A custom review step can carry a security prompt, but its own `VERDICT:` line decides, so it blocks on every speculative finding or on none.
+- No gate catches an added credential, or an edit to CI, `.factory/`, skills, guidance or lockfiles. After merge, those run with the repository's secrets or steer later agents.
+- `_repo_guidance` (`factory/agents.py:153`) reads AGENTS.md from the task worktree, so a builder can rewrite its own reviewer's system prompt. That breaks the Policy's "settings come from the main checkout".
+
+**Plan.** [docs/plans/security-review.md](docs/plans/security-review.md) (planned 2026-11-17, tasks `security-review-t01`…`t07`, after [strict-flow](docs/plans/strict-flow.md) and [flow-tuning](docs/plans/flow-tuning.md), before [wiki](docs/plans/wiki.md)):
+- Guidance comes from the main checkout, as the config and prompt overrides do.
+- `security:` in `.factory/config.yaml` turns on two gates. `secrets` fails on credential-shaped strings in added lines. `guarded_paths` fails on changes to CI, `.factory/`, skills, guidance, lockfiles and configured globs that the contract doesn't name.
+- A `security` step kind ships with its own prompt, the repository's threat model, and a verdict the factory computes from its findings. Only critical or high findings with high confidence and an exploit block, and the builder gets only those. The rest go to a visible Security section in the PR.
+- A built-in flow, `secure`, is gates-first plus a security step. A command that reviews any ref or PR, and a crew that audits the existing codebase, are out of scope.
