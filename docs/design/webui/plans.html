@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plans · software-factory</title>
+<link rel="stylesheet" href="../../../factory/web/static/app.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="board.html">factory <span>/ software-factory</span></a>
+    <nav class="nav" aria-label="Pages">
+      <a href="board.html">Board</a>
+      <a href="plans.html" aria-current="page">Plans</a>
+      <a href="activity.html">Activity</a>
+    </nav>
+    <div class="top-end">
+      <span class="live-dot" data-state="live">Live, updated 21:40:12</span>
+      <form class="inline" method="post" action="#"><button class="btn" title="factory sync">Load plans</button></form>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" data-refresh="2">
+
+  <div class="page-head">
+    <h1 class="lede">8 plans, 3 with work left. 1 isn't on the board yet.</h1>
+  </div>
+
+  <section class="block" aria-labelledby="h-plans">
+    <h2 id="h-plans">Plans <span class="count">8</span> <span class="aside mono">docs/plans/**/*.md</span></h2>
+    <ul class="plan-list">
+      <li id="plan-agent-flows">
+        <a class="plan-name" href="plan.html">agent-flows</a>
+        <span class="strip" role="img" aria-label="5 merged"><i class="s-merged"></i><i class="s-merged"></i><i class="s-merged"></i><i class="s-merged"></i><i class="s-merged"></i></span>
+        <span class="plan-about"><span class="plan-title">Reshape the agent flow</span><span class="plan-path">docs/plans/agent-flows.md</span></span>
+        <span class="plan-end"><span class="plan-counts">5 of 5 merged</span><span class="num">$10.78</span></span>
+      </li>
+      <li id="plan-bench">
+        <a class="plan-name" href="plan.html">bench</a>
+        <span class="strip" role="img" aria-label="2 merged, 1 CI failing, 1 failed, 2 waiting"><i class="s-merged"></i><i class="s-merged"></i><i class="s-attn"></i><i class="s-failed"></i><i class="s-waiting"></i><i class="s-waiting"></i></span>
+        <span class="plan-about"><span class="plan-title">Evaluate flows and setups (factory bench)</span><span class="plan-path">docs/plans/bench.md</span></span>
+        <span class="plan-end"><span class="plan-counts">2 of 6 merged, 1 CI failing, 1 failed, 2 waiting</span><span class="num">$4.31</span></span>
+      </li>
+      <li id="plan-example">
+        <a class="plan-name" href="plan.html">example</a>
+        <span class="strip" role="img" aria-label="1 ready"><i class="s-ready"></i></span>
+        <span class="plan-about"><span class="plan-title">Example workstream</span><span class="plan-path">docs/plans/example.md</span></span>
+        <span class="plan-end"><span class="plan-counts">0 of 1 merged, 1 ready</span><span class="num">$0.00</span></span>
+      </li>
+      <li id="plan-measure">
+        <a class="plan-name" href="plan.html">measure</a>
+        <span class="strip" role="img" aria-label="1 running, 3 waiting"><i class="s-live"></i><i class="s-waiting"></i><i class="s-waiting"></i><i class="s-waiting"></i></span>
+        <span class="plan-about"><span class="plan-title">Measure the factory</span><span class="plan-path">docs/plans/measure.md</span></span>
+        <span class="plan-end"><span class="plan-counts">0 of 4 merged, 1 running, 3 waiting</span><span class="num">$0.57</span></span>
+      </li>
+      <li id="plan-plan-pages">
+        <a class="plan-name" href="plan.html">plan-pages</a>
+        <span class="strip" role="img" aria-label="not on the board"></span>
+        <span class="plan-about"><span class="plan-title">Read plans in the web page</span><span class="plan-path">docs/plans/plan-pages.md</span></span>
+        <span class="plan-end"><span class="plan-counts">Not on the board yet</span><span class="num"></span></span>
+      </li>
+      <li id="plan-thoughts">
+        <a class="plan-name" href="plan.html">thoughts</a>
+        <span class="strip" role="img" aria-label="3 merged"><i class="s-merged"></i><i class="s-merged"></i><i class="s-merged"></i></span>
+        <span class="plan-about"><span class="plan-title">See what the models thought</span><span class="plan-path">docs/plans/thoughts.md</span></span>
+        <span class="plan-end"><span class="plan-counts">3 of 3 merged</span><span class="num">$2.16</span></span>
+      </li>
+      <li id="plan-thoughts-notes">
+        <a class="plan-name" href="plan.html">thoughts-notes</a>
+        <span class="strip" role="img" aria-label="no task contracts"></span>
+        <span class="plan-about"><span class="plan-title">thoughts-notes</span><span class="plan-path">docs/plans/notes/thoughts-notes.md</span></span>
+        <span class="plan-end"><span class="plan-counts">No task contracts</span><span class="num"></span></span>
+      </li>
+      <li id="plan-webui">
+        <a class="plan-name" href="plan.html">webui</a>
+        <span class="strip" role="img" aria-label="8 merged"><i class="s-merged"></i><i class="s-merged"></i><i class="s-merged"></i><i class="s-merged"></i><i class="s-merged"></i><i class="s-merged"></i><i class="s-merged"></i><i class="s-merged"></i></span>
+        <span class="plan-about"><span class="plan-title">Manage the factory from a browser</span><span class="plan-path">docs/plans/webui.md</span></span>
+        <span class="plan-end"><span class="plan-counts">8 of 8 merged</span><span class="num">$22.35</span></span>
+      </li>
+    </ul>
+  </section>
+
+  <footer class="foot">
+    <span>factory web 0.1.0</span>
+    <span>127.0.0.1:8765, this machine only</span>
+    <span>state in ~/.local/share/factory/software-factory</span>
+  </footer>
+</main>
+
+</body>
+</html>
