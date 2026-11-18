@@ -50,6 +50,8 @@ class Ctx:
     resolution: str = ""                    # resolve only: the conflict brief (see pipeline.replay_worktree)
     review_brief: str = ""                  # review only: the review-rework brief, whose requests are in scope
     earlier: tuple[str, ...] = ()           # build steps after the first: the earlier build steps' final messages
+    test_files: tuple[str, ...] = ()         # build only: acceptance-test files locked at the test commit
+    red_commands: tuple[str, ...] = ()       # build only: commands red before the change, green at the candidate
     log: Callable[[str, str], None] = field(default_factory=NullLog)          # (tag, message)
     # (steps, max_steps, tokens_in, tokens_out, cost_usd | None, refused_tool_calls)
     progress: Callable[..., None] = lambda *a: None
@@ -546,6 +548,17 @@ class LangChainRoles:
             tools = (read_tools(ctx.worktree, guard, cap) + write_tools(ctx.worktree, guard, log)
                      + run_tool(ctx.sandbox, log, self.cfg.denied_commands))
             msg = f"Implement task {ctx.task.id} (attempt {ctx.attempt}).\n\n# Plan\n\n{ctx.plan}"
+            if ctx.test_files:
+                msg += (
+                    "\n\n# Acceptance tests (locked)\n\nThe test step wrote these files:\n"
+                    + _bullets(f"`{path}`" for path in ctx.test_files)
+                    + "\n\nThese commands fail until the change is built and must pass at the candidate:\n"
+                    + _bullets(f"`{command}`" for command in ctx.red_commands)
+                    + "\n\nThose files may gain lines, but no line the test step wrote may change or be removed. "
+                      "The `acceptance_untouched` gate fails a candidate that changes or removes one.\n\n"
+                      "If a test contradicts the contract, do not edit it. Report the contradiction in your final "
+                      "message with `RESULT: BLOCKED` and the reason."
+                )
             if ctx.feedback:
                 msg += f"\n\n# Feedback to address first\n\n{ctx.feedback}"
             if ctx.earlier:

@@ -135,6 +135,43 @@ def _raw(repo):
     return yaml.safe_load((repo / ".factory/config.yaml").read_text())
 
 
+def test_acceptance_untouched_allows_added_lines_only(repo):
+    base = git(repo, "rev-parse", "HEAD")
+    _, test_sha = _commit(repo, {"tests/test_greet.py": "first\nsecond\n"})
+    red = ("python3 -m unittest tests.test_greet",)
+
+    _, sha = _commit(repo, {**GOOD, "tests/test_greet.py": "first\nsecond\nthird\n"})
+    gs = G.run_gates(_task(repo), repo, base, sha, Unsandboxed(repo), C.load(repo), skip=SKIP,
+                     test_commit=test_sha, test_files=("tests/test_greet.py",), test_red=red)
+    gate = _by_name(gs)["acceptance_untouched"]
+    assert gate.ok is True
+    assert "tests/test_greet.py" in gate.detail and red[0] in gate.detail
+    assert gs.index(gate) == [g.name for g in gs].index("plan_untouched") + 1
+
+    _, sha = _commit(repo, {"tests/test_greet.py": "first\nthird\n"})
+    gate = _by_name(G.run_gates(
+        _task(repo), repo, base, sha, Unsandboxed(repo), C.load(repo), skip=SKIP,
+        test_commit=test_sha, test_files=("tests/test_greet.py",), test_red=red))["acceptance_untouched"]
+    assert gate.ok is False and "tests/test_greet.py: 1 lines removed" in gate.detail
+
+    git(repo, "rm", "-q", "tests/test_greet.py")
+    git(repo, "commit", "-q", "-m", "delete the acceptance test")
+    sha = git(repo, "rev-parse", "HEAD")
+    gate = _by_name(G.run_gates(
+        _task(repo), repo, base, sha, Unsandboxed(repo), C.load(repo), skip=SKIP,
+        test_commit=test_sha, test_files=("tests/test_greet.py",), test_red=red))["acceptance_untouched"]
+    assert gate.ok is False and "tests/test_greet.py deleted" in gate.detail
+
+
+def test_acceptance_untouched_is_absent_without_a_test_commit(repo):
+    base, sha = _commit(repo, GOOD)
+    gs = G.run_gates(_task(repo), repo, base, sha, Unsandboxed(repo), C.load(repo), skip=SKIP)
+    assert [g.name for g in gs] == [
+        "clean", "diff", "conflict_markers", "plan_untouched", "session_log", "e2e_written",
+        "verification", "unit_tests", "e2e_tests",
+    ]
+
+
 def test_conflict_markers_fail_the_gate(repo):
     left = {**GOOD, "src/greet.txt": "<<<<<<< HEAD\nhi\n||||||| parent\n=======\nhello\n>>>>>>> abc (task change)\n"}
     base, sha = _commit(repo, left)

@@ -13,7 +13,11 @@ def call(name: str, **args) -> AIMessage:
 
 
 E2E = "#[test]\nfn greeting_e2e() {\n    assert!(true);\n}\n"
-TEST = "def test_greeting():\n    assert True\n"
+TEST = ('import unittest\n'
+        'from pathlib import Path\n\n\n'
+        'class GreetingTest(unittest.TestCase):\n'
+        '    def test_greeting(self):\n'
+        '        self.assertTrue(Path("src/greet.txt").read_text().startswith("hello"))\n')
 
 
 def scripts(review_verdicts: list[str], greeting: str = "hello") -> dict[str, list]:

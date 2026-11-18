@@ -1,8 +1,9 @@
 """Deterministic gates for a candidate commit. These — not an agent — decide pass/fail.
 
-Always: clean, diff, conflict_markers, plan_untouched, verification. When the project configures
-them (`.factory/config.yaml`): session_log, e2e_written, unit_tests, e2e_tests. Order: clean, diff,
-conflict_markers, plan_untouched, session_log, e2e_written, verification, unit_tests, e2e_tests.
+Always: clean, diff, conflict_markers, plan_untouched, verification. A test commit adds
+acceptance_untouched. When the project configures them (`.factory/config.yaml`): session_log,
+e2e_written, unit_tests, e2e_tests. Order: clean, diff, conflict_markers, plan_untouched,
+acceptance_untouched, session_log, e2e_written, verification, unit_tests, e2e_tests.
 """
 
 from __future__ import annotations
@@ -18,7 +19,8 @@ from .contracts import Task
 from .tools import DENIED_COMMANDS
 from .verification import PASS, classify, tests_run
 
-CHEAP = ("clean", "diff", "conflict_markers", "plan_untouched", "session_log", "e2e_written")
+CHEAP = ("clean", "diff", "conflict_markers", "plan_untouched", "acceptance_untouched", "session_log",
+         "e2e_written")
 CONFLICT_MARKER = re.compile(r"^\+(<{7}|\|{7}|>{7})( |$)")
 ALL = CHEAP + ("verification", "unit_tests", "e2e_tests")
 
@@ -110,7 +112,9 @@ def _summary(output: str) -> str:
 
 
 def run_gates(task: Task, worktree: Path, base: str, sha: str, sandbox, cfg: Config, *,
-              skip: tuple[str, ...] = (), full_e2e: bool = False, today: str | None = None) -> list[Gate]:
+              skip: tuple[str, ...] = (), full_e2e: bool = False, today: str | None = None,
+              test_commit: str | None = None, test_files: tuple[str, ...] = (),
+              test_red: tuple[str, ...] = ()) -> list[Gate]:
     gates: list[Gate] = []
     add = gates.append
     head = git(worktree, "rev-parse", "HEAD").strip()
@@ -129,6 +133,21 @@ def run_gates(task: Task, worktree: Path, base: str, sha: str, sandbox, cfg: Con
 
     plan_touched = task.plan in files
     add(Gate("plan_untouched", not plan_touched, f"{task.plan} edited" if plan_touched else "plan unchanged"))
+
+    if test_commit:
+        present = set(git(worktree, "ls-tree", "--name-only", sha, "--", *test_files).splitlines())
+        removed = []
+        for path in test_files:
+            if path not in present:
+                removed.append(f"{path} deleted")
+                continue
+            patch = git(worktree, "diff", f"{test_commit}..{sha}", "--", path)
+            count = sum(line.startswith("-") and not line.startswith("---") for line in patch.splitlines())
+            if count:
+                removed.append(f"{path}: {count} lines removed")
+        detail = ("; ".join(removed) if removed else
+                  f"locked: {', '.join(test_files)}; red: {', '.join(test_red)}")
+        add(Gate("acceptance_untouched", not removed, detail))
 
     if cfg.session_log:
         today = today or dt.date.today().isoformat()
