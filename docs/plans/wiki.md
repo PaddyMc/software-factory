@@ -17,7 +17,7 @@
 | How task agents use it | **Each task agent step's system prompt gets `index.md` and the role page for its kind**, read from the task's base commit. Other pages are read on demand with the existing read tools. Where the wiki and the code disagree, the code wins |
 | Review | **Every crew change passes the deterministic wiki check, then the wiki reviewer**, before it is committed. The human merges the PR |
 | Cadence | **Manual**: `factory wiki ingest` and `factory wiki lint`. Nothing starts the crew automatically |
-| Sequencing | **After [measure](measure.md), [strict-flow](strict-flow.md) and [security-review](security-review.md).** t01 depends on `measure-t04`; on `strict-flow-t08`, the last code task of the plan that changes the task crew's loop; and on `security-review-t06`, the last code task of the plan that adds the security step. t07 depends on `strict-flow-t09` and `security-review-t07`, which edit the same docs. t04's briefs use measure's merge records, and measure's prompt version covers the wiki pages injected into task prompts, so `factory stats` shows their effect |
+| Sequencing | **After [measure](measure.md), [strict-flow](strict-flow.md), [flow-tuning](flow-tuning.md) and [security-review](security-review.md).** t01 depends on `measure-t04`; on `strict-flow-t08`, the last code task of the plan that changes the task crew's loop; on `flow-tuning-t04`, the last code task of the plan that adds build candidates; and on `security-review-t06`, the last code task of the plan that adds the security step. t07 depends on `strict-flow-t09`, `flow-tuning-t05` and `security-review-t07`, which edit the same docs. t04's briefs use measure's merge records, and measure's prompt version covers the wiki pages injected into task prompts, so `factory stats` shows their effect |
 
 ### Milestones
 
@@ -31,7 +31,7 @@
 | **M6** | Lint | `tests/test_wiki_lint.py` passes: stale pages re-verified, check errors fixed, reviewed, committed | — |
 | **M7** | Docs | Architecture, reference, README, NEXT.md and the shipped templates describe it; `tests/test_templates.py` passes | — |
 
-**Sequence:** `(measure-t04 ∥ strict-flow-t08 ∥ security-review-t06) → M1 → M2 → M3 → M4 → M5 → M6 → [strict-flow-t09, security-review-t07 →] M7`. The tasks run one after another: each builds on the one before, and the code tasks share `factory/wiki.py`, `factory/cli.py` and `factory/agents.py`.
+**Sequence:** `(measure-t04 ∥ strict-flow-t08 ∥ flow-tuning-t04 ∥ security-review-t06) → M1 → M2 → M3 → M4 → M5 → M6 → [strict-flow-t09, flow-tuning-t05, security-review-t07 →] M7`. The tasks run one after another: each builds on the one before, and the code tasks share `factory/wiki.py`, `factory/cli.py` and `factory/agents.py`.
 
 ### Task Contracts
 

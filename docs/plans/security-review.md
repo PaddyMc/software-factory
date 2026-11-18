@@ -1,6 +1,6 @@
 # Plan: A security review step and gates
 
-**Status:** Planned (2026-11-17). Workstream scoped; awaiting kickoff: t01 and t02 start once `strict-flow-t08` has a PR. Roadmap: [NEXT.md item 14](../../NEXT.md#14-nothing-reviews-a-change-for-security).
+**Status:** Planned (2026-11-17). Workstream scoped; awaiting kickoff: t01 and t02 start once `flow-tuning-t04` has a PR. Roadmap: [NEXT.md item 16](../../NEXT.md#16-nothing-reviews-a-change-for-security).
 
 ---
 
@@ -13,8 +13,8 @@
 | Scope | **A security step in the task flow.** The factory ships a security reviewer as a new step kind, adds two deterministic security gates, and adds a built-in flow `secure`, so a task's PR can carry a security verdict before it opens. A command that reviews any ref or PR, and a crew that audits the existing codebase and writes fix contracts, are out of scope |
 | What a finding does | **The verdict is the factory's, computed from structured findings, and it blocks only above a threshold.** A security step sends the build back only for a critical or high finding with high confidence and an exploit scenario, and the builder gets only those findings. Everything below the threshold goes to a visible Security section in the PR, for the human who merges |
 | Deterministic gates | **`secrets` and `guarded_paths`, both on when `security:` is set in `.factory/config.yaml`.** `secrets` fails on credential-shaped strings in added lines. `guarded_paths` fails on changes to files that steer agents or run with secrets after merge (CI, `.factory/`, skills, guidance, lockfiles, configured globs) unless the task's contract names the path. A contract is written by a human and kept from the agents by `plan_untouched`, so naming a path there is the human's authorization |
-| Sequencing | **After [strict-flow](strict-flow.md), before [wiki](wiki.md).** t01 and t02 depend on `strict-flow-t08`, the last code task there, and the docs task on `strict-flow-t09`. `wiki-t01` now also depends on this plan's last code task (`security-review-t06`), and `wiki-t07` on its docs task. All three plans change `flows.py`, `agents.py`, `pipeline.py`, `gates.py` and `cli.py` |
-| Guidance isolation | **Repository guidance is read from the main checkout, and the fix waits with the rest of the plan.** `factory/agents.py:149` reads `AGENTS.md` from the task worktree, so a builder can rewrite its own reviewer's system prompt. t01 fixes it, chained after `strict-flow-t08` like the other tasks |
+| Sequencing | **After [strict-flow](strict-flow.md) and [flow-tuning](flow-tuning.md), before [wiki](wiki.md).** strict-flow has merged. flow-tuning fills the same slot, after strict-flow and before wiki, and its candidate and selector tasks change the same `flows.py`, `agents.py`, `pipeline.py`, `config.py`, `db.py` and `cli.py`. So t01 and t02 depend on `flow-tuning-t04`, its last code task, and the docs task on `flow-tuning-t05`. `wiki-t01` now also depends on this plan's last code task (`security-review-t06`), and `wiki-t07` on its docs task |
+| Guidance isolation | **Repository guidance is read from the main checkout, and the fix waits with the rest of the plan.** `factory/agents.py:521` reads `AGENTS.md` from the task worktree, so a builder can rewrite its own reviewer's system prompt. t01 fixes it, chained with the other tasks so that it doesn't conflict with the flow-tuning tasks in `agents.py` |
 
 ### Milestones
 
@@ -28,7 +28,7 @@
 | **M6** | The built-in `secure` flow | The t06 tests in `tests/test_flows.py` and `tests/test_pipeline.py` pass | — |
 | **M7** | Docs and this repository's threat model | Architecture, reference, NEXT.md, the config template, the factory-ops skill and `docs/security.md` describe it; `tests/test_templates.py` passes | — |
 
-**Sequence:** `strict-flow-t08 → (M1 ∥ (M2 → M3)) → M4 → M5 → M6 → [strict-flow-t09 →] M7`, then `M6 → wiki-t01` and `M7 → wiki-t07`. M1 changes only `agents.py`'s guidance read and M2 and M3 only `config.py`, `gates.py` and the new `security.py`, so M1 runs beside them. From M4 on, every task changes `agents.py`, `pipeline.py`, `flows.py` or `cli.py`, so they run one after another.
+**Sequence:** `flow-tuning-t04 → (M1 ∥ (M2 → M3)) → M4 → M5 → M6 → [flow-tuning-t05 →] M7`, then `M6 → wiki-t01` and `M7 → wiki-t07`. M1 changes only `agents.py`'s guidance read and M2 and M3 only `config.py`, `gates.py` and the new `security.py`, so M1 runs beside them. From M4 on, every task changes `agents.py`, `pipeline.py`, `flows.py` or `cli.py`, so they run one after another.
 
 ### Task Contracts
 
@@ -50,7 +50,7 @@
     - "docs/architecture.md#policy"
     - "factory/agents.py"
   depends_on:
-    - strict-flow-t08
+    - flow-tuning-t04
   non_goals:
     - "Changing which files `guidance` names, or the wording of the `# Repository guidance (NAME)` block"
     - "Changing what the read tools return, or how the strict-flow repository map lists worktree files"
@@ -74,7 +74,7 @@
     - "factory/gates.py"
     - "factory/config.py"
   depends_on:
-    - strict-flow-t08
+    - flow-tuning-t04
   non_goals:
     - "The guarded_paths gate (security-review-t03) or the security step (security-review-t04)"
     - "Generic password or entropy heuristics, scanning lines the change didn't add, or scanning git history"
@@ -138,7 +138,7 @@
     - "A security step's system prompt gains a `# Security rules` block after the project rules, generated by the factory whatever the prompt file says. It gives the findings format, the blocking rule, the fact that any VERDICT line is ignored, and, when `security` is set, the guarded globs. When `security.threat_model` names a file in the main checkout, a `# Threat model (PATH)` block follows, holding the file's text cut at security.THREAT_MODEL_CAP (8000) characters, with a line saying so when it was cut. Both blocks count toward the step's prompt version"
     - "The step's tools are the read tools and git_diff. Its task message is `Security-review the change for task ID. Start with git_diff(stat=True).`. When `security` is set and the change touches guarded paths, a `# Guarded paths in this change` block listing them follows"
     - "security.parse_findings reads the report's `## Findings` section. Each finding is a numbered line `[SEVERITY] [confidence: LEVEL] LOCATION — TITLE`, with optional `Exploit:` and `Fix:` lines under it; severity is critical, high, medium or low, and level is high, medium or low. `None.` under the heading means no findings. A numbered line it can't parse is kept as an unrated finding, which never blocks"
-    - "security.verdict(report) returns the verdict and the run outcome. With N findings that are critical or high, with confidence high and a non-empty Exploit line: CHANGES, outcome `CHANGES (N blocking)`. With no findings: APPROVE, outcome `APPROVE`. With N findings and none blocking: APPROVE, outcome `APPROVE (N below threshold)`. With no `## Findings` heading: CHANGES, outcome `CHANGES (unparsed)`. A VERDICT line in the report changes nothing. Output.verdict holds the verdict, and the outcome goes in the Output field strict-flow-t06 added for `APPROVE (unproven)`, or a new `outcome` field when it added none"
+    - "security.verdict(report) returns the verdict and the run outcome. With N findings that are critical or high, with confidence high and a non-empty Exploit line: CHANGES, outcome `CHANGES (N blocking)`. With no findings: APPROVE, outcome `APPROVE`. With N findings and none blocking: APPROVE, outcome `APPROVE (N below threshold)`. With no `## Findings` heading: CHANGES, outcome `CHANGES (unparsed)`. A VERDICT line in the report changes nothing. For a security step, LangChainRoles.step sets Output.verdict from it; the pipeline records the outcome (security-review-t05)"
     - "tests/fake_model.py gains a SECURITY script without changing what the other roles play"
     - "docs/sessions/ has this task's session log entry, as the project rules require"
   verification:
@@ -158,12 +158,13 @@
   non_goals:
     - "A built-in flow with a security step, or warnings about how one is set up (security-review-t06)"
     - "Giving the security step the human review brief in a human-review rework: it judges security only"
+    - "Asking a security step again when its report has no findings section, as flow-tuning-t01 asks a reviewer again for a missing verdict: such a report counts as CHANGES (unparsed) at once"
     - "Changing how review steps, the gates or the verifier decide"
     - "Any documentation"
   acceptance:
     - "flows.KINDS gains `security`, and the order rule becomes `[plan]? [test]? build+ (review | security | gates)* [verify]?`. A security step takes `model`, `max_steps` and `loop` (trim, map, nudge) as a review step does, and `prove` on it raises ConfigError naming the flow and step. A flow without a gates step gets one after its last review or security step"
     - "The pipeline runs each security step as a node among the post-build steps, in flow order, on fresh builds and on every rework entry (conflict resolution, CI fix, human-review rework). APPROVE moves on. CHANGES ends the attempt, and the next attempt's feedback starts `Security reviewer found N blocking issue(s):` (with `Security reviewer `NAME`` for a step not named `security`), followed by only the blocking findings, each with its Exploit and Fix lines. After a `CHANGES (unparsed)` review, the feedback says the report had no findings section and gives the report, capped"
-    - "Each security step records a run with role `security` (db.ROLES gains it), the step's name, its outcome from security.verdict and its report. `factory show`, `factory trace` and `factory transcript` accept `--role security`, and the web page calls the role `security reviewer`"
+    - "Each security step records a run with role `security` (db.ROLES gains it), the step's name, its report, and its outcome from security.verdict, computed in the pipeline's security node as review_step computes a proving review's `APPROVE (unproven)`. `factory show`, `factory trace` and `factory transcript` accept `--role security`, and the web page calls the role `security reviewer`"
     - "The verifier's task message includes each security step's report, under the step's name, with the reviewer reports"
     - "A PR whose flow has a security step, or whose change touches guarded paths the contract named, has a `## Security` section after What to check. It holds one bullet per finding of each security step's last run on the pushed candidate (severity, confidence, location and title, cut at 300 characters), at most security.PR_FINDINGS (20) with a line counting the rest. When `security` is set, a bullet names the guarded paths the contract let the change touch. With nothing to list, the section reads `Nothing flagged.`. Each security step also gets a collapsed `Security report (NAME)` block after the reviewer blocks, capped and shrunk under the body limit as reviewer blocks are, and the Checks paragraph gives its outcome"
     - "`factory stats` reports a `security CHANGES rate` over security runs (key `security_changes_rate` in --json) next to the reviewer CHANGES rate, which still counts only review runs"
@@ -206,16 +207,17 @@
     - "docs/architecture.md#sandbox"
   depends_on:
     - security-review-t06
-    - strict-flow-t09
+    - flow-tuning-t05
   non_goals:
-    - "Changing code, or tests beyond what tests/test_templates.py needs for the new template text"
+    - "Changing code, or tests beyond test_the_docs_describe_the_security_review and what tests/test_templates.py needs for the new template text"
     - "Turning on `security` or `flow: secure` in .factory/config.yaml: only the template's new comment lines are copied there"
     - "Rewriting sections unrelated to this plan, or editing README.md"
   acceptance:
     - "docs/architecture.md: Policy says agent guidance also comes from the main checkout. The Gates table has secrets and guarded_paths, marked configured, and the Roles table has the security reviewer. A `## Security review` section covers the security step, the findings format, the blocking rule and its outcomes, what reaches the builder and what reaches the PR, and has a `### The secure flow` subsection that sets secure next to default and strict"
     - "docs/reference.md: the configuration table has `security` with guarded_paths, allow_secrets and threat_model, and the role `security` under models and max_steps. The flows documentation has the kind `security` and secure written out as a flow. Troubleshooting has rows for a failed secrets gate, a failed guarded_paths gate, a missing threat model, a review recorded as `CHANGES (unparsed)`, and one recorded as `APPROVE (N below threshold)`"
     - "docs/security.md is this repository's threat model, under 8000 characters. It covers what the factory protects (the maintainer's credentials and checkout, the trunk); what is untrusted (agent output, the repository and dependency content agents read, PR comments); the trust boundaries (the sandbox, settings from the main checkout, the gates, the merge); and which changes here deserve a security reviewer's attention (sandbox.py, the path guard and denied commands in tools.py, github.py, how prompts are assembled in agents.py)"
-    - "NEXT.md marks item 14 done in its table, linking to docs/architecture.md#security-review"
+    - "NEXT.md marks item 16 done in its table, linking to docs/architecture.md#security-review"
+    - "tests/test_templates.py::test_the_docs_describe_the_security_review checks what the grep commands below check, so it fails before this task's docs change and passes after it"
     - "factory/templates/config.yaml has a commented `security:` block with its three keys, and a commented `flow: secure` line, each with a one-line explanation. factory/templates/skills/factory-ops/SKILL.md covers choosing secure, reading a failed secrets or guarded_paths gate, and reading a security review's outcome. As tests/test_templates.py requires, the skill change is copied to .claude/skills/factory-ops/SKILL.md and the template's new prose comment lines to .factory/config.yaml"
     - "docs/sessions/ has this task's session log entry, as the project rules require"
   verification:
@@ -227,6 +229,7 @@
     - "grep -q 'architecture.md#security-review' NEXT.md"
     - "grep -q 'threat_model' factory/templates/config.yaml"
     - "grep -q 'guarded_paths' factory/templates/skills/factory-ops/SKILL.md"
+    - "uv run pytest -q tests/test_templates.py::test_the_docs_describe_the_security_review"
     - "uv run pytest -q tests/test_templates.py"
   risk: low
 ```
@@ -241,11 +244,11 @@ Planned test additions:
 | t04 | `tests/test_security_review.py` (new file): nine tests | unit |
 | t05 | `tests/test_flows.py`: one test; `tests/test_pipeline.py`: four tests; `tests/test_stats.py`: one test | unit, CLI end to end |
 | t06 | `tests/test_flows.py::test_secure_is_built_in_and_cannot_be_redefined`; `tests/test_pipeline.py`: four tests; two existing tests updated | unit, CLI end to end |
-| t07 | none new: `tests/test_templates.py` (existing) | regression |
+| t07 | `tests/test_templates.py::test_the_docs_describe_the_security_review`; `tests/test_templates.py` (existing) | unit, regression |
 
 Every verification filter names a test the task adds or an existing test file, so a filter that selects zero tests fails the gate. `tests/test_scheduler.py::test_a_plan_run_passes_its_flow_to_each_task`, `tests/test_pipeline.py::test_an_unknown_flow_is_refused_before_any_work` and `tests/test_flows.py::test_without_flows_the_default_flow_is_todays_pipeline` exist on main today.
 
-Every task can be run by the factory on this repository: the verification commands are `uv run pytest`, `grep` and `test`, and they run offline.
+Every task can be run by the factory on this repository: the verification commands are `uv run pytest`, `grep` and `test`, and they run offline. This repository runs the `strict` flow (#80), whose test step needs at least one of a task's test commands to fail before the change. Every task names a new test for that reason, and t07 has a docs test.
 
 ### Risks
 
@@ -255,7 +258,7 @@ Every task can be run by the factory on this repository: the verification comman
 4. **`guarded_paths` blocks legitimate work.** A task that must edit CI or AGENTS.md fails the gate. **Action:** a contract that names the path lets the change through, and the gate's detail says so. The plan is the human's document, and `plan_untouched` keeps it out of an agent's reach. The gates are opt-in through `security:`.
 5. **Secret patterns miss a credential, or flag a fixture.** **Action:** the patterns are high-precision provider formats. The security reviewer covers what they can't, and `allow_secrets` exempts fixture paths. The gate never repeats what it found, so a failing gate's detail is safe to show in a log or PR.
 6. **Prompt injection through the change itself.** A builder can write comments that address the security reviewer, as it could address any reviewer. **Action:** t01 keeps the system prompt out of the worktree's reach. The security prompt treats text in the change that addresses an AI agent as a finding, and the deterministic gates don't read prose.
-7. **A deep chain behind strict-flow, and more conflicts in shared files.** **Action:** t01 and t02 wait for `strict-flow-t08`, t07 for `strict-flow-t09`, and wiki waits for this plan. Within the plan, M1 and M2 touch no common file, and from M4 on the tasks run one after another. Merge each PR as it opens.
+7. **A deep chain behind flow-tuning, and more conflicts in shared files.** **Action:** t01 and t02 wait for `flow-tuning-t04`, t07 for `flow-tuning-t05`, and wiki waits for this plan. Within the plan, M1 and M2 touch no common file, and from M4 on the tasks run one after another. Merge each PR as it opens.
 
 ---
 
@@ -263,9 +266,9 @@ Every task can be run by the factory on this repository: the verification comman
 
 The factory now lets a repository reshape its agent flow ([agent-flows](agent-flows.md)) and is making each step stricter ([strict-flow](strict-flow.md)). But nothing in it looks at a change for security, and one part of its own isolation leaks.
 
-- **No step looks for vulnerabilities.** The reviewer's checklist (`factory/prompts/reviewer.md`) has one line on "unchecked external input" under correctness. A repository can add a custom review step today (`{name: security, kind: review}` plus `.factory/agents/security.md`), but the factory ships no security prompt. Such a step decides by its own `VERDICT:` line (`factory/agents.py:83`), so it either blocks on every speculative finding or lets every finding through.
-- **No gate checks for credentials or sensitive files.** `gates.run_gates` (`factory/gates.py:112`) checks conflict markers, the plan, the session log, the e2e test and the commands. Lockfile changes are only noted in the `diff` gate's detail (`factory/gates.py:122`). Nothing stops a candidate that adds a private key, or that edits `.github/workflows/`, `.factory/`, a skill, or AGENTS.md. After merge, those files run with the repository's secrets or become later agents' instructions. The sandbox protects the run, but nothing protects the merge from a builder that was prompt-injected by content it read.
-- **A builder can rewrite its own reviewer's instructions.** `_repo_guidance` (`factory/agents.py:149`) reads the first `guidance` file from `ctx.worktree` (`factory/agents.py:250`), and the builder writes there. A builder that edits AGENTS.md changes the system prompt of the review step, the verify step and its own next attempt in the same run. That contradicts the stated policy: "Settings come from the main checkout, never from a task worktree, so an agent can't weaken its own gates or change its own prompt" (`docs/architecture.md`, Policy).
+- **No step looks for vulnerabilities.** The reviewer's checklist (`factory/prompts/reviewer.md`) has one line on "unchecked external input" under correctness. A repository can add a custom review step today (`{name: security, kind: review}` plus `.factory/agents/security.md`), but the factory ships no security prompt. Such a step decides by its own `VERDICT:` line (`factory/agents.py:87`), so it either blocks on every speculative finding or lets every finding through.
+- **No gate checks for credentials or sensitive files.** `gates.run_gates` (`factory/gates.py:114`) checks conflict markers, the plan, strict-flow's locked tests, the session log, the e2e test and the commands. Lockfile changes are only noted in the `diff` gate's detail (`factory/gates.py:128`). Nothing stops a candidate that adds a private key, or that edits `.github/workflows/`, `.factory/`, a skill, or AGENTS.md. After merge, those files run with the repository's secrets or become later agents' instructions. The sandbox protects the run, but nothing protects the merge from a builder that was prompt-injected by content it read.
+- **A builder can rewrite its own reviewer's instructions.** `_repo_guidance` (`factory/agents.py:153`) reads the first `guidance` file from `ctx.worktree` (`factory/agents.py:521`), and the builder writes there. A builder that edits AGENTS.md changes the system prompt of the review step, the verify step and its own next attempt in the same run. That contradicts the stated policy: "Settings come from the main checkout, never from a task worktree, so an agent can't weaken its own gates or change its own prompt" (`docs/architecture.md`, Policy).
 
 ## Goal
 
@@ -481,6 +484,7 @@ Before any work, `factory run` refuses a missing threat model file. It warns whe
   - `tests/test_flows.py::test_a_security_step_goes_with_the_review_steps`: the order rule, `loop` accepted, `prove` refused, gates inserted after it.
   - `tests/test_stats.py::test_stats_report_the_security_changes_rate`
 - **t06** `tests/test_flows.py::test_secure_is_built_in_and_cannot_be_redefined`
+- **t07** `tests/test_templates.py::test_the_docs_describe_the_security_review`: the architecture and reference sections, `docs/security.md` under 8000 characters, NEXT.md's link, and the template and skill text.
 
 ### End-to-end tests
 
@@ -512,7 +516,8 @@ These run in `tests/test_pipeline.py`, driving the real CLI, pipeline, agents, g
 ## Cross-Workstream Coordination
 
 - **Depends on:**
-  - [strict-flow](strict-flow.md). `security-review-t01` and `t02` depend on `strict-flow-t08`, the last task to change `flows.py`, `agents.py`, `pipeline.py`, `gates.py` and `cli.py` there, and `security-review-t07` on `strict-flow-t09`, which edits the same docs. This plan's order rule includes strict's `test` kind. Its gate order places `secrets` after `acceptance_untouched`. Its security kind refuses `prove` and accepts `loop`. Its built-in `secure` sits beside `strict`, and t06 updates the two tests that strict-flow-t07 updates for `strict`.
+  - [flow-tuning](flow-tuning.md). `security-review-t01` and `t02` depend on `flow-tuning-t04`, the last task there to change `flows.py`, `agents.py`, `pipeline.py`, `config.py`, `db.py` and `cli.py`, and `security-review-t07` on `flow-tuning-t05`, which edits the same docs. The `security` role joins `config.py`'s roles beside its `select` role. Its re-ask for a missing verdict applies to review steps only.
+  - [strict-flow](strict-flow.md), merged, reached through flow-tuning. This plan's order rule includes strict's `test` kind. Its gate order places `secrets` after `acceptance_untouched`. Its security kind refuses `prove` and accepts `loop`. Its built-in `secure` sits beside `strict`, and t06 updates the two tests that strict-flow-t07 updates for `strict`.
   - [agent-flows](agent-flows.md), merged. A security step is a flow step; custom steps and per-step models work as for any kind.
   - [measure](measure.md), merged. The security rules and threat model count toward the prompt version, and `factory stats` gains the security CHANGES rate.
   - [pr-descriptions](pr-descriptions.md), merged. The Security section and block are placed in, and shrink with, its body layout.
