@@ -339,5 +339,3 @@ tests/test_dependencies.py::test_reject_cycle_and_unknown_id, and
 tests/test_pipeline.py::test_run_refuses_a_manual_contract. Edge details that
 are identified above as source-only are not represented as separately tested
 behavior.
-ly are not represented as separately tested
-behavior.
