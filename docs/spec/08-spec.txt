@@ -24,9 +24,10 @@ The evidence layers are related but not interchangeable:
 `factory/log.py:log_path` places ordinary task logs at
 `$FACTORY_HOME/logs/TASK.log`. `factory/log.py:RunLog` appends rather than
 truncates, so a later attempt does not erase earlier attempts. Agent
-transcripts live below `$FACTORY_HOME/transcripts/TASK`, and their filenames
-start with the run id, role and attempt. Web command output is instead the
-`output.log` in that job's own directory.
+transcripts live below `$FACTORY_HOME/transcripts/TASK`, with filenames of the
+form `{run_id:05d}-{role}-{attempt}.jsonl` (the run id is zero-padded to at
+least five digits). Web command output is instead the `output.log` in that
+job's own directory.
 
 SQLite and JSONL are internal storage, not promised stable serialization
 formats. The compatibility behavior below is a requirement on the shipped
@@ -38,20 +39,24 @@ operator view.
 
 `factory logs TASK` prints a task log, optionally starting with its last N
 lines and optionally following it. Following one task ends when that task is
-no longer active. `factory logs --all` merges every available task log with a
-task-id prefix and can keep following. Log lines are human diagnostics, not
+no longer active or queued. `factory logs --all` merges every available task
+log with a task-id prefix and can keep following. Log lines are human diagnostics, not
 usage records: token totals and prices must come from run/transcript evidence.
 
 `factory top` combines stored task/run records, process liveness and recent log
-lines. Its counters distinguish running, ready and waiting tasks, open and
-rework PRs, failures and holds. A dead pid can be displayed as `DEAD` before a
-refresh changes the stored status. Elapsed/quiet times and the current
-activity describe the live process; they are not derived from transcript
-timing.
+lines. Its global header counts active rows as running, combines
+`pr_open`/`conflict`/`ci_failed`/`changes_requested` under “PR open”, and
+reports failed rows, ready versus waiting queued rows, and done rows
+(`merged` plus `abandoned`). Each plan counter is more detailed: it reports
+merged/total and separately counts conflicts, CI failures, requested changes
+and held tasks. A dead pid can be displayed as `DEAD` before a refresh changes
+the stored status. Elapsed/quiet times and the current activity describe the
+live process; they are not derived from transcript timing.
 
 Merged-log ordering and live task detail are pinned by
 `tests/test_observe.py::test_logs_all_merges_tasks_in_time_order`,
-`tests/test_observe.py::test_top_shows_running_task_activity_cost_and_failures`
+`tests/test_observe.py::test_top_shows_running_task_activity_cost_and_failures`,
+`tests/test_observe.py::test_top_and_status_group_tasks_by_plan_with_a_task_counter`
 and `tests/test_observe.py::test_dead_run_is_flagged_and_refresh_fails_it`.
 
 3. Transcripts and traces
@@ -59,11 +64,13 @@ and `tests/test_observe.py::test_dead_run_is_flagged_and_refresh_fails_it`.
 3.1 Selection and presentation
 
 `factory transcript TASK` and `factory trace TASK` select the newest matching
-run by default. Role, flow-step and attempt filters narrow the candidates;
-`--all` renders every match rather than only the newest. `factory show TASK`
-is the run-index/report view and has the broader set of role filters needed
-for non-agent and rework records. A selected agent run's stored transcript
-path connects its run totals to the detailed events.
+run by default. Their role choices are `plan`, `build`, `review` and `verify`;
+flow-step and attempt filters narrow those candidates further, and `--all`
+renders every match rather than only the newest. `factory show TASK` instead
+lists every run by default and has role/step filters but no attempt or `--all`
+filter. Its role choices additionally include `resolve`, `ci`, `human_review`,
+`pr` and `merge` for rework and non-agent records. A selected agent run's
+stored transcript path connects its run totals to the detailed events.
 
 A transcript prints the system event and task message, then each model step
 and its immediately associated tool activity. Long content is clipped by
@@ -72,11 +79,11 @@ content. Reasoning, when supplied by the model, appears before that step's
 answer and tool calls. Tool results marked as refused are visibly flagged.
 
 A trace does not replay every message. `factory/observe.py:trace_rows` makes
-one row per AI event and associates following tool events with that call. The
-first model-time interval starts at the preceding task (`human`) event; each later
-interval starts at the previous AI event and therefore includes intervening
-tool time. Tool time separately measures from an AI event through its
-associated tool results. Input context is
+one row per AI event and associates following tool events with that call. Each
+model-time interval starts at the preceding input/tool boundary: initially the
+transcript's first event, then the previous call's last tool result (or that
+call's AI event when it had no results). Tool time separately measures from an
+AI event through its associated tool results. Input context is
 reported per call and summed across calls, so the total intentionally counts
 context re-sent at every step rather than unique tokens. Result sizes and the
 slowest/largest tools help explain context growth and latency.
@@ -85,9 +92,9 @@ slowest/largest tools help explain context growth and latency.
 calls, input/output tokens, cost and refused-tool count before rendering its
 transcript. `factory trace` instead prints the task/role/attempt heading and
 the transcript-derived table. An old or incomplete transcript does not cause
-either renderer to invent a new run record. A transcript with no model calls
-says so. Model-time cells lacking a timestamp print `-`; an old transcript
-does not fail merely because its events have no timestamps.
+either renderer to invent a new run record. A trace with no model calls prints
+`(no model calls recorded)`. Model-time cells lacking a timestamp print `-`;
+an old transcript does not fail merely because its events have no timestamps.
 
 3.2 Older records and optional fields
 
@@ -143,13 +150,14 @@ amount. Prices are cached locally for 24 hours and refreshed from OpenRouter's
 public model-price endpoint when stale; a previously cached table is used if
 refresh fails.
 
-Every non-OpenRouter spec, any OpenRouter model absent from the price
-table, and price lookup failures produce `cost_usd = NULL`, not zero. A trace sums known event prices
-and marks a wholly unknown cost as unknown. Task board totals are sums of
-recorded run costs over all attempts, so they can be incomplete when any price
-is unknown. The stricter merged-PR statistics rule below prevents an
-incompletely priced merged task from being treated as a fully priced zero or
-partial observation.
+Every non-OpenRouter spec, any OpenRouter model absent from the price table,
+and price lookup failures produce `cost_usd = NULL`, not zero. A trace sums
+only priced calls: if at least one call is priced, its total is that sum even
+when other calls are unknown; when model calls exist but none is priced, the
+total is `unknown`. Task board totals are sums of recorded run costs over all
+attempts, so they can be incomplete when any price is unknown. The stricter
+merged-PR statistics rule below prevents an incompletely priced merged task
+from being treated as a fully priced zero or partial observation.
 
 Cached-input pricing and unknown-price behavior are pinned by
 `tests/test_agent_loop.py::test_cached_input_is_priced_at_the_cache_rate` and
@@ -326,9 +334,9 @@ are pinned respectively by
 - `factory/merges.py:record`.
 - `factory/stats.py:collect`, `factory/stats.py:render` and
   `factory/stats.py:parse_when`.
-- `factory/cli.py:cmd_logs`, `factory/cli.py:cmd_trace`,
-  `factory/cli.py:cmd_transcript`, `factory/cli.py:cmd_show` and
-  `factory/cli.py:cmd_stats`.
+- `factory/cli.py:main`, `factory/cli.py:cmd_logs`,
+  `factory/cli.py:cmd_trace`, `factory/cli.py:cmd_transcript`,
+  `factory/cli.py:cmd_show` and `factory/cli.py:cmd_stats`.
 
 ### Behavioral tests
 

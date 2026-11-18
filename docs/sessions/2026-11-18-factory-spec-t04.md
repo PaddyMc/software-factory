@@ -25,3 +25,10 @@ Results: all commands exited 0. The spec acceptance suite passed 19 tests, the t
 
 - Corrected the `show`/`top` command map entries, run-record cardinality, log-follow termination, trace timing intervals, and the distinction between transcript run totals and trace headings after checking the exact shipped source.
 - Re-ran the spec suite (19 passed), the three contract-selected behavioral tests (3 passed), all citation checks, `git diff --check`, and the full suite (473 passed); every command exited 0.
+
+## Rendering review follow-up
+
+- Verified trace cost totals, including mixed known/unknown call prices, and recorded the exact `(no model calls recorded)` empty-trace message.
+- Documented the global and per-plan `top` counters, the `{run_id:05d}-{role}-{attempt}.jsonl` transcript name, and the exact `show` versus trace/transcript role and selection filters.
+- Corrected model-time boundaries to the input/tool handoff used by `trace_rows` and retained the active-or-queued log-follow condition.
+- Ran `tests/test_observe.py` with the web/stats contract tests (11 passed), the spec suite (19 passed), the exact contract command (3 passed), citation checks, `git diff --check`, and the full suite (473 passed); all exited 0.
