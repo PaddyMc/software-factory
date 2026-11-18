@@ -1,5 +1,6 @@
 from factory.contracts import check_dependencies, parse_text, validate_tasks
 from conftest import TASK, plan_text
+from test_spec_chapters_01_02 import chapter_01_acceptance
 
 
 def test_reject_cycle_and_unknown_id():
@@ -8,6 +9,7 @@ def test_reject_cycle_and_unknown_id():
     errs = check_dependencies(tasks)
     assert any("unknown dependency demo-t99" in e for e in errs)
     assert any("cycle" in e and "demo-t01" in e and "demo-t02" in e for e in errs)
+    chapter_01_acceptance()   # factory-spec-t01: docs/spec/01-spec.txt meets its acceptance criteria
 
 
 def test_acyclic_graph_has_no_errors():
