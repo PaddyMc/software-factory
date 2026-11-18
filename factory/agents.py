@@ -14,9 +14,10 @@ from typing import Callable, Protocol
 
 import yaml
 from langchain.agents import create_agent
-from langchain.agents.middleware import ModelCallLimitMiddleware, ModelRetryMiddleware, ToolErrorMiddleware
+from langchain.agents.middleware import AgentMiddleware, ModelCallLimitMiddleware, ModelRetryMiddleware, ToolErrorMiddleware
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.errors import GraphRecursionError
 
 from . import prices
@@ -24,7 +25,7 @@ from .config import Config
 from .contracts import Task
 from .flows import Flow, Step
 from .log import NullLog, clip
-from .tools import PathGuard, ToolLog, diff_tool, read_tools, run_tool, write_tools
+from .tools import READ_CAP, PathGuard, ToolLog, diff_tool, read_tools, run_tool, write_tools
 
 OVERRIDE_DIR = ".factory/agents"                 # per-repository prompt overrides, in the main checkout
 ROLE_FILES = {"plan": "planner", "build": "builder", "review": "reviewer", "verify": "verifier"}
@@ -208,6 +209,8 @@ CALL_LIMIT_MARKER = "Model call limits exceeded"
 # (2, 4, 8, 16 s); then the exception ends the run with the real error. The middleware's default
 # ("continue") returns the error text as an AIMessage, which the pipeline took for the agent's answer.
 MODEL_RETRY = {"max_retries": 4, "initial_delay": 2.0}
+TRIM_AT = 60_000      # approximate conversation tokens that trigger a clearing batch
+TRIM_KEEP = 8         # most recent tool results kept in full
 
 
 def recursion_limit(max_steps: int) -> int:
@@ -227,6 +230,57 @@ def tool_errors(worktree: Path) -> ToolErrorMiddleware:
         return text
 
     return ToolErrorMiddleware(on_error)
+
+
+CLEARED_MARK = "[cleared: "
+
+
+def _cleared(name, args) -> str:
+    details = ", ".join(f"{k}={clip(v, 60)!s}" for k, v in args.items() if k != "content")
+    return f"{CLEARED_MARK}{name}({details}): call it again if you need it]"
+
+
+class TrimMiddleware(AgentMiddleware):
+    """Clear old tool results in the model request, leaving the transcript and graph untouched."""
+    def __init__(self, tag: str, ctx: Ctx):
+        super().__init__()
+        self.tag = tag
+        self.ctx = ctx
+        self.cleared: set[int] = set()       # message positions: the conversation only appends
+
+    def wrap_model_call(self, request, handler):
+        messages = [m for m in request.messages if not isinstance(m, SystemMessage)]
+        calls = {}
+        details = {}
+        for i, m in enumerate(messages):
+            if isinstance(m, AIMessage):
+                # Ids can be reused: a result belongs to its nearest preceding issuer.
+                calls.update({call.get("id"): call for call in m.tool_calls})
+            elif isinstance(m, ToolMessage):
+                call = calls.get(m.tool_call_id, {})
+                details[i] = (m.name or call.get("name") or "tool", call.get("args") or {})
+
+        def view(positions):
+            return [m.model_copy(update={"content": _cleared(*details[i])})
+                    if isinstance(m, ToolMessage) and i in positions else m
+                    for i, m in enumerate(messages)]
+
+        trimmed = view(self.cleared)
+        before = count_tokens_approximately(trimmed)
+        if before > TRIM_AT:
+            results = [i for i, m in enumerate(messages) if isinstance(m, ToolMessage)]
+            candidates = results[:max(0, len(results) - TRIM_KEEP)]
+            newly = [i for i in candidates if i not in self.cleared]
+            if newly:
+                self.cleared.update(newly)
+                trimmed = view(self.cleared)
+                after = count_tokens_approximately(trimmed)
+                self.ctx.record({"type": "trim", "cleared": len(newly),
+                                 "tokens_before": before, "tokens_after": after})
+                self.ctx.log(self.tag, f"trim: cleared {len(newly)} tool results ({before} → {after} tokens)")
+        if not self.cleared:
+            return handler(request)
+        return handler(request.override(messages=trimmed))
 
 
 class LangChainRoles:
@@ -253,12 +307,14 @@ class LangChainRoles:
         version = prompt_version(text for text, per_task in parts if text and not per_task)
         tools, default_message, log = self._kit(step, ctx)
         message = message if message is not None else default_message
-        agent = create_agent(
-            (self.model_factory or build_model)(spec), tools, system_prompt=system,
-            middleware=[ModelCallLimitMiddleware(run_limit=steps, exit_behavior="end"),
-                        ModelRetryMiddleware(**MODEL_RETRY, on_failure="error"), tool_errors(ctx.worktree)],
-        )
         tag = tag or (f"{step.name}#{ctx.attempt}" if step.kind in ("build", "review") else step.name)
+        middleware = [ModelCallLimitMiddleware(run_limit=steps, exit_behavior="end"),
+                      ModelRetryMiddleware(**MODEL_RETRY, on_failure="error"), tool_errors(ctx.worktree)]
+        if "trim" in step.loop:
+            middleware.append(TrimMiddleware(tag, ctx))
+        agent = create_agent(
+            (self.model_factory or build_model)(spec), tools, system_prompt=system, middleware=middleware,
+        )
         ctx.log(tag, f"start ({spec}, max {steps} steps)")
         if step.kind == "review" and "VERDICT:" not in instructions:
             ctx.log(tag, f"⚠ {step.name}'s prompt has no VERDICT: line; every review will count as CHANGES")
@@ -296,11 +352,12 @@ class LangChainRoles:
         """A step kind's tools and task message (exactly what its role method builds today), plus the
         build kind's ToolLog, attached to the Output after the run."""
         guard = self._guard(ctx)
+        cap = READ_CAP if "trim" in step.loop else None
         if step.kind == "plan":
-            return read_tools(ctx.worktree, guard), f"Plan task {ctx.task.id}.", None
+            return read_tools(ctx.worktree, guard, cap), f"Plan task {ctx.task.id}.", None
         if step.kind == "build":
             log = ToolLog()
-            tools = (read_tools(ctx.worktree, guard) + write_tools(ctx.worktree, guard, log)
+            tools = (read_tools(ctx.worktree, guard, cap) + write_tools(ctx.worktree, guard, log)
                      + run_tool(ctx.sandbox, log, self.cfg.denied_commands))
             msg = f"Implement task {ctx.task.id} (attempt {ctx.attempt}).\n\n# Plan\n\n{ctx.plan}"
             if ctx.feedback:
@@ -310,7 +367,7 @@ class LangChainRoles:
                 msg += f"\n\n# Earlier build steps in this attempt\n\n{seen}"
             return tools, msg, log
         if step.kind == "review":
-            tools = read_tools(ctx.worktree, guard) + diff_tool(ctx.worktree, ctx.base_sha)
+            tools = read_tools(ctx.worktree, guard, cap) + diff_tool(ctx.worktree, ctx.base_sha)
             msg = f"Review the change for task {ctx.task.id}. Start with git_diff(stat=True)."
             if ctx.review_brief:
                 msg += (
@@ -321,7 +378,7 @@ class LangChainRoles:
                 )
             return tools, msg, None
         if step.kind == "verify":
-            tools = (read_tools(ctx.worktree, guard) + diff_tool(ctx.worktree, ctx.base_sha)
+            tools = (read_tools(ctx.worktree, guard, cap) + diff_tool(ctx.worktree, ctx.base_sha)
                      + run_tool(ctx.sandbox, ToolLog(), self.cfg.denied_commands))
             msg = f"All gates passed for task {ctx.task.id}. Write the PR report.\n\n# Gates\n\n{ctx.gates}"
             if ctx.reviews:
