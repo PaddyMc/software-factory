@@ -43,10 +43,11 @@ Codex links are also added when re-running `factory init` in a repository initia
 | `unit_tests` | `[]` | Commands for the `unit_tests` gate |
 | `lockfiles` | common lockfiles | Files the `diff` gate notes when they change |
 | `dependency_sources` | cargo registry and git sources, rustup toolchains | Directories the agents' file tools may also read, by absolute path (never write) |
-| `flow` | `default` | The flow `factory run` uses: a name from `flows` (the built-in `default` is today's pipeline); `factory run --flow` overrides it per run |
-| `flows` | `{default: …}` | Named agent flows: name → ordered step list. A step is a kind string (`plan`, `build`, `review`, `verify`, `gates`) or a mapping with `kind` and optional `name`, `model`, `max_steps`. Exactly one gates step; one is inserted after the last review (else build) step when omitted |
-| `models` | `{}` | Model per step kind (`plan`, `build`, `review`, `verify`), e.g. `{review: "anthropic:claude-…"}`; over the prompt's frontmatter |
-| `max_steps` | `{}` | Model calls per agent run, per step kind; over the prompt's frontmatter |
+| `test_paths` | `[]` | Globs where a `test` step may write, in the syntax of `plans` and `exclude`; required by a flow with a test step (`factory run` refuses without it) |
+| `flow` | `default` | The flow `factory run` uses: a name from `flows` (the built-ins are `default`, today's pipeline, and `strict`); `factory run --flow` overrides it per run |
+| `flows` | `{default: …, strict: …}` | Named agent flows: name → ordered step list. `default` and `strict` are always present and neither can be redefined. A step is a kind string (`plan`, `test`, `build`, `review`, `verify`, `gates`) or a mapping with `kind` and optional `name`, `model`, `max_steps`, `loop` and `prove`. Exactly one gates step; one is inserted after the last review (else build) step when omitted |
+| `models` | `{}` | Model per step kind (`plan`, `test`, `build`, `review`, `verify`), e.g. `{review: "anthropic:claude-…"}`; over the prompt's frontmatter |
+| `max_steps` | `{}` | Model calls per agent run, per step kind (`plan`, `test`, `build`, `review`, `verify`); over the prompt's frontmatter |
 | `denied_commands` | `[]` | Extra regexes the agents' `run` tool refuses (git push/commit/reset…, `sudo`, `gh`, `terraform apply/destroy` and `factory` are built in) |
 | `sandbox.ro_binds` / `rw_binds` | rustup + uv read-only, `~/.cargo` writable | Host paths visible inside the sandbox (missing ones are skipped) |
 | `sandbox.hide` | cargo credentials | Files masked with `/dev/null` |
@@ -74,6 +75,7 @@ flows:
     - gates                       # reviewers only see changes that pass the gates
     - review
     - verify
+  default-trim: [plan, {kind: build, loop: [trim]}, review, verify]
   test-first:
     - plan
     - {name: tests, kind: build}  # prompt: .factory/agents/tests.md
@@ -81,7 +83,22 @@ flows:
     - review
 ```
 
-Steps follow `[plan]? build+ (review | gates)* [verify]?`. In `lean`, `careful` and `test-first`, a gates step is inserted after the last review; `gates-first` places it explicitly. Custom steps can set their own prompt, model and step limit as described under [Agent flows](architecture.md#agent-flows).
+Steps follow `[plan]? [test]? build+ (review | gates)* [verify]?`. There is at most one test step, directly before the first build step; it needs non-empty `test_paths`. In `lean`, `careful`, `default-trim` and `test-first`, a gates step is inserted after the last review; `gates-first` places it explicitly. Custom steps can set their own prompt, model and step limit as described under [Agent flows](architecture.md#agent-flows).
+
+A step mapping also takes **`loop`**, a list containing any of `trim`, `map`, `nudge` and `resume` once each. The first three work on any agent step: `trim` caps reads and clears old tool results, `map` adds a repository map and spec references, and `nudge` warns near the step limit and about repeated edits or failures. `resume` is valid only on build steps and carries the conversation into later attempts. **`prove`** is a boolean valid only on review steps: with `prove: true`, the reviewer gets sandboxed `run`, and CHANGES needs a reproduced failure or a `[scope]` blocker or major. Kind **`test`** runs the tester once before the builds; its tests are committed, red-checked and locked.
+
+The built-in `strict` flow combines those options and omits the planner. It is written out here for reference, not as a `flows:` entry to copy: like `default`, it cannot be redefined.
+
+```yaml
+strict:
+  - {kind: test, loop: [map, trim, nudge]}
+  - {kind: build, loop: [map, trim, nudge, resume]}
+  - gates
+  - {kind: review, prove: true, loop: [trim]}
+  - verify
+```
+
+Choose it with `flow: strict` or `factory run TASK --flow strict`; see [The strict flow](architecture.md#the-strict-flow) for the red check, lock and proof rules. To price one behaviour alone, the `default-trim` example above adds only `trim` to default's build step: bench it against `default` with `factory bench run --flow default --flow default-trim --repeat 3 --max-cost USD`.
 
 **A Rust workspace** with a dedicated e2e crate (`my-e2e`); changes to the core crates run the whole e2e suite:
 
@@ -262,7 +279,7 @@ Commands run as detached jobs under `$FACTORY_HOME/web/jobs/` that survive `fact
 |---|---|
 | `factory bench run [--case ID]… [--cases DIR] [--flow NAME]… [--model SPEC]… [--repeat N] [--max-cost USD] [--max-attempts N] [--parallel N] [--dry-run] [--no-sandbox]` | Run every selected case, variant and repeat. `--case` is repeatable and defaults to every case; `--cases DIR` loads that suite instead of the shipped one. `--flow` is repeatable and defaults to the config's `flow`; `--model` is repeatable and puts that model on every agent step, producing `FLOW@MODEL` variants (flows × models). `--repeat N` defaults to 1. `--max-cost USD` is the required total run budget, except with `--dry-run`. `--max-attempts N` defaults to 3 per cell. `--parallel N` defaults to 1 (sequential); larger values run up to N independent child processes. `--dry-run` prints variants, per-step models, provider key names and cells, then exits 0 without creating anything. `--no-sandbox` is unsafe, recorded in the results and flagged in reports |
 | `factory bench report [RUN] [--cells]` | Report `RUN`, defaulting to the newest run: its header, per-variant summary and solved counts per case. `--cells` adds each cell's outcome, attempts, cost, minutes and directory, including `not run` cells missing from an interrupted run |
-| `factory bench compare RUN_A RUN_B` | Compare shared variants and cases as A → B: solved counts, false passes, mean cost, mean attempts and mean minutes per variant, then solved counts per case. The header lists changed and one-sided cases, one-sided variants, and steps whose model or `prompt_sha` changed |
+| `factory bench compare RUN_A RUN_B` | Compare shared variants and cases as A → B: solved counts, false passes, mean cost, mean attempts and mean minutes per variant, then solved counts per case. The header lists changed and one-sided cases, one-sided variants, and steps whose model, `loop`, `prove` or `prompt_sha` changed |
 | `factory bench list` | List past runs newest first: id, start, case and variant counts, recorded cells of the expected total, and cost |
 | `factory bench cases [--cases DIR]` | List each available case's id, kind and title. `--cases DIR` reads your suite instead of the shipped fixtures |
 
@@ -270,7 +287,7 @@ A variant without `--model` uses the models resolved from the invoking repositor
 
 In a report, `solved` is `solved/eligible`, where eligible cells ended `solved`, `false_pass` or `failed`. `false` counts candidates that passed their own gates but failed hidden tests. `err/stop/skip/not run` separates errors, cost-limit stops, budget-skipped cells and cells absent after an interruption. `attempts`, `cost/cell` and `min/cell` are means over cells that ran, excluding `skipped` and `not run`; `total` is all recorded spend. A comparison's per-case and per-variant solved columns are counts, not percentages.
 
-`compare` also checks whether the two runs measured the same thing: a changed `fixture_sha` means the case files differ, and a changed step model or `prompt_sha` means the named variant's setup differs. Cases or variants present in only one run are named and omitted from the shared score tables. Treat small differences cautiously; use at least `--repeat 3` and compare like with like.
+`compare` also checks whether the two runs measured the same thing: a changed `fixture_sha` means the case files differ, and a changed step model, `loop`, `prove` or `prompt_sha` means the named variant's setup differs. Cases or variants present in only one run are named and omitted from the shared score tables. Treat small differences cautiously; use at least `--repeat 3` and compare like with like.
 
 ### A case directory
 
@@ -441,7 +458,12 @@ Each keeps their own board; GitHub is what they share. `factory sync && factory 
 | `… which the factory refuses; run it by hand` | The contract's verification runs a denied command. Do the task by hand, or `--skip-gates verification` |
 | `.factory/config.yaml: unknown key …` | A typo in the config; `factory config` shows what was understood |
 | `unknown flow NAME (flows: default, …)` | The `flow` or `--flow` value matches no flow in `flows`. `factory config` prints the defined names; use one or add it under `flows:` |
-| `flows.<name>.<step>: build steps come first (after any plan step) and are contiguous` (or `at most one plan step`, `the plan step must be first`, `at most one verify step`, `the verify step must be last`, `at least one build step is required`, `at most one gates step`) | The steps must follow `[plan]? build+ (review \| gates)* [verify]?`. Reorder them; see [Agent flows](architecture.md#agent-flows) |
+| `flows.<name>.<step>: build steps come first (after any plan or test step) and are contiguous` (or `at most one plan step`, `the plan step must be first`, `at most one test step`, `the test step must be directly before the first build step`, `at most one verify step`, `the verify step must be last`, `at least one build step is required`, `at most one gates step`) | The steps must follow `[plan]? [test]? build+ (review \| gates)* [verify]?`. Reorder them; see [Agent flows](architecture.md#agent-flows) |
+| `flow NAME has a test step: set test_paths in .factory/config.yaml` | A test-bearing flow needs globs where its tester may write. Set for example `test_paths: ["tests/**"]`; `factory run` refuses before any work without them |
+| `the tests pass before the change` | The test step's try was not red: its tests already hold without the change. The try is discarded and the step runs again with that feedback; after two failed tries the task fails before the build |
+| `COMMAND selects no tests: write the tests it names` | At the test commit, COMMAND names tests that do not exist. The try is discarded and the tester runs again with the reason; zero selected tests never counts as red |
+| The `acceptance_untouched` gate fails | The builder changed or removed a locked tester-written line, or deleted one of its files. The gate detail names each affected file. Lines may be added, but no line from the test commit may change or go; restore the locked content rather than weakening the test |
+| A review run is recorded as `APPROVE (unproven)` | A proving reviewer reported CHANGES, but no REPRO failed again and no blocker or major was tagged `[scope]`. The verdict becomes APPROVE; the findings and `## Proof` stay in the review report and PR for the human, and the verifier receives them |
 | Status `DEAD` | The `factory run` process died (killed, crashed). `factory status --refresh` marks it failed; run the task or its plan again |
 | `cannot stack TASK: its open dependencies conflict` | Merge one of the dependencies' PRs, `factory status --refresh`, then run again |
 | Status `conflict` | The PR no longer applies to its base. `factory run TASK` (or its plan) resolves it; see [Merge conflicts](architecture.md#merge-conflicts) |

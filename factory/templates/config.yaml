@@ -8,6 +8,9 @@ name: my-project
 plans: ["docs/plans/**/*.md"]
 exclude: []
 
+# Paths a `test` step may write (globs); required by a flow that has one.
+# test_paths: ["tests/**"]
+
 # Repository guidance appended to every agent's system prompt: the first file that exists.
 guidance: ["AGENTS.md", "CLAUDE.md"]
 
@@ -25,15 +28,17 @@ guidance: ["AGENTS.md", "CLAUDE.md"]
 # Commands for the unit_tests gate (omit for none).
 # unit_tests: ["pytest -q tests/unit"]
 
-# Models and step limits per role (plan, build, review, verify), over the shipped prompts' defaults.
-# A whole prompt can be replaced with .factory/agents/<planner|builder|reviewer|verifier>.md.
+# Models and step limits per role (plan, test, build, review, verify), over the shipped prompts' defaults.
+# A whole prompt can be replaced with .factory/agents/<planner|tester|builder|reviewer|verifier>.md.
 # models: {review: "openrouter:z-ai/glm-5.3"}
 # max_steps: {build: 150}
 
 # Agent flows: named step lists, chosen with `flow:` or per run with `factory run --flow NAME`.
 # The built-in `default` is plan, build, review, gates, verify. Steps follow
-# [plan] build+ (review | gates)* [verify]; a gates step goes after the last review when omitted.
+# [plan]? [test]? build+ (review | gates)* [verify]?; a gates step goes after the last review when omitted.
 # flow: default
+# strict: test step, resumed builds, gates first, a proving review.
+# flow: strict
 # flows:
 #   gates-first: [plan, build, gates, review, verify]   # reviewers only see changes that pass the gates
 #   lean: [build, review]                  # no planner and no verifier report; the gates still decide
