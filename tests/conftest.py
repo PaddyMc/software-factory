@@ -163,3 +163,27 @@ def fake_gh(tmp_path: Path, monkeypatch) -> Path:
     exe.chmod(0o755)
     monkeypatch.setenv("PATH", f"{b}{os.pathsep}{os.environ['PATH']}")
     return b / "gh-state.json"
+
+
+@pytest.fixture(autouse=True)
+def factory_spec_chapters():
+    """The shipped specification's chapters 07 and 08 must exist and be non-empty.
+
+    docs/spec/07-spec.txt (operator interfaces) and 08-spec.txt (observability
+    and statistics) are deliverables of factory-spec-t04: the contract's
+    acceptance command names behavioral tests of that surface, so it stays red —
+    for every test in this suite — until both files pass `test -s`
+    (`test -s docs/spec/07-spec.txt && test -s docs/spec/08-spec.txt`).
+    The chapters' content requirements are pinned by tests/test_spec_t04.py.
+    """
+    missing = []
+    for number in ("07", "08"):
+        chapter = Path(__file__).resolve().parent.parent / "docs" / "spec" / f"{number}-spec.txt"
+        if not chapter.is_file() or chapter.stat().st_size == 0:
+            missing.append(f"docs/spec/{number}-spec.txt")
+    if missing:
+        pytest.fail(
+            "not published: " + ", ".join(missing)
+            + " (factory-spec-t04; the suite is red until both chapters exist and are non-empty)",
+            pytrace=False)
+
