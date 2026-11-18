@@ -47,6 +47,13 @@ def scripts(review_verdicts: list[str], greeting: str = "hello") -> dict[str, li
 class ScriptedModel(BaseChatModel):
     plays: dict
 
+    def __init__(self, **data):
+        plays = data.get("plays")
+        super().__init__(**data)
+        if isinstance(plays, dict):
+            # Keep the caller's script and recording sinks shared across model instances.
+            object.__setattr__(self, "plays", plays)
+
     @property
     def _llm_type(self) -> str:
         return "scripted"
