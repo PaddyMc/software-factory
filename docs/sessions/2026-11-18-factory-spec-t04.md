@@ -19,4 +19,9 @@
 - `uv run --offline pytest -q tests/test_web.py::test_each_action_runs_its_factory_command_as_a_job tests/test_observe.py::test_transcripts_without_thoughts_print_as_before tests/test_stats.py::test_first_attempt_pass_rate_and_attempts_per_pr`
 - `uv run --offline pytest -q`
 
-Results: all commands exited 0. The spec acceptance suite passed 19 tests, the three contract-selected behavioral tests passed, and the full suite passed 473 tests. `git diff --check` and an AST check that every cited behavioral test function exists also exited 0.
+Results: all commands exited 0. The spec acceptance suite passed 19 tests, the three contract-selected behavioral tests passed, and the full suite passed 473 tests. `git diff --check` and AST checks that every cited behavioral test function and source symbol exists also exited 0.
+
+## Review follow-up
+
+- Corrected the `show`/`top` command map entries, run-record cardinality, log-follow termination, trace timing intervals, and the distinction between transcript run totals and trace headings after checking the exact shipped source.
+- Re-ran the spec suite (19 passed), the three contract-selected behavioral tests (3 passed), all citation checks, `git diff --check`, and the full suite (473 passed); every command exited 0.

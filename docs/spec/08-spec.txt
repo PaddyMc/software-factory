@@ -18,7 +18,7 @@ The evidence layers are related but not interchangeable:
 | Traces | A tabular rendering of one transcript: one row per model call, with model/tool time, context input, cached input, output and reasoning tokens, cost, tool calls and result sizes. | `factory trace` |
 | Transcripts | The recorded system prompt, task message, model messages, any model-provided reasoning, tool calls and tool results for one agent run. | `factory transcript`, web run pages |
 | Task records | Current board status, dependency/PR/stack metadata, candidate SHA, pid/liveness, progress, heartbeat/activity, note and aggregate task cost. | `factory status`, `factory top`, `factory show`, web board/task pages |
-| Run records | One row per role/attempt, including flow step, model, prompt version, start/end, outcome/report, transcript path, SHA, model calls, tokens, cost and refused tools. Non-agent work such as PR, verification and merge records also uses runs. | `factory show`, transcript/trace run selection, `factory stats` |
+| Run records | One row per role execution, labelled by role and attempt, including flow step, model, prompt version, start/end, outcome/report, transcript path, SHA, model calls, tokens, cost and refused tools. Non-agent work such as PR, verification and merge records also uses runs. | `factory show`, transcript/trace run selection, `factory stats` |
 | Stats | Aggregates over selected run and task sets, not another event stream and not a replacement for the underlying reports. | `factory stats --json` or its text tables |
 
 `factory/log.py:log_path` places ordinary task logs at
@@ -72,19 +72,22 @@ content. Reasoning, when supplied by the model, appears before that step's
 answer and tool calls. Tool results marked as refused are visibly flagged.
 
 A trace does not replay every message. `factory/observe.py:trace_rows` makes
-one row per AI event and associates following tool events with that call. Its
-model time measures from the preceding input/tool boundary to the AI event;
-tool time measures through the associated tool results. Input context is
+one row per AI event and associates following tool events with that call. The
+first model-time interval starts at the preceding task (`human`) event; each later
+interval starts at the previous AI event and therefore includes intervening
+tool time. Tool time separately measures from an AI event through its
+associated tool results. Input context is
 reported per call and summed across calls, so the total intentionally counts
 context re-sent at every step rather than unique tokens. Result sizes and the
 slowest/largest tools help explain context growth and latency.
 
-`factory trace` also prints the run record's aggregate calls and
-input/output/cost before the transcript-derived table. Consequently, an old
-or incomplete transcript does not cause the renderer to invent a new run
-record. A transcript with no model calls says so. Model-time cells lacking
-a timestamp print `-`; an old transcript does not fail merely because its
-events have no timestamps.
+`factory transcript` prints the selected run record's model, aggregate model
+calls, input/output tokens, cost and refused-tool count before rendering its
+transcript. `factory trace` instead prints the task/role/attempt heading and
+the transcript-derived table. An old or incomplete transcript does not cause
+either renderer to invent a new run record. A transcript with no model calls
+says so. Model-time cells lacking a timestamp print `-`; an old transcript
+does not fail merely because its events have no timestamps.
 
 3.2 Older records and optional fields
 

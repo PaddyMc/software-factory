@@ -30,12 +30,12 @@ underlying behavior is specified.
 | `factory run TARGET` | Run one task or supervise a plan. Targets may be task ids or plan names/paths; options select flows, attempts, parallelism, network access, cost limits and plan subsets. | `04-spec.txt`, pipeline; `05-spec.txt`, scheduler |
 | `factory stop TARGET` | Stop a live task run, or a plan run and its live child task runs. | Section 5 |
 | `factory bench SUBCOMMAND` | Run, score, report or compare evaluation cases, and list or inspect those cases and their records. | Bench subsystem; `08-spec.txt` for measurement interpretation |
-| `factory top [PLAN]` | Render the live terminal dashboard from stored board state, process liveness and recent logs; `--once` renders once. It does not refresh GitHub. | Section 7; `08-spec.txt` |
+| `factory top [PLAN]` | Render the live terminal dashboard from stored board state, process liveness and recent logs; `--once` renders once. It does not refresh GitHub. | Section 4; `08-spec.txt` |
 | `factory web` | Serve the local board and run forms, quick actions, transcripts, logs and background-job activity. | Section 7 |
 | `factory logs [TASK]` | Print or follow one task log; `--all` merges all task logs with task prefixes. | `08-spec.txt`, logs |
 | `factory trace TASK` | Render per-model-call timing, context, token, cache, reasoning, cost and tool summaries for the latest or every matching agent run. | `08-spec.txt`, traces |
 | `factory transcript TASK` | Render messages, model-provided reasoning, answers, tool calls and results for the latest or every matching agent run. | `08-spec.txt`, transcripts |
-| `factory show TASK` | Print run history, outcomes, reports, model/prompt metadata, token/cost measurements and diffs. | `08-spec.txt`, task/run records |
+| `factory show TASK` | Print task metadata and run history, outcomes, reports, model/prompt metadata and token/cost measurements. | `08-spec.txt`, task/run records |
 | `factory stats` | Aggregate task outcomes, attempts, costs, gate failures, reworks, merges and per-step measurements over the selected runs. | `08-spec.txt`, statistics |
 | `factory gates TASK` | Run deterministic gates against the selected ref and base without invoking agents. | `06-spec.txt`, gates and rework |
 | `factory requeue TASK…` | Return eligible held or failed tasks to `queued`, leaving running, PR-bearing and merged tasks alone. | Section 5.3 |
