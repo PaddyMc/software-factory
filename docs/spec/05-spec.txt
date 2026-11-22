@@ -1,0 +1,193 @@
+05 — Verification gates
+
+Code under discussion: baseline 8bd7012; docs/ is the spec. Everything outside
+this chapter's file is the factory's behavior, not something this task changes.
+Scope of this task: write this chapter only; no production-code change.
+
+1. Candidate, base, and publication barrier
+
+A gate run judges a committed candidate SHA in its isolated worktree. For an
+independent build, `base_sha` is the trunk tip as `origin` has it when that
+worktree is created (falling back to the local trunk, with a warning, when
+`origin` cannot be reached).
+For a stacked build it is the first open dependency's candidate, or the composed
+merge commit after the other open dependency candidates are merged. Conflict
+resolution instead records the new replay base. In all cases the task's diff is
+`base_sha..candidate_sha`; file gates and sandboxed commands run against the
+candidate worktree, not against an agent's uncommitted intentions. Source:
+factory/pipeline.py:create_worktree, replay_worktree, and Pipeline.gates.
+Dependency composition is exercised by
+tests/test_stack.py::test_stacking_on_two_open_prs_merges_them_into_the_base.
+
+Gates run in the configured flow's `gates` step. A failure sends its details back
+to the builder while attempts remain (stopping early when identical failures
+show no progress); exhaustion ends in `failed`. No failing or inconclusive gate
+opens a PR. During conflict, CI, or human-review rework, the old PR head remains
+published until a replacement has passed the required reviews, gates, and the
+summary step. Source: factory/pipeline.py:Pipeline.gates, graph, fail, and pr.
+Evidence: tests/test_pipeline.py::test_gate_failures_never_open_a_pr and
+tests/test_pipeline.py::test_failed_ci_fix_leaves_the_pr_alone.
+
+2. Evaluation order and when a gate is present
+
+The result list is assembled in this order. Conditional entries are absent when
+their stated configuration/input is absent; they are not silently converted into
+passes by an unrelated configuration value.
+
+  Order  Gate                  Presence and skip rule
+  1      clean                 Always; not name-skippable.
+  2      diff                  Always; not name-skippable.
+  3      conflict_markers      Always; not name-skippable.
+  4      plan_untouched        Always; not name-skippable.
+  5      acceptance_untouched  Only with the flow test step's test_commit.
+  6      session_log           Only when session_log is configured.
+  7      e2e_written           Only when e2e is configured.
+  8      verification          Always appended; `--skip-gates verification`
+                               gives a skipped result instead of running it.
+  9      unit_tests            Only with configured unit_tests commands;
+                               skippable as `--skip-gates unit_tests`.
+  10     e2e_tests             Only with e2e plus run_new/run_all configuration.
+
+For e2e_tests, SKIP is produced only by `--skip-gates e2e_tests`; having no new
+test and no selected suite is a FAIL, while --full-e2e selects the configured
+run_all suite. The full suite does not waive the separate e2e_written gate.
+There is no `--skip-gates ALL` escape hatch: the cheap gates, acceptance,
+session_log, and e2e_written do not consult the skip-name tuple. Source:
+factory/gates.py:CHEAP, ALL, and run_gates.
+
+A command gate skipped by name has `ok=None`, displays `skip`, and is accepted
+by `passed`; a false gate is not accepted. The PR retains the result table so a
+skip remains visible. The ordinary configured path and the minimal no-config
+path are named by
+tests/test_gates.py::test_good_change_passes_all_cheap_gates_and_verification and
+tests/test_gates.py::test_without_a_config_only_the_universal_gates_run.
+Rendering is covered by tests/test_gates.py::test_table_can_shorten_long_details.
+
+3. What the structural gates enforce
+
+3.1 clean and diff
+
+clean requires both `HEAD == candidate_sha` and empty `git status --porcelain`.
+It therefore catches a moved head as well as tracked or untracked leftovers.
+Evidence: tests/test_gates.py::test_dirty_or_moved_head_fails_clean_gate.
+
+diff requires at least one path in `base..candidate`. It also annotates changed
+paths that match configured lockfiles, but a lockfile annotation is not itself a
+failure. A clean candidate with no diff still fails. Source for both gates:
+factory/gates.py:changed_files and run_gates.
+
+3.2 conflict_markers and plan_untouched
+
+conflict_markers examines ADDED lines in the `base..candidate` patch and reports
+`path:line` for line-initial `<<<<<<<`, `|||||||`, or `>>>>>>>` conflict syntax.
+Because it reads the patch rather than every base file, old untouched markers do
+not condemn an unrelated candidate. The builder still has to remove markers
+introduced by its resolution before this gate can pass. Source:
+factory/gates.py:CONFLICT_MARKER and conflict_markers. Evidence:
+tests/test_gates.py::test_conflict_markers_fail_the_gate.
+
+plan_untouched checks whether the exact `task.plan` path occurs in the changed
+path set. Code, tests, and other documentation may change; the contract's plan
+file may not. This is a path-membership check, not a configurable prohibition on
+every file below docs/plans/. Source: factory/gates.py:run_gates. Evidence:
+tests/test_gates.py::test_any_file_may_change_but_the_plan.
+
+3.3 acceptance_untouched
+
+When a flow has a test step, that step commits the acceptance tests before the
+builder and records their commit as `test_commit`, their paths as `test_files`,
+and the commands observed red as `test_red`. The gate compares each locked file
+from `test_commit..candidate_sha`. Every listed file must still exist and its
+patch must contain no removed lines (file-header `---` lines excluded). Added
+lines are allowed; changing or deleting a line written by the test step is not.
+The recorded red commands explain the lock in the gate detail. Without a test
+commit the gate is absent entirely. Source: factory/pipeline.py:Pipeline.test and
+factory/gates.py:run_gates. Evidence:
+tests/test_gates.py::test_acceptance_untouched_allows_added_lines_only,
+tests/test_gates.py::test_acceptance_untouched_is_absent_without_a_test_commit,
+and tests/test_pipeline.py::test_a_builder_that_edits_a_locked_test_fails_the_gate.
+
+3.4 session_log: repository convention versus the predicate
+
+The project convention is to add ONE NEW file
+
+    docs/sessions/<today>-<task id>.md
+
+using the execution date, and not to edit another task's session file. For this
+task that means `docs/sessions/2026-11-22-factory-spec-t03.md`.
+
+The mechanical gate is intentionally less expressive. With `session_log`
+configured, it passes when ANY path in the candidate diff starts with the
+configured directory prefix. Its failure detail suggests
+`<prefix><today>-<task.id>.md`, but the predicate does NOT verify the date, task
+ID, `.md` suffix, file contents, or that the path is newly added rather than an
+edit to an existing log. The stricter one-new-file naming rule therefore comes
+from the project instructions, not from this gate. Source:
+factory/gates.py:run_gates. The missing-log failure is covered by
+tests/test_gates.py::test_missing_e2e_and_session_log_fail.
+
+3.5 e2e_written
+
+When e2e is configured, every task candidate must add at least one parseable e2e
+test beneath the configured e2e directory/suffix. The parser recognizes added
+Python `def test_*`/`async def test_*` functions and Rust `#[test]` or
+`#[tokio::test]` functions. Merely changing implementation code or running an
+old suite does not satisfy e2e_written. Source:
+factory/gates.py:new_e2e_tests and run_gates. Evidence:
+tests/test_gates.py::test_new_e2e_parser_finds_async_tests,
+tests/test_gates.py::test_python_e2e_tests_are_detected_and_run, and
+tests/test_gates.py::test_missing_e2e_and_session_log_fail.
+
+4. Command selection, failure, and inconclusive results
+
+verification runs the contract's commands. unit_tests runs the configured unit
+commands. For e2e_tests, run_all is selected by --full-e2e or by a changed path
+matching run_all_when; otherwise each newly parsed test gets its formatted
+run_new command. If new tests exist but run_new is absent, run_all is used. With
+commands configured but no new test and no full/chain-triggered suite, e2e_tests
+fails with `nothing to run: no new e2e test`. Source:
+factory/gates.py:run_gates. Selection evidence:
+tests/test_gates.py::test_new_e2e_tests_run_by_name_and_chain_paths_run_the_suite.
+
+`run_named` sends every selected command through the candidate's sandbox and
+requires every classification to be `pass`; it records exit code and, when
+parsed, test count. A nonzero exit is `fail`, except pytest exit 5 (no tests
+collected), which is `inconclusive`. On exit zero, an ordinary non-test command
+passes, but a recognized pytest, cargo-test, or unittest command whose parsed
+test count is zero is `inconclusive`. Both `fail` and `inconclusive` make the
+gate false; neither is publishable. Source: factory/gates.py:run_gates and
+factory/verification.py:classify and is_test_command. Evidence:
+tests/test_verification.py::test_nonzero_exit_fails,
+tests/test_verification.py::test_non_test_command_passes_on_zero_exit, and
+tests/test_verification.py::test_zero_filtered_test_is_not_pass.
+
+`tests_run` totals cargo passed/failed results, reads unittest's `Ran N tests`,
+and reads only anchored pytest summary lines (including no-tests/deselected and
+`running 0 tests` forms). This avoids counting arbitrary prose that merely looks
+like a pytest summary. Source: factory/verification.py:tests_run. Evidence:
+tests/test_verification.py::test_tests_that_ran_pass,
+tests/test_verification.py::test_unittest_output_counts_tests, and
+tests/test_verification.py::test_only_pytests_summary_line_counts_the_tests.
+
+A zero-test result is explicitly not green. For example, the locked test's fake
+sandbox returns exit 0 and `collected 0 items / no tests ran`, producing:
+
+    [inconclusive] exit=0 tests=0 uv run --offline pytest -q
+    FAIL e2e_tests — no publishable test run
+
+That exact command name is illustrative; the significant facts are exit 0,
+`tests=0`, and `inconclusive`. A successful wrapper cannot launder a zero-test
+selection into a pass.
+
+There is also a pre-flight distinction: `manual_reason` rejects a contract whose
+verification command matches the factory's or project's denied-command patterns,
+because a human must run it. Naming `verification` in --skip-gates bypasses that
+pre-flight refusal and skips the command gate; it does not make a refused command
+run. Source: factory/gates.py:manual_reason and factory/cli.py:cmd_run_one.
+Evidence: tests/test_gates.py::test_a_verification_the_factory_refuses_makes_a_task_manual
+and tests/test_pipeline.py::test_run_refuses_a_manual_contract.
+
+Finally, the PR body keeps the gate outcomes auditable: its Checks paragraph
+reports the gate count, command/test counts where available, review verdicts,
+build attempt, and candidate SHA. Source: factory/prbody.py:checks_paragraph.
+Evidence: tests/test_prbody.py::test_checks_paragraph_counts_gates_tests_and_verdicts.
