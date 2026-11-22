@@ -477,7 +477,7 @@ Each keeps their own board; GitHub is what they share. `factory sync && factory 
 | A PR body says `… kept N of M characters: factory show TASK --step STEP` | The block was capped to keep the body under its 60,000-character limit. Run the command it names for the whole report; `factory show TASK` has the planner's plan and every agent's full report |
 | `… not the factory's candidate: someone pushed to it` | A commit the factory didn't make is on the PR branch, so its CI isn't the factory's to fix. Fix it there, or `factory run TASK --force` to rebuild |
 | A CI fix `failed` | The PR still holds the failing head. Run the task again to rebuild it from scratch on the trunk |
-| `⚠ stopped: step limit` in the log | The agent used `max_steps`. Raise it with `max_steps: {ROLE: N}` in `.factory/config.yaml`, or narrow the task |
+| `⚠ stopped: step limit` in the log | The agent used `max_steps`. Raise it with `max_steps: {ROLE: N}` in `.factory/config.yaml`, or narrow the task. A review that stops there without a verdict gets one more call, without tools, for its final review (`nudge: verdict` in the log) |
 | `factory prompt` or the run log prints `⚠ <step>'s prompt has no VERDICT: line; every review will count as CHANGES` | A custom review prompt without `VERDICT: APPROVE` and `VERDICT: CHANGES` lines fails safe to CHANGES, so every attempt is spent. Add the verdict lines to `.factory/agents/<step>.md` (or its kind's override) |
 | Gates fail on network or dependency fetches | The sandbox is offline. Fetch dependencies first, or pass `--network` for tasks that download |
 | A tool is "not found" inside the sandbox | It lives under `$HOME`, which is hidden. Add its directory to `sandbox.ro_binds` and `sandbox.path` |

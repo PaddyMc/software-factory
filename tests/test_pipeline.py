@@ -369,6 +369,22 @@ def test_no_progress_stops_before_max_attempts(factory_repo, home, fake_gh, monk
     assert "no progress" in (home / "logs/demo-t01.log").read_text()
 
 
+def test_a_review_out_of_calls_gives_its_verdict_instead_of_another_build(factory_repo, home, fake_gh, monkeypatch):
+    """Regression: a review that ran out of model calls before its VERDICT line counted as CHANGES and sent
+    the task back to the builder; factory-spec-t04 built three times, twice for reviews with no verdict."""
+    (factory_repo / ".factory/agents/reviewer.md").write_text(
+        "---\nmodel: fake:reviewer\nmax_steps: 1\n---\nYou are the REVIEWER for one task.\n")
+    git(factory_repo, "commit", "-q", "-am", "reviewer: one call")
+    git(factory_repo, "push", "-q", "origin", "main")
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))   # git_diff, then the verdict
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    assert db.task("demo-t01")["attempts"] == 1
+    assert [(r["role"], r["outcome"]) for r in db.runs("demo-t01") if r["role"] in ("build", "review")] == [
+        ("build", "committed"), ("review", "APPROVE (step limit)")]
+
+
 def test_run_refuses_a_manual_contract(factory_repo, home, monkeypatch, capsys):
     plan = factory_repo / "docs/plans/demo/demo.md"
     plan.write_text(plan.read_text().replace('verification: ["grep -q hello src/greet.txt"]',
