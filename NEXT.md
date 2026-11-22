@@ -21,6 +21,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 14 | A review without a verdict costs a rebuild, a task gets one build per attempt, and nothing picks the default flow from data. Planned: [flow-tuning](docs/plans/flow-tuning.md) | medium | 8, 9 |
 | 15 | Specify the shipped factory for implementers. Planned in [factory-spec](docs/plans/factory-spec.md) | medium | shipped factory |
 | 16 | Nothing reviews a change for security, and a builder can rewrite its reviewer's guidance. Planned: [security-review](docs/plans/security-review.md) | medium | 9, 14 |
+| 17 | Plans can't be read on the web page, and a task doesn't link to the plan that explains it. Planned: [plan-pages](docs/plans/plan-pages.md) | small | 10 |
 
 ## 1. Act on human PR review comments
 
@@ -218,3 +219,13 @@ The [factory-spec plan](docs/plans/factory-spec.md) covers the behavior shipped 
 - `security:` in `.factory/config.yaml` turns on two gates. `secrets` fails on credential-shaped strings in added lines. `guarded_paths` fails on changes to CI, `.factory/`, skills, guidance, lockfiles and configured globs that the contract doesn't name.
 - A `security` step kind ships with its own prompt, the repository's threat model, and a verdict the factory computes from its findings. Only critical or high findings with high confidence and an exploit block, and the builder gets only those. The rest go to a visible Security section in the PR.
 - A built-in flow, `secure`, is gates-first plus a security step. A command that reviews any ref or PR, and a crew that audits the existing codebase, are out of scope.
+
+## 17. Read plans in the web page
+
+**Gap.** The web page shows each plan as a strip of tasks. The plan doc that explains them, with its decisions, milestones, design and risks, is readable only in an editor or on GitHub, where contracts show no status. A task page's breadcrumb and spec refs don't reach the plan, and nothing says when a plan file and the board disagree.
+
+**Plan.** [docs/plans/plan-pages.md](docs/plans/plan-pages.md) (planned 2026-11-18, tasks `plan-pages-t01`…`t04`):
+- `factory web` gets a Plans page and a page per plan, rendered by a built-in Markdown subset with no new dependency.
+- Each contract becomes a task row with its board status, and task ids and other plans become links.
+- When the file and the board disagree, a notice offers Load plans.
+- Board cards, task breadcrumbs and spec refs link into the plan pages.
