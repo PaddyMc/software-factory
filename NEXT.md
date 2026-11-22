@@ -23,6 +23,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 16 | Nothing reviews a change for security, and a builder can rewrite its reviewer's guidance. Planned: [security-review](docs/plans/security-review.md) | medium | 9, 14 |
 | 17 | The bench can't rank flows: every variant solves every shipped case, and comparisons have no error bars. Planned: [evals](docs/plans/evals.md) | medium | 8, 14 |
 | 18 | Agents can't look anything up: no web search or page reading, no planner shell, installed Python packages unreadable. Planned: [web-tools](docs/plans/web-tools.md) | medium | 16, 17 |
+| 19 | Plans can't be read on the web page, and a task doesn't link to the plan that explains it. Planned: [plan-pages](docs/plans/plan-pages.md) | small | 10 |
 
 ## 1. Act on human PR review comments
 
@@ -251,3 +252,13 @@ How much this costs is unclear. On this repository's board, 1,092 agent commands
 - Every fetch refuses private addresses and the repository's own remote, honours allow and block lists, caps sizes, frames pages as untrusted and is recorded in the transcript.
 - A plan step can set `shell: readonly`, and `dependency_sources` accepts `{root}` and globs for installed packages.
 - A bench trial on the mined suite decides whether strict with web, or with the planner shell, replaces strict.
+
+## 19. Read plans in the web page
+
+**Gap.** The web page shows each plan as a strip of tasks. The plan doc that explains them, with its decisions, milestones, design and risks, is readable only in an editor or on GitHub, where contracts show no status. A task page's breadcrumb and spec refs don't reach the plan, and nothing says when a plan file and the board disagree.
+
+**Plan.** [docs/plans/plan-pages.md](docs/plans/plan-pages.md) (planned 2026-11-18, tasks `plan-pages-t01`…`t04`):
+- `factory web` gets a Plans page and a page per plan, rendered by a built-in Markdown subset with no new dependency.
+- Each contract becomes a task row with its board status, and task ids and other plans become links.
+- When the file and the board disagree, a notice offers Load plans.
+- Board cards, task breadcrumbs and spec refs link into the plan pages.
