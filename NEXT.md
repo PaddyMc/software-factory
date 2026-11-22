@@ -22,6 +22,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 15 | Specify the shipped factory for implementers. Planned in [factory-spec](docs/plans/factory-spec.md) | medium | shipped factory |
 | 16 | Nothing reviews a change for security, and a builder can rewrite its reviewer's guidance. Planned: [security-review](docs/plans/security-review.md) | medium | 9, 14 |
 | 17 | Plans can't be read on the web page, and a task doesn't link to the plan that explains it. Planned: [plan-pages](docs/plans/plan-pages.md) | small | 10 |
+| 18 | The backlog moves only while someone is at the terminal. Planned: [devbox](docs/plans/devbox.md) | medium | — |
 
 ## 1. Act on human PR review comments
 
@@ -114,6 +115,8 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 **Gap.** Runs need this machine on. agent-orchestrator and Open SWE run in hosted workspaces.
 
 **Sketch.** First, a shared board: state in a server database (Postgres, say) instead of the local SQLite file, so agents run on a cloud box while you watch from the laptop. Keep the offline bubblewrap sandbox. The box needs dependencies fetched ahead of time, since the sandbox is offline, and its own `gh` login. Lowest priority: local runs are a deliberate trade for the offline sandbox.
+
+[Item 18](#18-run-the-backlog-unattended) covers the part that needs neither a shared board nor hosted workspaces: one long-running worker on one remote box, watched with `factory web` over `ssh -L`.
 
 ## 7. Reshape the agent flow
 
@@ -235,3 +238,21 @@ The [factory-spec plan](docs/plans/factory-spec.md) covers the behavior shipped 
 - Each contract becomes a task row with its board status, and task ids and other plans become links.
 - When the file and the board disagree, a notice offers Load plans.
 - Board cards, task breadcrumbs and spec refs link into the plan pages.
+
+## 18. Run the backlog unattended
+
+**Gap.** The backlog moves only while someone is at the terminal:
+- `factory run PLAN` runs one plan and ends when nothing more can start. A task whose dependency is in another plan waits until someone reruns its plan.
+- Merges, CI failures, review requests and conflicts reach the board only through `factory status --refresh`, and a plan run refreshes once, when it starts.
+- New plans and factory fixes reach the board only when someone pulls the checkout and runs `factory sync`.
+- A docs plan needs `--flow gates-first` typed by hand every time.
+- Nothing caps what a day of runs spends.
+
+**Seen in.** [agent-orchestrator](https://github.com/ComposioHQ/agent-orchestrator) and [Open SWE](https://blog.langchain.com/introducing-open-swe-an-open-source-asynchronous-coding-agent) keep workers running against a queue of tasks.
+
+**Plan.** [docs/plans/devbox.md](docs/plans/devbox.md) (planned 2026-11-22, tasks `devbox-t01`…`t06`, independent of the other plans):
+- `factory start --budget USD` is a foreground worker for any box that can run the factory. Every poll it loads the plans and checks GitHub, starts each ready task across every plan up to `--parallel`, reworks PRs that conflict, fail CI or get review requests, and waits for your merges. Keeping it alive and setting up the box stay yours.
+- `--budget` caps the day's spend, counted from the board since 00:00 UTC. Each failed task is retried once a UTC day.
+- When the checkout is clean and on the trunk, the worker fast-forwards it to origin after its task runs finish, and restarts itself when the factory's own code changed.
+- `plan_flows:` in `.factory/config.yaml` gives a plan its flow, for every way a task runs.
+- `factory status`, `factory top` and the web board show the worker, and `factory stop worker` stops it.
