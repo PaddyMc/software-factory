@@ -235,6 +235,9 @@ DIFF_LIMIT = 20000
 GATE_TABLE_WIDTH = 160
 SHRUNK_LIMIT = 2000
 TEST_TRIES = 2
+# A test try that wrote nothing when every test command already passed before the change: a documentation
+# or spec task whose commands name existing tests. The step passes and the build starts without a lock.
+NO_TESTS_NEEDED = "no tests needed"
 
 
 def _diff(root: Path, a: str, b: str, paths: tuple[str, ...]) -> str:
@@ -289,6 +292,7 @@ class Pipeline:
         # flow with a test step gets a second no-change baseline once its acceptance tests are committed.
         self.start_sha = opts.rework.old_candidate if opts.rework else base_sha
         self.test_sha: str | None = None
+        self.passing_before: tuple[str, ...] = ()   # test commands that already pass at the base, if all do
         # The flow's shape: [plan]? [test]? build+ (review | gates)* [verify]? (validated in flows.py).
         steps = opts.flow.steps
         self.plan_step = steps[0] if steps[0].kind == "plan" else None
@@ -385,6 +389,8 @@ class Pipeline:
         paths = git(self.wt, "diff", "--cached", "--name-only", self.base_sha).splitlines()
         empty = ((), (), ())
         if not paths:
+            if self.passing_before:
+                return out, NO_TESTS_NEEDED, "", None, *empty
             return out, "no-changes", "The try wrote no tests.", None, *empty
         outside = [p for p in paths if not globs.matches_any(p, self.opts.config.test_paths)]
         if outside:
@@ -407,6 +413,17 @@ class Pipeline:
             return out, "not-red", "the tests pass before the change", None, *empty
         return out, "committed", "", sha, tuple(paths), tuple(red), tuple(passing)
 
+    def _passing_at_base(self) -> tuple[str, ...]:
+        """The acceptance commands when every one selects tests and passes before the change, else ().
+        Then the contract names only existing tests, as a documentation or spec task does, and a tester
+        that writes nothing has nothing to turn red. A command naming a test yet to be written fails here."""
+        commands = self._acceptance_commands(self.base_sha)
+        passing = all(verification.classify(c, (r := self.sandbox.run(c)).code, r.output) == verification.PASS
+                      for c in commands)
+        git(self.wt, "reset", "-q", "--hard", self.base_sha)   # leave the tester the base as it was
+        git(self.wt, "clean", "-q", "-fd")
+        return tuple(commands) if commands and passing else ()
+
     def test(self, s: State) -> State:
         """Write, commit and red-check the acceptance tests once, before the first build."""
         step = self.test_step
@@ -416,17 +433,24 @@ class Pipeline:
             self.role("test", "building", 0, lambda: (None, "skipped", reason, None), step=step.name)
             return {"feedback": ""}
         feedback = s.get("feedback", "")
+        self.passing_before = self._passing_at_base()
+        if self.passing_before:
+            self._event(step.name, "every test command already passes before the change; "
+                                   "a try that writes no tests passes the step")
+        bullets = lambda commands: "\n".join(f"- `{c}`" for c in commands) or "- (none)"
         for number in range(1, TEST_TRIES + 1):
-            ctx = self.ctx({**s, "attempt": number, "feedback": feedback})
+            ctx = self.ctx({**s, "attempt": number, "feedback": feedback}, passing_before=self.passing_before)
             result = {}
 
             def run():
                 out, outcome, reason, sha, files, red, passing = self._test_try(ctx)
                 report = out.text
                 if outcome == "committed":
-                    bullets = lambda commands: "\n".join(f"- `{c}`" for c in commands) or "- (none)"
                     report += ("\n\n# Red check\n\nRed commands:\n" + bullets(red)
                                + "\n\nAlready passing:\n" + bullets(passing))
+                elif outcome == NO_TESTS_NEEDED:
+                    report += ("\n\n# Red check\n\nNo tests written: these commands already pass before the change, "
+                               "so the build starts without locked tests.\n" + bullets(self.passing_before))
                 result.update(outcome=outcome, reason=reason, sha=sha, files=files, red=red, report=report)
                 return out, outcome, report, sha
 
@@ -435,6 +459,8 @@ class Pipeline:
                 self.test_sha = result["sha"]
                 return {"test_sha": result["sha"], "test_step": step.name, "test_report": result["report"],
                         "test_files": list(result["files"]), "red_commands": list(result["red"]), "feedback": ""}
+            if result["outcome"] == NO_TESTS_NEEDED:
+                return {"test_step": step.name, "test_report": result["report"], "feedback": ""}
             feedback = result["reason"]
             git(self.wt, "reset", "-q", "--hard", self.base_sha)
             git(self.wt, "clean", "-q", "-fd")
