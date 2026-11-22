@@ -23,6 +23,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 16 | Nothing reviews a change for security, and a builder can rewrite its reviewer's guidance. Planned: [security-review](docs/plans/security-review.md) | medium | 9, 14 |
 | 17 | Plans can't be read on the web page, and a task doesn't link to the plan that explains it. Planned: [plan-pages](docs/plans/plan-pages.md) | small | 10 |
 | 18 | The backlog moves only while someone is at the terminal. Planned: [devbox](docs/plans/devbox.md) | medium | — |
+| 19 | Building a box for the worker is by hand. Planned: [deploy](docs/plans/deploy.md) | medium | 18 |
 | 20 | Follow a task’s agent thoughts across runs and retries in the terminal and web UI. [Thought timeline](docs/plans/thought-timeline.md) | small | 10, 12 (shipped) |
 
 ## 1. Act on human PR review comments
@@ -254,3 +255,12 @@ The [factory-spec plan](docs/plans/factory-spec.md) covers the behavior shipped 
 ## 20. Follow a task's agent thoughts
 
 Today an operator opens a separate transcript for each agent run. The [thought timeline](docs/plans/thought-timeline.md) brings every recorded thought for one task into `factory thoughts TASK` and a **Thoughts** link on the task page. Each entry identifies the agent, attempt and turn, shows the tool names or a short reply excerpt, and points to its full transcript. The CLI can follow and the web page refreshes as replies arrive. No current workstream waits on this one.
+
+## 19. Deploy a devbox
+
+**Gap.** [Item 18](#18-run-the-backlog-unattended)'s worker runs on any box, but building one is by hand: a server, a working bubblewrap, uv and gh, an authenticated gh, the provider key, the repository and a matching factory. Each step can go wrong in a way that shows only hours later, and the easy way to authenticate gh copies a broad personal token onto a server.
+
+**Plan.** [docs/plans/deploy.md](docs/plans/deploy.md) (planned 2026-11-22, tasks `deploy-t01`…`t04`, after [devbox](docs/plans/devbox.md)):
+- `factory deploy` creates a Hetzner box with Terraform or OpenTofu and the `hcloud` provider, from a module the factory ships. The state lives under `$FACTORY_HOME/deploy/NAME/`. The firewall allows SSH only, and cloud-init sets up a `factory` user without sudo, bubblewrap, uv and gh.
+- It then bootstraps the box over SSH. The provider keys and a fine-grained GitHub token scoped to the repository travel on ssh's standard input, never in `user_data` or the state. It clones the repository, installs the same factory, checks the sandbox, runs `factory sync`, and prints how to start `factory start`.
+- Running it again updates the box. `factory deploy --destroy --yes` deletes it. Starting the worker stays yours.

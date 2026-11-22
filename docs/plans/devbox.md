@@ -396,7 +396,7 @@ The same line sits under `factory top`'s header and above the plans on the web b
 ## Cross-Workstream Coordination
 
 - **Depends on:** none. `devbox-t01` can run once this plan is merged and synced.
-- **Required by:** none.
+- **Required by:** [deploy](deploy.md). `deploy-t01` waits for `devbox-t06`, so `factory deploy` builds a box for the finished worker.
 - **Overlaps, with no ordering:**
   - [steer](steer.md) `steer-t01` changes `factory/cli.py` and `factory/db.py`, and [security-review](security-review.md) `security-review-t06` changes `factory/cli.py`.
   - `security-review-t02` changes `factory/config.py`.
