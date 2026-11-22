@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from factory import agents, observe, prices
 from factory.agents import Ctx, LangChainRoles, recursion_limit
@@ -46,6 +46,72 @@ def test_hitting_the_step_limit_is_reported_not_raised(tmp_path, monkeypatch):
     assert {"type": "stopped", "reason": "step limit", "steps": 5} in events
     assert any("⚠ stopped: step limit" in e.get("msg", "") for e in events)
 
+
+
+def _reviewer_roles(tmp_path, max_steps):
+    d = tmp_path / ".factory/agents"
+    d.mkdir(parents=True)
+    (d / "reviewer.md").write_text(f"---\nmodel: fake:x\nmax_steps: {max_steps}\n---\n"
+                                   "You are the REVIEWER. End with VERDICT: APPROVE or VERDICT: CHANGES.\n")
+    return LangChainRoles(tmp_path)
+
+
+class Recording(ScriptedModel):
+    """Records how tools were bound and every request the model was sent."""
+    def bind_tools(self, tools, **kwargs):
+        self.plays["_binds"].append(kwargs)
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.plays["_seen"].append(list(messages))
+        return super()._generate(messages, stop, run_manager, **kwargs)
+
+
+def _review_plays(*script):
+    return {"REVIEWER": list(script), "_calls": [], "_verdicts": [], "_binds": [], "_seen": []}
+
+
+def test_a_review_out_of_calls_gets_one_more_call_for_its_verdict(tmp_path, monkeypatch):
+    """Regression: a review that ran out of model calls before its VERDICT line counted as CHANGES, skipping
+    a proving review's proof and costing another build (factory-spec-t04 built three times for it)."""
+    report = "## Findings\n1. [minor] fine\n\nVERDICT: APPROVE"
+    plays = _review_plays(call("list_dir", path="."), call("list_dir", path="."), AIMessage(report))
+    monkeypatch.setattr(agents, "build_model", lambda spec: Recording(plays=plays))
+    events = []
+    out = _reviewer_roles(tmp_path, 2).review(_ctx(tmp_path, events))
+
+    assert out.verdict == "APPROVE" and out.text == report
+    assert out.stopped == "step limit" and out.steps == 3          # the limit is still reported
+    closing = plays["_seen"][-1]
+    assert isinstance(closing[-1], HumanMessage) and closing[-1].content == agents.VERDICT_CALL
+    assert sum(isinstance(m, ToolMessage) for m in closing) == 2   # it judges from what it already read
+    assert not any(str(m.content).startswith(agents.CALL_LIMIT_MARKER) for m in closing)
+    assert plays["_binds"][-1].get("tool_choice") == "none"
+    assert {"type": "nudge", "kind": "verdict", "text": agents.VERDICT_CALL} in events
+
+
+def test_a_review_with_its_verdict_gets_no_extra_call(tmp_path, monkeypatch):
+    plays = _review_plays(call("list_dir", path="."), AIMessage("VERDICT: CHANGES"))
+    monkeypatch.setattr(agents, "build_model", lambda spec: Recording(plays=plays))
+    events = []
+    out = _reviewer_roles(tmp_path, 2).review(_ctx(tmp_path, events))
+    assert out.verdict == "CHANGES" and out.steps == 2 and out.stopped is None
+    assert len(plays["_seen"]) == 2 and not any(e["type"] == "nudge" for e in events)
+
+
+def test_a_failed_verdict_call_leaves_the_review_without_a_verdict(tmp_path, monkeypatch):
+    class FailsToClose(Recording):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            if messages[-1].content == agents.VERDICT_CALL:
+                raise RuntimeError("502: provider unavailable")
+            return super()._generate(messages, stop, run_manager, **kwargs)
+
+    plays = _review_plays(call("list_dir", path="."))
+    monkeypatch.setattr(agents, "build_model", lambda spec: FailsToClose(plays=plays))
+    events = []
+    out = _reviewer_roles(tmp_path, 1).review(_ctx(tmp_path, events))
+    assert out.verdict == "CHANGES" and out.stopped == "step limit" and out.steps == 1
+    assert any("⚠ verdict call failed: RuntimeError: 502" in e.get("msg", "") for e in events)
 
 def test_a_failing_tool_call_goes_back_to_the_model(tmp_path, monkeypatch):
     """Regression: list_dir on a directory the task is meant to create raised FileNotFoundError and killed the run."""
