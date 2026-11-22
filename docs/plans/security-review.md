@@ -522,6 +522,7 @@ These run in `tests/test_pipeline.py`, driving the real CLI, pipeline, agents, g
   - [measure](measure.md), merged. The security rules and threat model count toward the prompt version, and `factory stats` gains the security CHANGES rate.
   - [pr-descriptions](pr-descriptions.md), merged. The Security section and block are placed in, and shrink with, its body layout.
 - **Required by:**
+  - [external-evals](external-evals.md). Its by-hand `external-evals-t10` depends on `security-review-t06` and runs the built-in `secure` flow against `strict` on SWE-bench Pro and PatchEval, so the security step is measured on real vulnerability fixes.
   - [wiki](wiki.md). `wiki-t01` depends on `security-review-t06` and `wiki-t07` on `security-review-t07`. Wiki changes the same `agents.py`, `gates.py`, `cli.py` and docs, and its task agents' guidance comes from t01's main-checkout read. A `security` step gets a role page only if the wiki has one for it.
 
 ## Notes / Out of Scope
