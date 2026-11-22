@@ -2040,6 +2040,71 @@ def test_a_verification_command_that_selects_no_tests_sends_the_tester_back(
     assert not any(role == "BUILDER" for role, _ in calls)
 
 
+EXISTING = ('import unittest\n\n\nclass ExistingTest(unittest.TestCase):\n'
+            '    def test_existing(self):\n        self.assertTrue(True)\n')
+
+
+def _existing_tests_only(repo):
+    """demo-t01's test command names a test that already exists and passes, as a docs or spec task's does."""
+    (repo / "tests/test_existing.py").write_text(EXISTING)
+    plan = repo / "docs/plans/demo/demo.md"
+    plan.write_text(plan.read_text().replace("python3 -m unittest tests.test_greet",
+                                             "python3 -m unittest tests.test_existing"))
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "name an existing test")
+    git(repo, "push", "-q", "origin", "main")
+
+
+def test_a_tester_that_writes_no_tests_passes_when_the_commands_already_pass(
+        factory_repo, home, fake_gh, monkeypatch):
+    """factory-spec-t02: a spec task whose test commands name existing, passing tests needs no new test. Its
+    tester rightly wrote none, and the step failed twice with "The try wrote no tests." before any build."""
+    _test_flow(factory_repo, planner=False, strict=True)
+    _existing_tests_only(factory_repo)
+    plays = scripts(review_verdicts=["APPROVE"])
+    plays["TESTER"] = [AIMessage("No new test is needed: the task changes only documentation.")]
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    assert row["status"] == "pr_open" and row["attempts"] == 1
+    runs = [(r["role"], r["step"], r["attempt"], r["outcome"]) for r in db.runs("demo-t01")]
+    assert runs[:2] == [("test", "test", 1, "no tests needed"), ("build", "build", 1, "committed")]
+    test_run = db.runs("demo-t01")[0]
+    assert test_run["sha"] is None and test_run["report"].startswith("No new test is needed")
+    assert "No tests written" in test_run["report"] and "`python3 -m unittest tests.test_existing`" in test_run["report"]
+    events = [json.loads(line) for line in open(test_run["transcript"])]
+    assert "# These commands already pass" in next(e["content"] for e in events if e["type"] == "human")
+
+    subjects = git(factory_repo, "log", "--format=%s", f"{row['base_sha']}..{row['candidate_sha']}").splitlines()
+    assert len(subjects) == 1 and "acceptance tests" not in subjects[0]       # nothing committed or locked
+    gates = next(r for r in db.runs("demo-t01") if r["step"] == "gates")
+    assert "acceptance_untouched" not in gates["report"]
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    block = body.split("<details><summary>Acceptance tests (test)</summary>", 1)[1].split("</details>", 1)[0]
+    assert "No tests written" in block
+
+
+def test_a_tester_that_writes_no_tests_still_fails_when_a_command_names_a_new_test(
+        factory_repo, home, fake_gh, monkeypatch):
+    _test_flow(factory_repo, planner=False, strict=True)        # tests.test_greet doesn't exist yet
+    plays = scripts(review_verdicts=[])
+    plays["TESTER"] = [AIMessage("No new test is needed.")]
+    calls = _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 1
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    assert row["status"] == "failed" and "The try wrote no tests." in row["note"]
+    runs = db.runs("demo-t01")
+    assert [(r["role"], r["attempt"], r["outcome"]) for r in runs] == [
+        ("test", 1, "no-changes"), ("test", 2, "no-changes")]
+    events = [json.loads(line) for line in open(runs[0]["transcript"])]
+    assert "# These commands already pass" not in next(e["content"] for e in events if e["type"] == "human")
+    assert not any(role == "BUILDER" for role, _ in calls)
+
+
 def test_the_builder_is_told_which_tests_are_locked(factory_repo, home, fake_gh, monkeypatch):
     _test_flow(factory_repo)
     _use_model(monkeypatch, scripts(review_verdicts=["CHANGES", "APPROVE"]))

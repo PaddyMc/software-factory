@@ -52,6 +52,7 @@ class Ctx:
     earlier: tuple[str, ...] = ()           # build steps after the first: the earlier build steps' final messages
     test_files: tuple[str, ...] = ()         # build only: acceptance-test files locked at the test commit
     red_commands: tuple[str, ...] = ()       # build only: commands red before the change, green at the candidate
+    passing_before: tuple[str, ...] = ()     # test only: the test commands, when every one already passes at base
     log: Callable[[str, str], None] = field(default_factory=NullLog)          # (tag, message)
     # (steps, max_steps, tokens_in, tokens_out, cost_usd | None, refused_tool_calls)
     progress: Callable[..., None] = lambda *a: None
@@ -672,6 +673,12 @@ class LangChainRoles:
             msg = (f"Write the acceptance tests for task {ctx.task.id}.\n\n# Test paths\n\n"
                    + _bullets(f"`{p}`" for p in self.cfg.test_paths) + "\n\n# Test commands\n\n"
                    + _bullets(f"`{c}`" for c in commands))
+            if ctx.passing_before:
+                msg += ("\n\n# These commands already pass\n\nEvery test command above selects existing tests and "
+                        "passes before the change. If the task changes only documentation or specs and needs no new "
+                        "test, write no tests and say why in your report: the step then passes, and the build starts "
+                        "without locked tests. Never make an existing test or a shared fixture (such as conftest.py) "
+                        "check this task's deliverable just to turn a command red.")
             if ctx.feedback:
                 msg += f"\n\n# Feedback to address first\n\n{ctx.feedback}"
             return tools, msg, None
