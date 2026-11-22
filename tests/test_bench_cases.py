@@ -1,3 +1,4 @@
+import re
 import shutil
 from pathlib import Path
 
@@ -130,6 +131,37 @@ def test_a_case_materializes_to_the_same_base_commit_every_time(case, tmp_path):
     assert git(second, "branch", "--show-current") == "main"
 
 
+SPEC_09 = Path(__file__).resolve().parents[1] / "docs/spec/09-spec.txt"
+
+
+def _spec_09() -> str:
+    """The shipped benchmarks chapter, docs/spec/09-spec.txt (factory-spec-t05)."""
+    assert SPEC_09.is_file(), f"missing chapter: {SPEC_09}"
+    chapter = SPEC_09.read_text(encoding="utf-8")
+    assert chapter.strip(), f"empty chapter: {SPEC_09}"
+    return chapter
+
+
+def chapter_09_covers_cases_and_visibility() -> None:
+    """factory-spec-t05's acceptance: docs/spec/09-spec.txt covers case inputs, reference
+    solutions, hidden tests and their visibility, follows the chapter conventions and cites its
+    source and named test."""
+    chapter = _spec_09()
+    opening = next(line for line in chapter.splitlines() if line.strip())
+    assert opening.startswith("09"), "the chapter opens with its two-digit number and title"
+    assert "8bd7012" in chapter, "the chapter states the first edition's baseline: 8bd7012"
+    sections = re.findall(r"(?im)^\s*(?:#+\s*)?(?:\d+[.):\s]|section\s+\d+\b)", chapter)
+    assert len(sections) >= 3, "the chapter is organized into numbered sections"
+    for anchor, subject in {"case.yaml": "a case's inputs", "hidden": "the hidden tests",
+                            "solution": "the reference solution"}.items():
+        assert anchor in chapter, f"the chapter covers {subject}: {anchor!r} appears nowhere"
+    assert any(word in chapter for word in ("unsandboxed", "--no-sandbox")), \
+        "the chapter covers hidden-test visibility, including the --no-sandbox caveat"
+    assert "factory/bench/cases.py" in chapter, "the chapter cites factory/bench/cases.py"
+    assert ("tests/test_bench_cases.py::test_hidden_and_solution_files_stay_out_of_the_starting_tree"
+            in chapter), "the chapter cites this test by its node id"
+
+
 @pytest.mark.parametrize("case", SHIPPED, ids=lambda case: case.id)
 def test_hidden_and_solution_files_stay_out_of_the_starting_tree(case, tmp_path):
     repo = tmp_path / "repo"
@@ -153,6 +185,10 @@ def test_hidden_and_solution_files_stay_out_of_the_starting_tree(case, tmp_path)
     parsed = contracts.parse_text(plan.read_text(), plan=case.contract.plan)
     assert len(parsed) == 1
     assert parsed[0].mapping() == case.contract.mapping()
+
+    # factory-spec-t05: the chapter names this test as its evidence for a case's inputs and for
+    # its hidden tests and reference solution staying out of the starting tree.
+    chapter_09_covers_cases_and_visibility()
 
 
 def test_hidden_scoring_lays_the_hidden_files_over_the_candidate(tmp_path, monkeypatch):
