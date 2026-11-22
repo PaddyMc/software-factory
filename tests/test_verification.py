@@ -2,6 +2,7 @@ import pytest
 
 from factory import verification
 from factory.verification import FAIL, INCONCLUSIVE, PASS, classify
+from test_spec_chapters_05_06 import chapter_05_acceptance
 
 CARGO_ZERO = """running 0 tests
 
@@ -14,6 +15,7 @@ def test_zero_filtered_test_is_not_pass():
     assert classify("cargo test -p x nothing_matches", 0, CARGO_ZERO) == INCONCLUSIVE
     assert classify("uv run pytest -q -k nope", 5, "3 deselected in 0.01s\n") == INCONCLUSIVE
     assert classify("uv run pytest -q -k nope", 0, "no tests ran in 0.01s\n") == INCONCLUSIVE
+    chapter_05_acceptance()   # factory-spec-t03: docs/spec/05-spec.txt meets its acceptance criteria
 
 
 def test_tests_that_ran_pass():
