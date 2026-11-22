@@ -137,6 +137,7 @@ def variant_steps(root: Path, flow: Flow, cfg: C.Config, model_override: str | N
             "prompt_sha": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "loop": list(step.loop),
             "prove": step.prove,
+            "candidates": step.candidates,
         })
     return steps
 
@@ -264,7 +265,7 @@ def _directory_repeat(directory: Path) -> int:
 
 def _empty_record(variant: Variant, case: cases.Case, repeat: int, outcome: str,
                   directory: Path | None, seconds: float = 0.0) -> dict:
-    return {
+    record = {
         "variant": variant.id,
         "case": case.id,
         "repeat": repeat,
@@ -280,6 +281,9 @@ def _empty_record(variant: Variant, case: cases.Case, repeat: int, outcome: str,
         "failed_gates": [],
         "dir": _relative_cell_dir(directory) if directory is not None else None,
     }
+    if any(step.candidates > 1 for step in variant.flow.steps):
+        record["candidates_built"] = record["candidates_passed"] = 0
+    return record
 
 
 def _record_from_db(db, variant: Variant, case: cases.Case, repeat: int, outcome: str,
@@ -300,6 +304,11 @@ def _record_from_db(db, variant: Variant, case: cases.Case, repeat: int, outcome
         "review_changes": sum(run["role"] == "review" and run["outcome"] == "CHANGES" for run in runs),
         "step_limit_stops": sum("step limit" in (run["outcome"] or "") for run in runs),
     })
+    if "candidates_built" in record:
+        record["candidates_built"] = sum(
+            run["role"] == "build" and run["candidate"] is not None for run in runs)
+        record["candidates_passed"] = sum(
+            run["step"] == "gates" and run["candidate"] is not None and run["outcome"] == "pass" for run in runs)
     gate_runs = [run for run in runs if run["step"] == "gates"]
     if gate_runs:
         record["failed_gates"] = re.findall(r"^\| (\S+) \| FAIL \|", gate_runs[-1]["report"] or "", re.M)
