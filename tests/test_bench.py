@@ -1006,6 +1006,7 @@ def test_results_record_candidates_and_compare_flags_a_change(bench_repo, home, 
     assert main(["bench", "compare", a, b]) == 0
     out = capsys.readouterr().out
     assert "build: candidates 3 → 1" in out
+    assert "gates-first-x3 · build: candidates 3 → 1" in out
     changed = [line for line in out.splitlines()
                if line.startswith(("plan: ", "build: ", "review: ", "verify: "))]
     assert changed == ["build: candidates 3 → 1"]
@@ -1028,6 +1029,8 @@ def test_cells_count_the_candidates_built_and_passed(bench_repo, home, monkeypat
     capsys.readouterr()
     assert main(["bench", "report", "--cells"]) == 0
     out = capsys.readouterr().out
+    plain_line = next(l for l in out.splitlines() if "default@scripted:x3 · adder #1" in l)
+    assert "candidates" not in plain_line
     line = next(l for l in out.splitlines() if "gates-first-x3@scripted:x3 · adder #1" in l)
     assert "solved" in line and "3 candidates (3 passed)" in line
 
@@ -1070,3 +1073,21 @@ def test_a_candidates_cell_is_scored_on_the_chosen_candidate(bench_repo, home, m
     assert chosen == shas[2]
     calc = git(directory / "repo", "show", f"{chosen}:calc/__init__.py")
     assert "# candidate 2" in calc and "# candidate 1" not in calc
+
+
+def test_compare_names_each_variant_whose_steps_changed(home, capsys):
+    before = _steps()
+    after = copy.deepcopy(before)
+    for steps in (before, after):
+        next(step for step in steps if step["name"] == "build")["model"] = (
+            "fake:old" if steps is before else "fake:new")
+    a, b = "20261122-130000", "20261122-130500"
+    variants = {"default": before, "lean": before}
+    changed = {"default": after, "lean": after}
+    _write_run(home, a, {"adder": "a" * 64}, variants, [])
+    _write_run(home, b, {"adder": "a" * 64}, changed, [])
+
+    assert main(["bench", "compare", a, b]) == 0
+    out = capsys.readouterr().out
+    assert "default · build: model fake:old → fake:new" in out
+    assert "lean · build: model fake:old → fake:new" in out

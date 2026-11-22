@@ -276,7 +276,10 @@ def compare(a_id: str, a_results: dict, b_id: str, b_results: dict) -> str:
     lines.append(variant_line)
     for variant in shared_variants:
         changes = _step_changes(a_id, a_variants[variant], b_id, b_variants[variant])
-        lines.extend(changes)
+        if changes:
+            lines.append(f"{variant} · {' · '.join(changes)}")
+            # Candidate changes also have a step-prefixed line for direct step comparisons.
+            lines.extend(change for change in changes if "candidates " in change)
 
     a_cells, b_cells = a_results.get("cells", []), b_results.get("cells", [])
     variant_rows = []

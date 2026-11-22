@@ -281,6 +281,7 @@ def _empty_record(variant: Variant, case: cases.Case, repeat: int, outcome: str,
         "failed_gates": [],
         "dir": _relative_cell_dir(directory) if directory is not None else None,
     }
+    # Keep the original cell shape for ordinary variants; readers default both counters to zero.
     if any(step.candidates > 1 for step in variant.flow.steps):
         record["candidates_built"] = record["candidates_passed"] = 0
     return record
