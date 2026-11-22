@@ -16,13 +16,14 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | ✓ | The steps of a flow are still the first version's. Done: [The strict flow](docs/architecture.md#the-strict-flow) | — | — |
 | ✓ | Managing the factory takes many terminal commands. Done: [The web page](docs/architecture.md#the-web-page) | — | — |
 | ✓ | Factory PR descriptions are long and hard to read. Done: [Pull requests](docs/architecture.md#pull-requests) | — | — |
-| 12 | The models' reasoning is thrown away. Planned: [thoughts](docs/plans/thoughts.md) | small | 10 (its web task) |
+| ✓ | Capture the thoughts a model shares. Shipped in [thoughts](docs/plans/thoughts.md). | — | — |
 | ✓ | You can't tell which factory version is running. Done: [Commands](docs/reference.md#commands) | — | — |
 | 14 | A review without a verdict costs a rebuild, a task gets one build per attempt, and nothing picks the default flow from data. Planned: [flow-tuning](docs/plans/flow-tuning.md) | medium | 8, 9 |
 | 15 | Specify the shipped factory for implementers. Planned in [factory-spec](docs/plans/factory-spec.md) | medium | shipped factory |
 | 16 | Nothing reviews a change for security, and a builder can rewrite its reviewer's guidance. Planned: [security-review](docs/plans/security-review.md) | medium | 9, 14 |
 | 17 | Plans can't be read on the web page, and a task doesn't link to the plan that explains it. Planned: [plan-pages](docs/plans/plan-pages.md) | small | 10 |
 | 18 | The backlog moves only while someone is at the terminal. Planned: [devbox](docs/plans/devbox.md) | medium | — |
+| 20 | Follow a task’s agent thoughts across runs and retries in the terminal and web UI. [Thought timeline](docs/plans/thought-timeline.md) | small | 10, 12 (shipped) |
 
 ## 1. Act on human PR review comments
 
@@ -180,13 +181,7 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 
 ## 12. See what the models thought
 
-**Gap.** Every model the factory runs reasons before it answers, and the OpenRouter integration hands that reasoning to the factory with each reply. The factory records only the reply text (`factory/agents.py:329`), so transcripts, the live log and traces show what an agent did but never why. Its thinking tokens are paid for, and then thrown away.
-
-**Plan.** [docs/plans/thoughts.md](docs/plans/thoughts.md) (planned 2026-11-15, tasks `thoughts-t01`…`t03`, alongside [measure](docs/plans/measure.md) and [pr-descriptions](docs/plans/pr-descriptions.md)):
-- Each step's reasoning and thinking-token count go into its transcript, and the live log gets a short `thinks:` line per step.
-- `factory transcript` prints each step's thoughts before what it said and did, and `factory trace` counts thinking tokens.
-- The web transcript page shows the thoughts above what each step said, once `webui-t05` lands.
-- Model requests don't change: a model that doesn't share its reasoning is shown as not sharing it.
+Each transcript now records the reasoning a model shares and its reported thinking-token count. The live log includes a short preview. The terminal and web transcripts show each thought beside its reply, and `factory trace` includes thinking tokens. These features shipped in [thoughts](docs/plans/thoughts.md). The [task-wide timeline](#20-follow-a-tasks-agent-thoughts) builds on them.
 
 ## 13. Which factory is this?
 
@@ -256,3 +251,6 @@ The [factory-spec plan](docs/plans/factory-spec.md) covers the behavior shipped 
 - When the checkout is clean and on the trunk, the worker fast-forwards it to origin after its task runs finish, and restarts itself when the factory's own code changed.
 - `plan_flows:` in `.factory/config.yaml` gives a plan its flow, for every way a task runs.
 - `factory status`, `factory top` and the web board show the worker, and `factory stop worker` stops it.
+## 20. Follow a task's agent thoughts
+
+Today an operator opens a separate transcript for each agent run. The [thought timeline](docs/plans/thought-timeline.md) brings every recorded thought for one task into `factory thoughts TASK` and a **Thoughts** link on the task page. Each entry identifies the agent, attempt and turn, shows the tool names or a short reply excerpt, and points to its full transcript. The CLI can follow and the web page refreshes as replies arrive. No current workstream waits on this one.
