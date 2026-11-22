@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bench-t04 · software-factory</title>
+<link rel="stylesheet" href="../../../factory/web/static/app.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="board.html">factory <span>/ software-factory</span></a>
+    <nav class="nav" aria-label="Pages">
+      <a href="board.html">Board</a>
+      <a href="activity.html">Activity</a>
+    </nav>
+    <div class="top-end">
+      <span class="live-dot" data-state="live">Live, updated 21:40:12</span>
+    </div>
+  </div>
+</header>
+
+<!-- The same task as task.html, while its second run is building. Only a running task has the message box. -->
+<main class="wrap" data-refresh="2">
+
+  <div class="page-head">
+    <ol class="crumbs">
+      <li><a href="board.html">Board</a></li>
+      <li><a href="board.html#plan-bench">bench</a></li>
+      <li>bench-t04</li>
+    </ol>
+    <div class="task-id">
+      <span>bench-t04</span>
+      <span class="status s-live"><i class="mark"></i>Building</span>
+    </div>
+    <h1 class="task-goal">`factory bench report`, `compare`, `list` and `cases` read bench results: one run's scores per variant and case, two runs side by side, past runs, and the available cases.</h1>
+    <dl class="facts">
+      <div><dt>risk</dt><dd>low</dd></div>
+      <div><dt>builds</dt><dd>1</dd></div>
+      <div><dt>cost</dt><dd>$0.21</dd></div>
+      <div><dt>branch</dt><dd>factory/bench-t04</dd></div>
+      <div><dt>built on</dt><dd>factory/bench-t03 at 55d7f91</dd></div>
+    </dl>
+  </div>
+
+  <section class="next-step" aria-labelledby="h-next">
+    <div>
+      <h2 id="h-next">Running: build 1, step 14 of 120.</h2>
+      <p>run(command=uv run pytest -q tests/test_bench.py) · quiet 8s</p>
+    </div>
+    <div class="acts">
+      <a class="btn btn-danger" href="#" title="factory stop bench-t04">Stop</a>
+    </div>
+    <form class="say" method="post" action="#">
+      <input type="hidden" name="token" value="…">
+      <input type="hidden" name="target" value="bench-t04">
+      <input type="hidden" name="next" value="/tasks/bench-t04">
+      <label for="say-bench-t04">Tell the builder</label>
+      <textarea id="say-bench-t04" name="message" rows="3" maxlength="4000" required></textarea>
+      <div class="say-end">
+        <span class="hint">It gets this before its next model call, and every later agent in this run sees it too. It is guidance: the contract still decides what's in scope.</span>
+        <button class="btn btn-primary" title="factory say bench-t04 MESSAGE">Send</button>
+      </div>
+    </form>
+    <ol class="messages" aria-label="Your messages to this run">
+      <li>
+        <time datetime="2026-11-13T21:38:31Z">21:38:31</time>
+        <span class="text">Don't commit: the factory commits for you. Fix the compare header first, then count the cells that never ran.</span>
+        <span class="fate">build 1 got it before step 9</span>
+      </li>
+      <li>
+        <time datetime="2026-11-13T21:40:05Z">21:40:05</time>
+        <span class="text">The interrupted-run test only needs cells without an outcome counted as not run; don't change how cells are scored.</span>
+        <span class="fate is-waiting">waiting for the next model call</span>
+      </li>
+    </ol>
+  </section>
+
+  <div class="cols">
+
+    <section class="block contract" aria-labelledby="h-contract">
+      <h2 id="h-contract">Contract</h2>
+      <h3>Done when</h3>
+      <ul class="points">
+        <li>`factory bench report [RUN]` prints the table a run prints at its end, under a header naming the run, its cases, variants and repeats.</li>
+        <li>`factory bench compare RUN_A RUN_B` prints solved, false passes, mean cost and mean attempts as A to B for each variant in both runs.</li>
+      </ul>
+    </section>
+
+    <section class="block" aria-labelledby="h-runs">
+      <h2 id="h-runs">Runs <span class="count">2</span> <span class="aside">Newest first</span></h2>
+      <p class="runs-head">Each line is one agent, or one pass of the gates.</p>
+      <ol class="runs">
+        <li class="run is-live">
+          <div class="run-head"><span class="run-name">build 1</span><span class="outcome o-live">running</span><span class="quiet">3 minutes ago, took 3m 12s so far</span></div>
+          <div class="run-facts">kimi-k3.1-pro, 14 steps, 402k in, 5k out, $0.04</div>
+          <details id="run-73-report"><summary>Report</summary></details>
+          <a class="run-link" href="transcript.html">Read the transcript</a>
+        </li>
+        <li class="run">
+          <div class="run-head"><span class="run-name">test</span><span class="outcome o-good">done</span><span class="quiet">9 minutes ago, took 5m 40s</span></div>
+          <div class="run-facts">glm-5.3, 22 steps, 611k in, 9k out, $0.17</div>
+          <details id="run-72-report"><summary>Report</summary></details>
+          <a class="run-link" href="transcript.html">Read the transcript</a>
+        </li>
+      </ol>
+    </section>
+  </div>
+
+  <footer class="foot">
+    <span>factory web 0.1.0</span>
+    <span>127.0.0.1:8765, this machine only</span>
+    <span>state in ~/.local/share/factory/software-factory</span>
+  </footer>
+</main>
+
+</body>
+</html>

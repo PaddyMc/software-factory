@@ -8,7 +8,8 @@ Open them straight from a checkout: each one links the real stylesheet, `factory
 |---|---|
 | [board.html](board.html) | The board: what needs you, what's running, every plan |
 | [task.html](task.html) | One failed task: its next step, contract, runs and log |
-| [transcript.html](transcript.html) | One agent run, step by step, with what the model thought before each step ([thoughts](../../plans/thoughts.md)) |
+| [task-running.html](task-running.html) | The same task while it builds: the box that tells its agent something, and what became of this run's messages ([steer](../../plans/steer.md)) |
+| [transcript.html](transcript.html) | One agent run, step by step, with what the model thought before each step ([thoughts](../../plans/thoughts.md)) and what you said to it ([steer](../../plans/steer.md)) |
 | [run.html](run.html) | The form that starts a plan run |
 | [activity.html](activity.html) | Commands the page ran, and the latest log lines of every task |
 | [plans.html](plans.html) | Every plan doc, with its tasks' statuses ([plan-pages](../../plans/plan-pages.md)) |
