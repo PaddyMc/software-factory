@@ -628,6 +628,8 @@ Through the real CLI, pipeline, agents, git, bubblewrap and fake `gh`, with `Scr
 
 ## Cross-Workstream Coordination
 
+- [Live agent-loop evaluation](agent-loop-perf.md) compares each built-in flow with its own baseline. `agent-loop-perf-t02` depends on `strict-flow-t08` for resolved per-step settings used to attribute timings.
+
 - **Depends on:**
   - [agent-flows](agent-flows.md), merged up to t04. This plan extends its `Step`, its order rule and its built-in flow, and keeps its promise that `default` is today's pipeline.
   - [measure](measure.md). `strict-flow-t01` depends on `measure-t03`, the last task to change `agents.py`, `pipeline.py`, `db.py` and `cli.py` there, and `strict-flow-t09` on `measure-t04`, which edits the same docs. Its prompt version covers the proof rules, since they are part of the system prompt, and `factory stats` sees the `test` role and the `APPROVE (unproven)` outcome as new values.
