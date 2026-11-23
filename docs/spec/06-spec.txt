@@ -1,0 +1,237 @@
+06 — PR lifecycle and rework
+
+Code under discussion: baseline 8bd7012; docs/ is the spec. Everything outside
+this chapter's file is the factory's behavior, not something this task changes.
+Scope of this task: write this chapter only; no production-code change.
+
+1. Creation, verifier fallback, and the no-PR path
+
+A fresh run creates `factory/<task>` in a worktree, commits the build, and follows
+the configured build/review/gates steps. Only a candidate that reaches the end
+of that flow can be published. The summary/verifier step then reads the gate
+table and reviewer reports. Its preferred response contains `TITLE:`,
+`## What changed`, and `## What to check`.
+Source: factory/pipeline.py:Options,
+Pipeline.verify, and graph, and factory/prbody.py:parse_summary and bound_summary.
+The normal route is exercised by tests/test_pipeline.py::test_run_ends_in_a_working_pr.
+
+If that response has no parseable summary, the factory does not open an empty PR
+and does not discard the verifier's report. `Pipeline.verify` emits a fallback
+event and `fallback_summary` builds the title and change bullets from the task
+and actual changed-file diff, with reviewer findings as the check bullets. A
+flow with no verify step uses the same fallback in `Pipeline.pr`. Source:
+factory/pipeline.py:Pipeline.verify and pr, and
+factory/prbody.py:fallback_summary. Evidence:
+tests/test_pipeline.py::test_an_unparseable_summary_falls_back and
+tests/test_prbody.py::test_fallback_summary_uses_the_goal_the_diff_and_the_findings.
+
+`Pipeline.pr` generates the bounded body and pushes the candidate branch. A new
+branch uses `--force-with-lease`; conflict/rework replacement uses a lease naming
+the exact old candidate. The factory looks up an OPEN PR by head branch: it edits
+that one's body, or creates a PR against `base_ref` if none exists. A closed or
+merged old PR is not reused. The body includes the summary, Checks paragraph,
+gate table, task, available test/review reports, and candidate/footer metadata;
+a stack adds its merge-order warning. Source: factory/pipeline.py:Pipeline.pr and
+pr_body, and factory/prbody.py:checks_paragraph and footer. Evidence:
+tests/test_pipeline.py::test_rerun_after_closed_pr_opens_a_new_one and
+tests/test_pipeline.py::test_a_stacked_pr_body_starts_with_its_merge_order.
+
+`--no-pr` sets `Options.open_pr` false but does not skip the selected flow,
+verification gates, or summary fallback. At `Pipeline.pr` it records `gates
+passed; --no-pr` and stops BEFORE the push, PR lookup/creation, and PR comments.
+The candidate remains available for local inspection; this is not a route to
+publish an ungated change. Source: factory/pipeline.py:Options and Pipeline.pr.
+The publication barrier is covered by
+tests/test_pipeline.py::test_gate_failures_never_open_a_pr.
+
+2. Dependency branches and bottom-up merging
+
+Merged dependencies are satisfied. Open dependencies can be stacked only from
+their `pr_open` board state and candidate SHA; unmet/conflicting/failed
+prerequisites block a normal run unless the operator explicitly forces a fresh
+start. For open dependencies, the worktree starts at the FIRST dependency's
+candidate and merges each additional open candidate with a stack merge commit.
+That first candidate (or the resulting composed commit) is `base_sha`, so the
+task's own diff excludes its dependencies. The new PR targets
+`factory/<first-dependency>` rather than the trunk. Conflicting additional
+candidates abort stacking and remove the incomplete worktree. Source:
+factory/cli.py:cmd_run_one and factory/pipeline.py:create_worktree. Evidence:
+tests/test_stack.py::test_stacking_on_two_open_prs_merges_them_into_the_base and
+tests/test_stack.py::test_conflicting_open_prs_cannot_be_stacked.
+
+Stacks are merged bottom-up by the human: merge the dependency PR first, then
+the dependent after it has been moved onto its new base. Run
+`factory status --refresh` after each merge, not only after the whole stack. The
+stack warning says the same thing because merging a child into a dependency
+branch is not, by itself, landing that child on the trunk. Source:
+factory/cli.py:cmd_status and factory/stack.py:restack. The full move to the
+trunk is covered by
+tests/test_pipeline.py::test_dependent_stacks_on_an_open_pr_and_moves_to_main_after_merge.
+
+Refresh also handles a child merged directly into a dependency branch. If that
+carrier PR is still open, the child waits and reaches the trunk with the carrier.
+If the carrier already merged or closed without carrying the change, the child
+is `conflict`, gets a replacement PR, and must be resolved/rebased onto the
+trunk. If the same `old_base..candidate` change reached the trunk by hand, a
+reverse-apply check in a scratch index recognizes it as already merged. Source:
+factory/cli.py:_merged and factory/stack.py:landing and on_trunk. Evidence:
+tests/test_pipeline.py::test_a_stacked_pr_merged_into_an_open_dependency_waits_for_it,
+tests/test_pipeline.py::test_a_stacked_pr_merged_into_its_merged_dependency_is_not_merged_and_replays_onto_main,
+and tests/test_pipeline.py::test_a_stranded_merge_whose_changes_reached_main_by_hand_is_merged.
+
+3. Refresh, merge provenance, and restack
+
+`factory status` without --refresh displays stored/derived state.
+`factory status --refresh` fetches the trunk, synchronizes task contracts, takes
+up eligible factory PRs, reads their current GitHub state, and then restacks
+open dependents. An existing factory-owned candidate that is simply OPEN keeps
+its identity; a foreign PR can be taken up and adopted as the board's candidate.
+Source: factory/cli.py:cmd_status, _refresh, _take_up, and _adopt.
+
+For a PR merged into the trunk, `_refresh` calls the merge recorder. `record`
+compares the actual merged head with the board candidate and labels it
+`as_built` or `edited`, with the pre-merge head and change set. Updating from
+the base is not mistaken for a human edit; commits or rewrites beyond the
+candidate are preserved as provenance. If the final merged head cannot be read,
+nothing is recorded. This records what merged; it is not approval to rework an
+open head someone else owns. Source: factory/cli.py:_refresh and
+factory/merges.py:record. Evidence:
+tests/test_merges.py::test_a_pr_merged_as_built_is_recorded_as_built,
+tests/test_merges.py::test_commits_pushed_to_a_pr_before_merge_are_recorded_as_human_edits,
+and tests/test_merges.py::test_updating_a_pr_from_its_base_is_not_a_human_edit.
+
+For a dependent whose dependencies all merged, restack fetches `origin/<trunk>`
+and rebases the task's own `old_base..candidate` commits onto that tip, retargets
+the PR to the trunk, and clears `stacked_on`. With one still-open dependency
+whose candidate moved, it rebases onto that new candidate and keeps the PR
+pointed at the dependency branch. With several dependencies it can first
+retarget from a merged base to the first remaining open factory branch. Source:
+factory/stack.py:restack and rebase. Evidence:
+tests/test_stack.py::test_one_of_two_dependencies_merged_moves_the_pr_to_the_open_one
+and tests/test_pipeline.py::test_another_board_takes_up_the_prs_and_moves_the_stack.
+
+A successful rebase produces a NEW head SHA. The push lease explicitly expects
+the old candidate; only then are `base_sha`, `candidate_sha`, and the PR base
+updated. Restack does NOT rerun the builder, reviewers, gates, or verifier. Its
+PR comment therefore says `the gates ran on <old-candidate>`: the last gated
+commit is the old candidate, while the restacked head is the same task commits
+rebased onto the moved base. New CI and any later rework judge the new head; no
+new verification run is fabricated for it. Source: factory/stack.py:rebase and
+restack.
+
+If rebase conflicts, it aborts and pushes nothing. The old candidate stays the
+remote head. When all dependencies merged, the PR is retargeted to the trunk
+and marked `conflict`; when a remaining dependency moved, its existing base is
+kept and the task is marked `conflict`. A subsequent `factory run` performs
+conflict resolution rather than pretending the rebase passed. Source:
+factory/stack.py:rebase and restack. Evidence:
+tests/test_stack.py::test_restack_conflict_marks_the_task_for_resolution.
+
+4. Conflict, human review, and CI rework order
+
+Refresh gives an open candidate three outcomes in this precedence order:
+
+1. A trunk-targeted CONFLICTING PR becomes `conflict`. Stacked PRs are handled
+   by restack rather than by GitHub's mergeable bit.
+2. Otherwise outstanding eligible review requests become `changes_requested`.
+3. Only when no such requests remain can terminal-red CI become `ci_failed`.
+
+Thus conflict comes before human review, and human review comes before CI. A
+later approval can clear the requests and reveal a CI failure on a later
+refresh. Source: factory/cli.py:_refresh and factory/reviews.py:requests and
+factory/ci.py:failure. Evidence:
+tests/test_pipeline.py::test_conflicts_come_before_requested_changes_and_requested_changes_before_ci.
+
+The run entry point follows the board's selected kind: conflict resolution, CI
+fix, or human-review fix. CI and review entries try restack first; if that moves
+the head or creates a conflict, they stop and let CI/review be judged on the new
+state rather than fixing a stale head. Source: factory/cli.py:cmd_run_one.
+Evidence:
+tests/test_pipeline.py::test_ci_failure_of_a_stacked_pr_whose_dependency_merged_is_restacked_not_fixed
+and
+tests/test_pipeline.py::test_requested_changes_on_a_stacked_pr_are_addressed_after_the_restack.
+
+Conflict resolution uses `replay_worktree`: it squashes the old task tree into
+a commit parented by the old base, cherry-picks it without committing onto the
+new base, leaves diff3 conflict markers, and gives the builder both the old task
+diff and the upstream diff for each conflicted file. A resolver commit goes
+through the configured reviews, gates, and summary before the leased update. If
+the change now replays cleanly, no resolver/reviewer is needed and it goes
+straight to gates and summary. Source: factory/cli.py:_replay and
+factory/pipeline.py:replay_worktree, resolve, and resolve_open. Evidence:
+tests/test_pipeline.py::test_conflicting_pr_is_resolved_by_the_builder_then_reviewed_and_gated,
+tests/test_pipeline.py::test_conflict_that_now_replays_cleanly_goes_straight_to_the_gates,
+and tests/test_stack.py::test_replay_leaves_diff3_markers_and_a_brief.
+
+CI rework starts a worktree at the old candidate and supplies the failing check
+names and available failed-job logs. Human-review rework starts at that same
+candidate and supplies the outstanding review brief and inline comments. Both
+commit on top of the old candidate, then run the flow's build/review/gates and
+summary steps before replacing the PR head. Source: factory/cli.py:_ci_fix and
+_review_fix, and factory/pipeline.py:Pipeline.rework_review and attempt. Evidence:
+tests/test_pipeline.py::test_failing_ci_is_fixed_on_the_pr_branch_then_reviewed_and_gated
+and
+tests/test_pipeline.py::test_requested_changes_are_addressed_on_the_pr_branch_then_reviewed_and_gated.
+
+5. Review eligibility, watermark, and candidate ownership
+
+Review gating is narrower than the set of all visible PR comments. ANY submitted
+review by the PR author counts as a change request. For anyone else, the login
+must be an actual reviewer and its repository permission must be **write or
+admin**. A teammate's ordinary comment remains visible in the collected review
+context/brief but does not itself request rework. Source:
+factory/reviews.py:fetch, covered, and requests. Evidence:
+tests/test_reviews.py::test_any_review_by_the_pr_author_requests_changes and
+tests/test_reviews.py::test_change_requests_count_only_from_reviewers_with_write_access.
+
+For non-authors, the latest decided state per login wins: APPROVED,
+CHANGES_REQUESTED, or DISMISSED replaces that login's earlier decision, while
+COMMENTED and PENDING do not supersede one. `reviews_addressed` is a numeric
+review-ID watermark: only requests with IDs greater than it remain outstanding.
+Successful review rework, or a no-change answer, advances the watermark through
+the requests covered. Adoption of an existing PR initializes it through the
+latest existing review so old conversation is history; later IDs still count.
+Restack preserves both the watermark and outstanding requested-change state.
+Source: factory/reviews.py:latest_review and requests, factory/cli.py:_adopt,
+and factory/pipeline.py:Pipeline.pr and answer. Evidence:
+tests/test_reviews.py::test_each_reviewers_latest_decision_wins,
+tests/test_reviews.py::test_addressed_reviews_no_longer_count,
+tests/test_pipeline.py::test_a_taken_up_pr_treats_earlier_reviews_as_addressed,
+and tests/test_pipeline.py::test_a_stacked_pr_keeps_its_requested_changes_when_restacked.
+
+Candidate ownership is checked by SHA, not branch name: a head someone else
+pushed is not ours to fix. `ci.failure` judges only `head == candidate_sha`;
+CANCELLED and SKIPPED are outside its terminal-red FAILING set. Review rework
+also refuses a head that is not the board candidate and suggests `--force` for
+an intentional from-scratch rebuild. Source: factory/ci.py:FAILING and failure,
+and factory/cli.py:_review_fix. Evidence:
+tests/test_ci.py::test_red_only_judges_the_factorys_own_candidate and
+tests/test_pipeline.py::test_review_rework_needs_an_outstanding_request_on_the_factorys_candidate.
+
+6. Leased replacement and failure outcomes
+
+A normal rework/resolution push uses
+`--force-with-lease=refs/heads/factory/<task>:<old-candidate>`. If someone moved
+the remote branch after the old candidate, Git rejects the push instead of
+destroying that work. A fresh forced rebuild has the ordinary force-with-lease,
+not permission to call an ungated candidate a fix. Source:
+factory/pipeline.py:Pipeline.pr and factory/stack.py:rebase.
+
+Before publication, builder errors, unresolved conflicts, requested review
+changes, gate failures, or repeated no-progress outcomes consume attempts and
+then fail the task when attempts are exhausted. The old PR remains on its old
+candidate with a note saying that it still conflicts, has failing CI, or has
+unaddressed reviews; running the task again rebuilds from scratch. A no-change
+CI/conflict attempt is not success. A leased-push failure likewise does not
+replace the old head. Source: factory/pipeline.py:KINDS, Pipeline.graph, fail,
+and run. Evidence:
+tests/test_pipeline.py::test_failed_resolution_leaves_the_pr_alone,
+tests/test_pipeline.py::test_failed_ci_fix_leaves_the_pr_alone, and
+tests/test_pipeline.py::test_failed_review_rework_leaves_the_pr_alone.
+
+Human review has one intentional no-change outcome: on the first no-change
+attempt the builder can answer instead of editing. The factory posts that answer
+as a PR comment, advances the review watermark, and leaves the same head open;
+it does not manufacture a new commit, re-review, or push. Source:
+factory/pipeline.py:Pipeline.rework_review and answer. Evidence:
+tests/test_pipeline.py::test_a_review_that_needs_no_change_is_answered_and_the_pr_left_as_is.

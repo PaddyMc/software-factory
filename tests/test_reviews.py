@@ -3,6 +3,7 @@
 import json
 
 from factory import ci, reviews
+from test_spec_chapters_05_06 import chapter_06_acceptance
 
 
 def _review(id, login, state, body="", commit="a" * 40):
@@ -91,6 +92,7 @@ def test_addressed_reviews_no_longer_count():
     assert [r["id"] for r in reviews.requests(snap, 11)] == [12]
     assert [r["id"] for r in reviews.requests(snap, None)] == [5, 10, 12]   # NULL watermark counts as 0
     assert [r["id"] for r in reviews.requests(snap, 100)] == []
+    chapter_06_acceptance()   # factory-spec-t03: docs/spec/06-spec.txt meets its acceptance criteria
 
 
 def test_fetch_reads_the_pr_reviews_and_permissions_through_gh_api(fake_gh):
