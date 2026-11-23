@@ -1,0 +1,294 @@
+07 — Operator interfaces
+
+Baseline: 8bd7012 (first edition).
+
+1. Scope and conventions
+
+This chapter specifies the shipped command-line and local-web operator
+interfaces. It names observable effects and delegates pipeline, scheduling,
+configuration and gate semantics to their owning chapters. It does not define
+new commands or routes, reproduce argparse help, or make an internal storage
+format public. Source citations use `path:symbol`; behavioral tests use
+`path::test_name`, following the chapter conventions. Cross-references use
+stable chapter filenames such as `01-spec.txt` and `04-spec.txt`.
+
+2. Complete command map
+
+`factory/cli.py:main` installs the following top-level commands. A command with
+a detailed section below is still mapped here; the owner column says where its
+underlying behavior is specified.
+
+| Command | Observable effect | Owner |
+|---|---|---|
+| `factory init` | Create or update the repository's factory configuration, guidance, skills and optional session-log scaffold. | `02-spec.txt`, configuration |
+| `factory config` | Print the effective resolved configuration as YAML. | `02-spec.txt` |
+| `factory version` | Print one line containing the package version and, only in the factory's own repository, its git description. | Section 6 below |
+| `factory prompt ROLE` | Print the selected role prompt, including a repository override when one exists. | `03-spec.txt`, agents and prompts |
+| `factory validate-plan [PLAN…]` | Parse the selected plans and report contract, dependency and flow-validation errors without running tasks. | `01-spec.txt`, plans and contracts |
+| `factory sync` | Parse configured plans and upsert their contracts on the local board. New tasks become `queued`; existing status and history are retained. Contracts no longer present are reported as orphaned, not deleted. | `01-spec.txt`; `05-spec.txt`, board/scheduling |
+| `factory status [PLAN]` | Print the stored board, grouped by plan, or its JSON representation. `--refresh` additionally reconciles GitHub and dead processes. | Section 4; `06-spec.txt` for PR rework |
+| `factory run TARGET` | Run one task or supervise a plan. Targets may be task ids or plan names/paths; options select flows, attempts, parallelism, network access, cost limits and plan subsets. | `04-spec.txt`, pipeline; `05-spec.txt`, scheduler |
+| `factory stop TARGET` | Stop a live task run, or a plan run and its live child task runs. | Section 5 |
+| `factory bench SUBCOMMAND` | Run, score, report or compare evaluation cases, and list or inspect those cases and their records. | Bench subsystem; `08-spec.txt` for measurement interpretation |
+| `factory top [PLAN]` | Render the live terminal dashboard from stored board state, process liveness and recent logs; `--once` renders once. It does not refresh GitHub. | Section 4; `08-spec.txt` |
+| `factory web` | Serve the local board and run forms, quick actions, transcripts, logs and background-job activity. | Section 7 |
+| `factory logs [TASK]` | Print or follow one task log; `--all` merges all task logs with task prefixes. | `08-spec.txt`, logs |
+| `factory trace TASK` | Render per-model-call timing, context, token, cache, reasoning, cost and tool summaries for the latest or every matching agent run. | `08-spec.txt`, traces |
+| `factory transcript TASK` | Render messages, model-provided reasoning, answers, tool calls and results for the latest or every matching agent run. | `08-spec.txt`, transcripts |
+| `factory show TASK` | Print task metadata and run history, outcomes, reports, model/prompt metadata and token/cost measurements. | `08-spec.txt`, task/run records |
+| `factory stats` | Aggregate task outcomes, attempts, costs, gate failures, reworks, merges and per-step measurements over the selected runs. | `08-spec.txt`, statistics |
+| `factory gates TASK` | Run deterministic gates against the selected ref and base without invoking agents. | `06-spec.txt`, gates and rework |
+| `factory requeue TASK…` | Return eligible held or failed tasks to `queued`, leaving running, PR-bearing and merged tasks alone. | Section 5.3 |
+| `factory clean TASK` | Force-remove the task worktree if present; a queued or active board row is marked `failed`. | Section 5.2 |
+| `factory abandon TASK` | Set the task's status to `abandoned` with an optional note, creating a hold that plan runs skip. | Section 5.3 |
+| `factory check-output` | Classify a captured verification command and log; an exit-zero log that selects no tests is not a pass. | `06-spec.txt`, gates |
+
+3. Running a task or plan
+
+`factory run` first resolves a task id; otherwise it resolves a plan name or
+path. For a plan, `--tasks` limits the run to a comma-separated subset, and
+configured plan globs select the default task set. A plan child is the real
+`factory run TASK --quiet` command and receives the selected flow and other
+child options. This behavior is implemented by `factory/cli.py:cmd_run`,
+`factory/cli.py:cmd_run_plan`, `factory/cli.py:cmd_run_one` and
+`factory/scheduler.py:default_launch`.
+
+Without `--force`, a task that is active, has an open PR or is merged is
+refused and returns nonzero rather than starting a new pipeline. New work and
+rework start from `queued`, `failed`, `conflict`, `ci_failed` or
+`changes_requested` when their dependencies permit it. Plan supervision waits
+until every dependency is merged or has an open PR; a direct task run reports
+unmet dependencies unless `--force` overrides that guard. An `abandoned` hold
+is not startable by the plan scheduler.
+The plan scheduler does not retry a task that already failed in that same plan
+run, but a later plan run may retry it.
+
+`--flow NAME` selects a configured named flow for the whole run. Without it,
+the configuration's default flow is used. Conflict, CI and human-review states
+select their corresponding rework behavior rather than pretending to be a
+first implementation. Dependency and scheduler behavior is pinned by
+`tests/test_pipeline.py::test_rerun_replaces_a_finished_run_and_dependencies_need_a_pr`,
+`tests/test_scheduler.py::test_rerun_keeps_prs_and_holds_and_retries_failures_once`,
+`tests/test_scheduler.py::test_a_plan_run_passes_its_flow_to_each_task` and
+`tests/test_scheduler.py::test_a_pr_with_conflicts_runs_again_to_resolve_them`.
+
+4. Board reads and refresh
+
+Plain `factory status` is a **stored-board read**. It prints the current rows,
+progress, costs, readiness and process-liveness annotations; it neither calls
+GitHub nor reconciles task status. “Read-only” here describes operator state,
+not SQLite's connection mode. `factory top` and ordinary web page reads follow
+the same no-remote-refresh rule. A stale active row may therefore display
+`DEAD` without yet being changed to `failed`.
+
+`factory status --refresh` is deliberately different. It may:
+
+1. fail active tasks whose recorded process is dead;
+2. adopt eligible factory PRs opened or merged by another board;
+3. recognize merged PRs, restack dependent PRs, and record merge outcomes;
+4. mark conflicts, failing CI and requested changes; and
+5. update the stored candidate/base/stack metadata needed by later runs.
+
+`--json` changes presentation, not refresh semantics. An optional plan limits
+the displayed board rows; refresh reconciles the board before that display filter. The dead-process distinction is covered by
+`tests/test_observe.py::test_dead_run_is_flagged_and_refresh_fails_it`; merge
+recording is covered by
+`tests/test_merges.py::test_a_pr_merged_as_built_is_recorded_as_built`.
+
+5. Stop, clean and hold
+
+5.1 Stop
+
+For a task, `factory stop` requires an active row with a live pid. It sends
+SIGTERM, waits `--wait` seconds (10 by default), then uses SIGKILL if needed.
+If the row is still active, it becomes `failed` with the stopped note. Its
+worktree and branch remain available for diagnosis. For a plan, the command
+also stops the live plan-runner pid recorded for that plan, removes its stale
+pid file, and stops each live active child in that plan. A plan with nothing
+live reports that fact and returns success; an unknown target or inactive task
+is an error.
+
+The escalation and preserved-artifact behavior is pinned by
+`tests/test_stop.py::test_stop_ends_a_running_task_as_failed_and_records_the_run_as_stopped` and
+`tests/test_stop.py::test_stop_kills_a_task_that_ignores_sigterm`.
+
+5.2 Clean
+
+`factory clean TASK` removes `$FACTORY_HOME/worktrees/TASK` with a forced git
+worktree removal when it exists. It does not remove the task, branch, logs,
+transcripts or run history. After removal, a `queued` or active row is marked
+`failed` with `cleaned while in progress`. Cleaning is not a graceful stop;
+operators should stop a live task first. The web exposes a narrower clean
+action only for an existing worktree whose task is not live-active.
+
+5.3 Hold and requeue
+
+`factory abandon TASK [--note TEXT]` is a hold, not process termination. It
+sets `abandoned`; subsequent plan runs skip the task. The CLI does not add the
+web button's queued/failed eligibility restriction, so it must not be used as
+a substitute for stopping a live process.
+
+`factory requeue TASK…` clears note and progress and changes failed or
+abandoned rows to `queued`. Already queued rows are left queued. Unknown
+tasks, live active tasks, open/merged PRs, and conflict/CI/review rework states
+are left alone and produce a nonzero result. A dead active row is not treated
+as live and may be requeued. The next eligible task or plan run performs the
+work; requeue itself starts no process and does not require the operator to
+clean an old worktree.
+
+`tests/test_requeue.py::test_requeue_moves_only_failed_and_abandoned_tasks`
+covers the main transitions, while
+`tests/test_web.py::test_actions_are_refused_for_tasks_they_dont_apply_to`
+covers the deliberately narrower web hold and clean behavior.
+
+6. Version output
+
+Both `factory --version` and `factory version` print the same single line:
+`factory <package-version>`. When the installed package lives at the top level
+of the software-factory's own repository root, the line adds its
+`git describe --tags --match "v[0-9]*" --always --dirty` result in parentheses.
+Thus a release tag, commits past a tag, a dirty tree and an untagged repository's
+short commit hash are distinguishable. Outside that repository (for example, an
+installed wheel or a consumer project), no unrelated repository description is
+appended. Missing installed package metadata renders the version as `unknown`.
+
+This output is implemented by `factory/version.py:line` and
+`factory/version.py:describe`; it is pinned by
+`tests/test_version.py::test_dash_dash_version_prints_the_same_line`,
+`tests/test_version.py::test_an_untagged_checkout_is_described_by_its_commit`
+and `tests/test_version.py::test_describe_is_none_outside_a_factory_checkout`.
+
+7. Local web interface
+
+7.1 Reads and action eligibility
+
+The web reads the same configured plans, local board, worktrees, logs and
+transcripts as the CLI. It does not maintain a second task-status store and it
+does not refresh GitHub on an ordinary page load. Refresh happens only through
+the explicit `status --refresh` action (and wherever the invoked CLI command
+itself refreshes, such as a plan run).
+
+Run forms use `factory/web/views.py:what_runs` and
+`factory/web/views.py:run_flags`:
+
+- A task form offers work only for a ready `queued` task or a
+  `failed`/`conflict`/`ci_failed`/`changes_requested` task. Active tasks,
+  waiting tasks, `pr_open`, `merged` and `abandoned` tasks are not offered a
+  run. A dead active task is shown separately rather than made runnable by the
+  form.
+- The board shows “Run plan” only when at least one plan task is currently
+  startable. The direct plan run form may also list waiting tasks as “later”;
+  starting it launches a supervisor that waits for their dependencies. A plan
+  with no items because every task is merged, abandoned or `pr_open` is
+  refused.
+- The task form sends `run TASK --max-cost CAP --max-attempts N --quiet` and an
+  optional `--flow NAME`. The plan form has no `--quiet` and adds
+  `--parallel P`.
+- The form requires a positive per-task cost cap of at most 1000 USD, allows
+  1–5 attempts, and allows 1–8 parallel plan workers. Its flow choices come
+  from configuration, defaulting to the configured flow. The displayed command
+  is a preview; the POST handler constructs the argv from validated fields,
+  not from arbitrary command text.
+- Missing provider credentials disable the rendered start button. The invoked
+  CLI remains responsible for its own runtime checks and reports failures in
+  the job output.
+
+Quick actions have their own checks: sync is always available; refresh is
+offered on the board; stop requires a live active task; clean requires an
+existing worktree and no live active task; hold is offered only for
+`queued`/`failed`; and requeue is offered only for `abandoned`. Stop and clean
+require typed confirmation. A request made ineligible by another operator is
+refused with 409 rather than being applied blindly. The main eligibility rules
+are pinned by
+`tests/test_web.py::test_run_buttons_appear_where_a_run_would_do_something`,
+`tests/test_web.py::test_run_form_lists_what_will_run_and_previews_the_command`,
+`tests/test_web.py::test_a_run_cannot_be_started_without_the_form` and
+`tests/test_web.py::test_actions_are_refused_for_tasks_they_dont_apply_to`.
+
+7.2 Request and local-server checks
+
+The server binds to loopback (`127.0.0.1`) by default and requires the token printed at
+startup for both the URL query and same-site form submissions. Remote binding
+additionally requires an explicit `FACTORY_WEB_TOKEN` or `GH_TOKEN`. Host
+headers are validated before routing. POST routes accept only the bounded
+`application/x-www-form-urlencoded` body, reject unexpected/oversized bodies,
+check the CSRF token and same-origin/fetch-site metadata, and validate the
+requested return path as a local path without a fragment. Unknown actions are
+404; malformed forms are 400. Stop and clean require the task id as their
+confirmation value.
+
+These checks are behavioral requirements of `factory/web/server.py:App._post`,
+not a claim that the development server is an internet-facing service. They
+are exercised by
+`tests/test_web.py::test_posts_without_this_servers_token_or_from_another_origin_are_refused`,
+`tests/test_web.py::test_only_get_requests_for_localhost_are_answered`,
+`tests/test_web.py::test_stop_and_remove_worktree_ask_for_confirmation` and
+`tests/test_web.py::test_http_oversized_posts_are_capped_before_the_application_reads_them`.
+
+7.3 Actions and background jobs
+
+Each quick action executes the following shipped CLI argv as a background job.
+There is no in-process imitation of the command.
+
+| Web action | Job argv after the Python module prefix |
+|---|---|
+| Sync board | `sync` |
+| Refresh board | `status --refresh` |
+| Stop task | `stop TASK` |
+| Hold task | `abandon TASK` |
+| Requeue task | `requeue TASK` |
+| Clean task | `clean TASK` |
+
+The run form similarly starts its generated `factory run …` argv. Jobs are
+launched in their own session, with stdin closed and output captured, by
+`factory/web/jobs.py:start` and `factory/web/jobs.py:main`. Each has a directory
+under `$FACTORY_HOME/web/jobs` containing its request metadata, argv, status,
+return code, `output.log` and optional task results. Job output and results
+continue to be readable after the web server stops; a running job is not tied
+to an HTTP request. Pruning on job creation retains the newest 200 numbered job directories.
+
+The activity index lists jobs, and `/activity/JOB` reads output and parses
+plan-child task results. Stop actions return to the activity view; safe quick
+actions return to their validated local destination.
+`tests/test_web.py::test_each_action_runs_its_factory_command_as_a_job` is the
+normative action-to-command test;
+`tests/test_web.py::test_a_job_records_its_output_and_exit_code_and_outlives_the_server`
+and `tests/test_web.py::test_starting_a_run_launches_factory_run_with_the_forms_flags` pin
+job lifetime and run-form execution.
+
+8. Source and tests
+
+### Sources
+
+- `factory/cli.py:main`, `factory/cli.py:cmd_run`, `factory/cli.py:cmd_run_plan`,
+  `factory/cli.py:cmd_run_one`, `factory/cli.py:cmd_status`,
+  `factory/cli.py:cmd_stop`, `factory/cli.py:cmd_clean`,
+  `factory/cli.py:cmd_abandon` and `factory/cli.py:cmd_requeue`.
+- `factory/version.py:line` and `factory/version.py:describe`.
+- `factory/scheduler.py:run`, `factory/scheduler.py:startable` and
+  `factory/scheduler.py:default_launch`.
+- `factory/observe.py:detail`, `factory/observe.py:render_top` and
+  `factory/observe.py:follow_all`.
+- `factory/web/server.py:App`, `factory/web/server.py:App.handle`,
+  `factory/web/server.py:App._post`, `factory/web/server.py:App._post_run`,
+  `factory/web/server.py:App._validate` and `factory/web/server.py:App._command`.
+- `factory/web/jobs.py:start`, `factory/web/jobs.py:main`,
+  `factory/web/jobs.py:Job.outcome` and `factory/web/jobs.py:prune`.
+- `factory/web/views.py:what_runs`, `factory/web/views.py:run_flags`,
+  `factory/web/views.py:board`, `factory/web/views.py:task`,
+  `factory/web/views.py:run_page`, `factory/web/views.py:confirm` and
+  `factory/web/views.py:activity`.
+
+### Behavioral tests
+
+- `tests/test_web.py::test_each_action_runs_its_factory_command_as_a_job`
+- `tests/test_web.py::test_starting_a_run_launches_factory_run_with_the_forms_flags`
+- `tests/test_web.py::test_a_job_records_its_output_and_exit_code_and_outlives_the_server`
+- `tests/test_web.py::test_a_run_cannot_be_started_without_the_form`
+- `tests/test_observe.py::test_dead_run_is_flagged_and_refresh_fails_it`
+- `tests/test_stop.py::test_stop_ends_a_running_task_as_failed_and_records_the_run_as_stopped`
+- `tests/test_stop.py::test_stop_kills_a_task_that_ignores_sigterm`
+- `tests/test_requeue.py::test_requeue_moves_only_failed_and_abandoned_tasks`
+- `tests/test_version.py::test_dash_dash_version_prints_the_same_line`
+- `tests/test_scheduler.py::test_a_plan_run_passes_its_flow_to_each_task`
+- `tests/test_pipeline.py::test_rerun_replaces_a_finished_run_and_dependencies_need_a_pr`

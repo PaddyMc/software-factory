@@ -1,0 +1,355 @@
+08 — Observability and statistics
+
+Baseline: 8bd7012 (first edition).
+
+1. Scope and evidence layers
+
+This chapter specifies what the shipped factory records and how an operator
+should interpret it. It distinguishes operational output from measurements;
+none of these views refreshes GitHub merely by being read. Source citations
+use `path:symbol` and behavioral tests use `path::test_name`, following the
+chapter conventions.
+
+The evidence layers are related but not interchangeable:
+
+| Layer | Contents and intended use | Primary interface |
+|---|---|---|
+| Logs | Timestamped stage, model, tool, gate and error messages. A task has one append-only operational log, shared across its attempts, and web jobs have their own captured stdout/stderr. | `factory logs`, `factory top`, web task/activity pages |
+| Traces | A tabular rendering of one transcript: one row per model call, with model/tool time, context input, cached input, output and reasoning tokens, cost, tool calls and result sizes. | `factory trace` |
+| Transcripts | The recorded system prompt, task message, model messages, any model-provided reasoning, tool calls and tool results for one agent run. | `factory transcript`, web run pages |
+| Task records | Current board status, dependency/PR/stack metadata, candidate SHA, pid/liveness, progress, heartbeat/activity, note and aggregate task cost. | `factory status`, `factory top`, `factory show`, web board/task pages |
+| Run records | One row per role execution, labelled by role and attempt, including flow step, model, prompt version, start/end, outcome/report, transcript path, SHA, model calls, tokens, cost and refused tools. Non-agent work such as PR, verification and merge records also uses runs. | `factory show`, transcript/trace run selection, `factory stats` |
+| Stats | Aggregates over selected run and task sets, not another event stream and not a replacement for the underlying reports. | `factory stats --json` or its text tables |
+
+`factory/log.py:log_path` places ordinary task logs at
+`$FACTORY_HOME/logs/TASK.log`. `factory/log.py:RunLog` appends rather than
+truncates, so a later attempt does not erase earlier attempts. Agent
+transcripts live below `$FACTORY_HOME/transcripts/TASK`, with filenames of the
+form `{run_id:05d}-{role}-{attempt}.jsonl` (the run id is zero-padded to at
+least five digits). Web command output is instead the `output.log` in that
+job's own directory.
+
+SQLite and JSONL are internal storage, not promised stable serialization
+formats. The compatibility behavior below is a requirement on the shipped
+readers for older records; it is not a versioned public schema for direct
+database or transcript consumers. Use the CLI/web renderers for the supported
+operator view.
+
+2. Logs and live views
+
+`factory logs TASK` prints a task log, optionally starting with its last N
+lines and optionally following it. Following one task ends when that task is
+no longer active or queued. `factory logs --all` merges every available task
+log with a task-id prefix and can keep following. Log lines are human diagnostics, not
+usage records: token totals and prices must come from run/transcript evidence.
+
+`factory top` combines stored task/run records, process liveness and recent log
+lines. Its global header counts active rows as running, combines
+`pr_open`/`conflict`/`ci_failed`/`changes_requested` under “PR open”, and
+reports failed rows, ready versus waiting queued rows, and done rows
+(`merged` plus `abandoned`). Each plan counter is more detailed: it reports
+merged/total and separately counts conflicts, CI failures, requested changes
+and held tasks. A dead pid can be displayed as `DEAD` before a refresh changes
+the stored status. Elapsed/quiet times and the current activity describe the
+live process; they are not derived from transcript timing.
+
+Merged-log ordering and live task detail are pinned by
+`tests/test_observe.py::test_logs_all_merges_tasks_in_time_order`,
+`tests/test_observe.py::test_top_shows_running_task_activity_cost_and_failures`,
+`tests/test_observe.py::test_top_and_status_group_tasks_by_plan_with_a_task_counter`
+and `tests/test_observe.py::test_dead_run_is_flagged_and_refresh_fails_it`.
+
+3. Transcripts and traces
+
+3.1 Selection and presentation
+
+`factory transcript TASK` and `factory trace TASK` select the newest matching
+run by default. Their role choices are `plan`, `build`, `review` and `verify`;
+flow-step and attempt filters narrow those candidates further, and `--all`
+renders every match rather than only the newest. `factory show TASK` instead
+lists every run by default and has role/step filters but no attempt or `--all`
+filter. Its role choices additionally include `resolve`, `ci`, `human_review`,
+`pr` and `merge` for rework and non-agent records. A selected agent run's
+stored transcript path connects its run totals to the detailed events.
+
+A transcript prints the system event and task message, then each model step
+and its immediately associated tool activity. Long content is clipped by
+default; `--full` includes the full system prompt and unclipped message/tool
+content. Reasoning, when supplied by the model, appears before that step's
+answer and tool calls. Tool results marked as refused are visibly flagged.
+
+A trace does not replay every message. `factory/observe.py:trace_rows` makes
+one row per AI event and associates following tool events with that call. Each
+model-time interval starts at the preceding input/tool boundary: initially the
+transcript's first event, then the previous call's last tool result (or that
+call's AI event when it had no results). Tool time separately measures from an
+AI event through its associated tool results. Input context is
+reported per call and summed across calls, so the total intentionally counts
+context re-sent at every step rather than unique tokens. Result sizes and the
+slowest/largest tools help explain context growth and latency.
+
+`factory transcript` prints the selected run record's model, aggregate model
+calls, input/output tokens, cost and refused-tool count before rendering its
+transcript. `factory trace` instead prints the task/role/attempt heading and
+the transcript-derived table. An old or incomplete transcript does not cause
+either renderer to invent a new run record. A trace with no model calls prints
+`(no model calls recorded)`. Model-time cells lacking a timestamp print `-`;
+an old transcript does not fail merely because its events have no timestamps.
+
+3.2 Older records and optional fields
+
+Transcript and trace readers use defaults for optional event fields. In
+particular:
+
+- Missing `usage` token members render as zero in a transcript's AI header;
+  missing cache counts render as zero in a trace.
+- Missing or null per-event `cost_usd` is unknown and prints no transcript
+  price or a `-` trace price. It is not converted to zero.
+- Missing `reasoning` text and missing/null `usage.reasoning` add no `thinks:`
+  section and no aggregate thinking count. A trace cell for an unrecorded
+  reasoning count is `-`.
+- Missing event timestamps are tolerated; model-time cells without enough
+  timestamp information are `-`, while unavailable tool time falls back to 0.0.
+
+When the model reports positive reasoning-token usage but supplies no
+reasoning text, the transcript says that the model did not share its reasoning
+and reports the token count. Reasoning text is shown only when present; the
+factory does not reconstruct hidden reasoning from an answer or token count.
+
+The exact legacy rendering is pinned by
+`tests/test_observe.py::test_transcripts_without_thoughts_print_as_before`.
+Reasoning ordering, undisclosed reasoning and trace compatibility are pinned
+by `tests/test_observe.py::test_transcript_shows_each_steps_thoughts_first`,
+`tests/test_observe.py::test_a_model_that_did_not_share_its_thoughts_is_said_so`,
+`tests/test_observe.py::test_trace_counts_thinking_tokens` and
+`tests/test_agent_loop.py::test_reasoning_is_recorded_with_each_step`.
+
+4. Token and cost accounting
+
+`factory/agents.py:LangChainRoles._observe` accumulates usage for each actual
+model response. `tokens_in` and `tokens_out` are sums of provider-reported
+input/output usage across model calls in that run; `steps` counts model calls,
+not tool calls. Cache-read and reasoning usage are details of those totals,
+not extra tokens to add again. Refused tool calls have their own counter. A
+run with missing provider usage can therefore have zero recorded token
+counters without proving that the provider used no tokens.
+
+For a known `openrouter:MODEL` price entry, `factory/prices.py:cost` computes
+USD using per-token rates:
+
+```text
+uncached_input = tokens_in - min(cache_read, tokens_in)   # when a cache rate exists
+cost = uncached_input * prompt_rate
+     + cached_input * cache_read_rate
+     + tokens_out * completion_rate
+```
+
+If the price entry has no cache-read rate, all input is charged at the normal
+prompt rate. Cached input is part of `tokens_in`, not an additional input
+amount. Prices are cached locally for 24 hours and refreshed from OpenRouter's
+public model-price endpoint when stale; a previously cached table is used if
+refresh fails.
+
+Every non-OpenRouter spec, any OpenRouter model absent from the price table,
+and price lookup failures produce `cost_usd = NULL`, not zero. A trace sums
+only priced calls: if at least one call is priced, its total is that sum even
+when other calls are unknown; when model calls exist but none is priced, the
+total is `unknown`. Task board totals are sums of recorded run costs over all
+attempts, so they can be incomplete when any price is unknown. The stricter
+merged-PR statistics rule below prevents an incompletely priced merged task
+from being treated as a fully priced zero or partial observation.
+
+Cached-input pricing and unknown-price behavior are pinned by
+`tests/test_agent_loop.py::test_cached_input_is_priced_at_the_cache_rate` and
+`tests/test_observe.py::test_cost_from_cached_openrouter_prices`.
+
+5. Run metadata and prompt versions
+
+`factory/db.py:DB.start_run` gives each run an increasing id and records task,
+role, attempt, flow/step and start time. `factory/db.py:DB.progress` publishes
+step/token/cost/refusal measurements and recomputes the task's aggregate cost;
+`factory/db.py:DB.finish_run` records the outcome/report/SHA/end time. Agent
+pipeline completion additionally stores model and prompt version. An
+unfinished run has no outcome or end time; statistics labels its outcome
+`running`.
+
+Each agent run's `prompt_version` is the first 12 hexadecimal characters of
+SHA-256 over the non-per-task system-prompt parts joined by blank lines. The
+hash includes the loaded step prompt, generated project rules, repository
+guidance and other shared additions such as proof instructions. It excludes
+the task contract block and the `Today: …` line, allowing identical
+instructions on different tasks/days to share a version. Changing any hashed
+instruction changes the version. It is a prompt-content identifier, not a
+model identifier or a guarantee that agent outputs will be identical.
+
+Older and non-agent runs may have null model, flow, step or prompt-version
+fields. Step statistics use flow `-` for an unrecorded flow, fall back to the
+run role for an unrecorded step, and display an unrecorded prompt version as
+`-`. `factory show` similarly prints `-` for missing model/version metadata.
+These defaults do not assign a retrospective prompt hash to an old run.
+
+Version construction and persistence are pinned by
+`tests/test_prompt_versions.py::test_each_agent_run_records_its_prompt_version`,
+`tests/test_prompt_versions.py::test_two_tasks_under_the_same_prompts_share_a_version`,
+`tests/test_prompt_versions.py::test_editing_a_role_prompt_changes_only_that_roles_version`,
+`tests/test_prompt_versions.py::test_editing_the_repository_guidance_changes_every_roles_version`
+and `tests/test_prompt_versions.py::test_show_prints_each_runs_prompt_version`.
+Older database rows retaining null versions are covered by
+`tests/test_db.py::test_old_database_is_migrated`.
+
+6. Merge outcomes
+
+A refresh that moves a task with a factory candidate to `merged` records at
+most one `merge` run, at attempt 0, with the final PR head as its SHA. The
+outcomes are evidence about the relationship between the candidate and merged
+head:
+
+| Final head | Merge outcome / record |
+|---|---|
+| Exactly the candidate SHA | `as_built` |
+| A descendant with no non-merge commits on the first-parent walk after the candidate | `as_built`; base-only merges such as “Update branch” are not human edits |
+| A descendant with additional non-merge commits | `edited`; the report contains those commits and their diff |
+| Not a descendant of the candidate | `edited`; the report identifies the rewritten head and includes a diff stat |
+| Head unavailable or unreadable after fetch attempts | No merge run; the task remains merged and the uncertainty is reported on stderr |
+
+Reports are capped at 20,000 characters. A PR adopted as already merged has no
+local candidate and therefore no merge comparison. A merge run is not created
+for every currently merged task, which matters to the human-edit denominator
+below.
+
+`factory/merges.py:record` implements this classification. It is pinned by
+`tests/test_merges.py::test_a_pr_merged_as_built_is_recorded_as_built`,
+`tests/test_merges.py::test_updating_a_pr_from_its_base_is_not_a_human_edit`,
+`tests/test_merges.py::test_commits_pushed_to_a_pr_before_merge_are_recorded_as_human_edits`,
+`tests/test_merges.py::test_a_rewritten_pr_head_is_recorded_as_edited_with_its_diff` and
+`tests/test_merges.py::test_a_merge_whose_final_head_cant_be_read_records_nothing`.
+
+7. Statistics selection and time/plan filters
+
+`factory stats` does not call GitHub or a model, refresh task state, or
+intentionally update task/run records. “Merged” and “failed” in its summary
+are current stored states at report time, not a reconstruction of the state at
+`--until`.
+
+The selection algorithm in `factory/stats.py:collect` has two related sets:
+
+1. **Selected runs** have `started_at >= since` when `--since` is present and
+   `started_at < until` when `--until` is present. The window is half-open.
+2. **Selected tasks** are tasks owning at least one selected run. With
+   `--plan`, both selection stages are restricted to the resolved plan path;
+   a plan file name without `.md` and its path name the same plan.
+
+An ISO date boundary means midnight UTC. An ISO datetime is accepted; a naive
+datetime is interpreted as UTC and an aware datetime is normalized to UTC.
+Omitting a boundary leaves that side open. A malformed boundary is an error
+with exit 2. No selected runs prints `no runs in the window` and exits 0, also
+when `--json` was requested.
+
+Run-level rates and step rows use only selected runs. Task-level measurements
+first select tasks as above and then inspect **all runs of those tasks**, even
+runs outside the time window. This distinction is intentional for first PR
+attempt, rework and lifetime-cost measurements. It does not widen the plan
+filter to other tasks.
+
+The exception to filtering is a step group's `first seen` date: after selected
+runs establish the displayed groups, that date is the earliest matching group
+anywhere in the database, independently of both time and plan filters.
+
+8. Metric denominators
+
+An empty rate denominator renders `-` in text and `null` in JSON. The metric
+definitions below state each denominator explicitly.
+
+| Metric | Numerator and denominator |
+|---|---|
+| Window tasks | Count selected tasks; this is a count, not a rate. |
+| PRs | Count selected tasks having any `pr` run among all their runs. It is not restricted to outcome `opened`. |
+| Merged / failed | Count selected tasks whose **current** task status is respectively `merged` or `failed`. |
+| First-attempt pass rate | Selected tasks whose first `pr` run with outcome `opened` has attempt 1 ÷ selected tasks having any `build` run. Both sets use all runs of the selected tasks. |
+| Attempts per PR | Sum of the attempt numbers of each selected task's first `pr` run with outcome `opened` ÷ selected tasks having such a run. It is not attempts divided by all tasks or all model calls. |
+| Cost per merged PR | For each selected task currently `merged` with no unknown-price agent run, sum recorded `cost_usd` over all of its runs; sum those task costs ÷ `priced_merged`, the number of such fully priced tasks. A merged task with any model-bearing run whose cost is null is counted in `unpriced_merged` and excluded from both numerator and denominator; null is never treated as zero. Non-agent null costs do not make a task unpriced. |
+| Reviewer CHANGES rate | Selected `review` runs whose outcome starts with `CHANGES` ÷ all selected `review` runs. |
+| Gate failures | For each gate name, count `FAIL` table rows in selected `verify` runs whose outcome is exactly `fail`. This is a failure count, not a rate over all tasks. |
+| Step-limit stops | For each step, count selected runs whose outcome ends in `(step limit)` or `(graph recursion limit)`. |
+| Conflict / CI / review reworks | For each kind, selected tasks with a `pr` run and respectively a `resolve`, `ci` or `human_review` run ÷ selected tasks with a `pr` run. These task-level checks use all runs. |
+| Human edits | Selected `merge` runs with outcome `edited` ÷ all selected `merge` runs. Merged tasks with no merge record are absent from both numerator and denominator. |
+
+The **steps** table groups selected model-bearing runs by
+`(flow, step, model, prompt_version)`:
+
+- `runs` is the group size and the denominator for mean model `calls` per run;
+- `stops` uses the two step-limit suffixes above;
+- `refused` is the sum of refused tool calls, not the denominator for calls;
+- `cost` is the sum of known run costs in the group and can be partial;
+- `outcomes` counts exact outcomes, substituting `running` for unfinished rows;
+- `first seen` follows the global-date rule above.
+
+8.1 First-attempt example
+
+Suppose three selected tasks have build runs:
+
+| Task | Build history | First `pr` run with outcome `opened` |
+|---|---|---|
+| `demo-t01` | attempt 1 | attempt 1 |
+| `demo-t02` | attempts 1 and 2 | attempt 2; a later rework PR opens at attempt 1 |
+| `demo-t03` | attempt 1, but no opened PR | none |
+| `demo-t04` | none | none; its only PR run is closed at attempt 1 |
+
+The first-attempt denominator is 3 because `demo-t01`, `demo-t02` and `demo-t03`
+have build runs; only `demo-t01` is in the numerator, so the pass rate is
+**1/3 = 33.3%**. Attempts per PR uses only the first two tasks' first opened PRs
+and is **(1 + 2) / 2 = 1.5 attempts**. The later `demo-t02` PR does not replace
+its first opened PR. `demo-t03` does not silently disappear from the
+first-attempt denominator, but it does not enter attempts per PR; `demo-t04`
+is outside both denominators.
+
+This is the same fixture and result as
+`tests/test_stats.py::test_first_attempt_pass_rate_and_attempts_per_pr`.
+Window/all-runs behavior, unknown pricing, grouping and every other denominator
+are pinned respectively by
+`tests/test_stats.py::test_the_window_and_plan_filters_select_runs`,
+`tests/test_stats.py::test_cost_per_merged_pr_counts_every_run_of_merged_tasks`,
+`tests/test_stats.py::test_step_rows_split_by_flow_model_and_prompt_version`,
+`tests/test_stats.py::test_gate_failures_are_counted_by_gate`,
+`tests/test_stats.py::test_reworks_and_human_edits_are_rates_over_prs` and
+`tests/test_stats.py::test_stats_command_prints_tables_and_json`.
+
+9. Source and tests
+
+### Sources
+
+- `factory/log.py:RunLog`, `factory/log.py:log_path` and `factory/log.py:clip`.
+- `factory/observe.py:render_top`, `factory/observe.py:detail`,
+  `factory/observe.py:recent_events`, `factory/observe.py:follow_all`,
+  `factory/observe.py:render_transcript`, `factory/observe.py:trace_rows` and
+  `factory/observe.py:render_trace`.
+- `factory/db.py:DB.start_run`, `factory/db.py:DB.progress`,
+  `factory/db.py:DB.finish_run`, `factory/db.py:DB.runs` and
+  `factory/db.py:open_db`.
+- `factory/pipeline.py:Pipeline.role` and `factory/pipeline.py:Pipeline._record`.
+- `factory/agents.py:LangChainRoles._observe`,
+  `factory/agents.py:LangChainRoles.step` and `factory/agents.py:prompt_version`.
+- `factory/prices.py:cost`, `factory/prices.py:per_token` and
+  `factory/prices.py:openrouter_table`.
+- `factory/merges.py:record`.
+- `factory/stats.py:collect`, `factory/stats.py:render` and
+  `factory/stats.py:parse_when`.
+- `factory/cli.py:main`, `factory/cli.py:cmd_logs`,
+  `factory/cli.py:cmd_trace`, `factory/cli.py:cmd_transcript`,
+  `factory/cli.py:cmd_show` and `factory/cli.py:cmd_stats`.
+
+### Behavioral tests
+
+- `tests/test_observe.py::test_transcripts_without_thoughts_print_as_before`
+- `tests/test_observe.py::test_transcript_shows_each_steps_thoughts_first`
+- `tests/test_observe.py::test_trace_counts_thinking_tokens`
+- `tests/test_agent_loop.py::test_cached_input_is_priced_at_the_cache_rate`
+- `tests/test_prompt_versions.py::test_each_agent_run_records_its_prompt_version`
+- `tests/test_merges.py::test_a_pr_merged_as_built_is_recorded_as_built`
+- `tests/test_stats.py::test_first_attempt_pass_rate_and_attempts_per_pr`
+- `tests/test_stats.py::test_the_window_and_plan_filters_select_runs`
+- `tests/test_stats.py::test_cost_per_merged_pr_counts_every_run_of_merged_tasks`
+- `tests/test_stats.py::test_step_rows_split_by_flow_model_and_prompt_version`
+- `tests/test_stats.py::test_gate_failures_are_counted_by_gate`
+- `tests/test_stats.py::test_stats_command_prints_tables_and_json`
+- `tests/test_db.py::test_old_database_is_migrated`
