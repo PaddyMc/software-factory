@@ -56,6 +56,7 @@
     - strict-flow-t08
     - flow-tuning-t04
     - security-review-t06
+    - web-tools-t03
   non_goals:
     - "Any agent, ingest or lint run (wiki-t03 to t06)"
     - "Putting the wiki into task prompts, or the wiki_untouched gate (wiki-t02)"
@@ -196,6 +197,7 @@
     - strict-flow-t09
     - flow-tuning-t05
     - security-review-t07
+    - web-tools-t05
   non_goals:
     - "Changing code, or tests beyond what tests/test_templates.py needs for the new template text"
     - "Editing .claude/skills/ or this repository's AGENTS.md beyond copying the changed templates there (the factory-ops skill files, and the factory section of AGENTS.md), which tests/test_templates.py requires to match the templates"
@@ -499,6 +501,7 @@ The repository configures no `e2e` gate. `test_wiki_reading.py`, `test_wiki_inge
   - [strict-flow](strict-flow.md). `wiki-t01` depends on `strict-flow-t08` and `wiki-t07` on `strict-flow-t09`: that plan changes the same `agents.py`, `gates.py`, `tools.py` and docs, and the role pages should describe the loop the task crew then runs. It adds a `test` step kind, which gets a role page only if the wiki has one for it, and write tools limited to path globs, which wiki-t03's `PathGuard` change builds on.
   - [flow-tuning](flow-tuning.md). `wiki-t01` depends on `flow-tuning-t04` and `wiki-t07` on `flow-tuning-t05`: that plan changes the same `agents.py`, `pipeline.py`, `config.py` and docs, and adds the `select` role, which gets a role page only if the wiki has one for it.
   - [security-review](security-review.md). `wiki-t01` depends on `security-review-t06` and `wiki-t07` on `security-review-t07`: that plan changes the same `agents.py`, `gates.py`, `cli.py` and docs. Its t01 makes agents read guidance from the main checkout instead of the worktree, just as wiki-t02 reads its pages from the base commit rather than the worktree. A `security` step gets a role page only if the wiki has one for it.
+  - [web-tools](web-tools.md). `wiki-t01` depends on `web-tools-t03` and `wiki-t07` on `web-tools-t05`: that plan changes the same `agents.py`, `config.py` and docs, and its `web_search` is what the crew's out-of-scope web search during lint would use.
   - [agent-flows](agent-flows.md), through measure. wiki-t02 adds its block where `LangChainRoles.step` builds each step's prompt, and picks the role page by the step's kind.
   - [pr-review-rework](pr-review-rework.md), merged. t04's briefs read the `human_review` runs from its t04.
 - **Required by:** nothing planned. `factory bench` (NEXT.md item 3), when it's planned, could replay tasks with and without the wiki.
