@@ -40,6 +40,15 @@ models:
 # [plan]? [test]? build+ (review | gates)* [verify]?; a gates step goes after the last review when omitted.
 # flow: default
 # strict: test step, resumed builds, gates first, a proving review.
+# A build step can build several candidates (2 to 5): the first attempt builds them one after
+# another and the gates judge each; later attempts and reworks build one change.
+# flows:
+#   candidate-flow:
+#     - plan
+#     - {kind: build, candidates: 3}
+#     - gates
+#     - review
+#     - verify
 # flow: strict
 flow: gates-first           # `factory run --flow default` runs the built-in order instead
 flows:

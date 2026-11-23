@@ -45,9 +45,9 @@ Codex links are also added when re-running `factory init` in a repository initia
 | `dependency_sources` | cargo registry and git sources, rustup toolchains | Directories the agents' file tools may also read, by absolute path (never write) |
 | `test_paths` | `[]` | Globs where a `test` step may write, in the syntax of `plans` and `exclude`; required by a flow with a test step (`factory run` refuses without it) |
 | `flow` | `default` | The flow `factory run` uses: a name from `flows` (the built-ins are `default`, today's pipeline, and `strict`); `factory run --flow` overrides it per run |
-| `flows` | `{default: …, strict: …}` | Named agent flows: name → ordered step list. `default` and `strict` are always present and neither can be redefined. A step is a kind string (`plan`, `test`, `build`, `review`, `verify`, `gates`) or a mapping with `kind` and optional `name`, `model`, `max_steps`, `loop` and `prove`. Exactly one gates step; one is inserted after the last review (else build) step when omitted |
-| `models` | `{}` | Model per step kind (`plan`, `test`, `build`, `review`, `verify`), e.g. `{review: "anthropic:claude-…"}`; over the prompt's frontmatter |
-| `max_steps` | `{}` | Model calls per agent run, per step kind (`plan`, `test`, `build`, `review`, `verify`); over the prompt's frontmatter |
+| `flows` | `{default: …, strict: …}` | Named agent flows: name → ordered step list. `default` and `strict` are always present and neither can be redefined. A step is a kind string (`plan`, `test`, `build`, `review`, `verify`, `gates`) or a mapping with `kind` and optional `name`, `model`, `max_steps`, `loop`, `prove` and `candidates`. Exactly one gates step; one is inserted after the last review (else build) step when omitted |
+| `models` | `{}` | Model per step kind (`plan`, `test`, `build`, `review`, `verify`) and the candidates `select` role, e.g. `{review: "anthropic:claude-…"}`; over the prompt's frontmatter |
+| `max_steps` | `{}` | Model calls per agent run, per step kind (`plan`, `test`, `build`, `review`, `verify`) and the candidates `select` role; over the prompt's frontmatter |
 | `denied_commands` | `[]` | Extra regexes the agents' `run` tool refuses (git push/commit/reset…, `sudo`, `gh`, `terraform apply/destroy` and `factory` are built in) |
 | `sandbox.ro_binds` / `rw_binds` | rustup + uv read-only, `~/.cargo` writable | Host paths visible inside the sandbox (missing ones are skipped) |
 | `sandbox.hide` | cargo credentials | Files masked with `/dev/null` |
@@ -86,6 +86,27 @@ flows:
 Steps follow `[plan]? [test]? build+ (review | gates)* [verify]?`. There is at most one test step, directly before the first build step; it needs non-empty `test_paths`. In `lean`, `careful`, `default-trim` and `test-first`, a gates step is inserted after the last review; `gates-first` places it explicitly. Custom steps can set their own prompt, model and step limit as described under [Agent flows](architecture.md#agent-flows).
 
 A step mapping also takes **`loop`**, a list containing any of `trim`, `map`, `nudge` and `resume` once each. The first three work on any agent step: `trim` caps reads and clears old tool results, `map` adds a repository map and spec references, and `nudge` warns near the step limit and about repeated edits or failures. `resume` is valid only on build steps and carries the conversation into later attempts. **`prove`** is a boolean valid only on review steps: with `prove: true`, the reviewer gets sandboxed `run`, and CHANGES needs a reproduced failure or a `[scope]` blocker or major. Kind **`test`** runs the tester once before the builds; its tests are committed, red-checked and locked.
+
+**Build candidates:** a build step mapping can set `candidates` (an integer from 2 to 5): the first
+attempt of a fresh build builds that many candidates, each in its own worktree, and the gates judge
+each. A flow with `candidates` needs one build step followed by the gates, so a candidate is judged
+before a review. The flow's other steps are unchanged:
+
+```yaml
+flows:
+  gates-first-x3:                        # the gates stay directly after the candidates build
+    - plan
+    - {kind: build, candidates: 3}
+    - gates
+    - {kind: review, prove: true}
+    - verify
+```
+
+Only the first attempt of a fresh build makes candidates; later attempts and reworks make one change.
+The `select` role's selector chooses among multiple passing candidates. One passing candidate is kept
+directly, an invalid selector choice falls back to the smallest passing diff, and with none passing the
+candidate with the fewest failing gates carries on. See [Build candidates](architecture.md#build-candidates)
+for the selection, feedback and cost details.
 
 The built-in `strict` flow combines those options and omits the planner. It is written out here for reference, not as a `flows:` entry to copy: like `default`, it cannot be redefined.
 
@@ -459,6 +480,7 @@ Each keeps their own board; GitHub is what they share. `factory sync && factory 
 | `.factory/config.yaml: unknown key …` | A typo in the config; `factory config` shows what was understood |
 | `unknown flow NAME (flows: default, …)` | The `flow` or `--flow` value matches no flow in `flows`. `factory config` prints the defined names; use one or add it under `flows:` |
 | `flows.<name>.<step>: build steps come first (after any plan or test step) and are contiguous` (or `at most one plan step`, `the plan step must be first`, `at most one test step`, `the test step must be directly before the first build step`, `at most one verify step`, `the verify step must be last`, `at least one build step is required`, `at most one gates step`) | The steps must follow `[plan]? [test]? build+ (review \| gates)* [verify]?`. Reorder them; see [Agent flows](architecture.md#agent-flows) |
+| `flows.<name>.<step>: 'candidates' needs one build step followed by the gates` | The flow's candidates build must be its only build step, with the gates step directly after it. Remove other build steps or move `gates`; see [Build candidates](architecture.md#build-candidates) |
 | `flow NAME has a test step: set test_paths in .factory/config.yaml` | A test-bearing flow needs globs where its tester may write. Set for example `test_paths: ["tests/**"]`; `factory run` refuses before any work without them |
 | `the tests pass before the change` | The test step's try was not red: its tests already hold without the change. The try is discarded and the step runs again with that feedback; after two failed tries the task fails before the build |
 | `COMMAND selects no tests: write the tests it names` | At the test commit, COMMAND names tests that do not exist. The try is discarded and the tester runs again with the reason; zero selected tests never counts as red |
@@ -473,6 +495,7 @@ Each keeps their own board; GitHub is what they share. `factory sync && factory 
 | Status `changes_requested` | A review requests changes on the PR's head, which is the factory's candidate. `factory status --refresh` marks it; `factory run TASK` (or its plan) addresses the review, and `factory show TASK --role human_review` shows the brief; see [Review comments](architecture.md#review-comments) |
 | A review rework `failed` | The builder couldn't address the review, or review or gates rejected the result. The PR still holds its old head and the task is `failed` | Run the task again to rebuild it from scratch, or `factory run TASK --force` to do that straight away |
 | A review was answered without a change | The builder found nothing to change; its answer was posted on the PR as a comment, the reviews count as addressed, and the task is back to `pr_open` | Nothing to do |
+| A selector run is recorded as `fallback` | The selector's report had no valid `CHOICE:` line naming a passing candidate, so the smallest passing diff was chosen. The PR still opens with that candidate; read the comparison with `factory show TASK --step select` |
 | A verify run ends with outcome `report (fallback)` | The verifier's summary couldn't be read in the fixed shape, so the factory wrote one from the contract, the diff and the reviewers' findings; the PR is unaffected. Read the verifier's whole report with `factory show TASK --step STEP` (STEP is the verify step's name, `verify` in the default flow); see [Pull requests](architecture.md#pull-requests) |
 | A PR body says `… kept N of M characters: factory show TASK --step STEP` | The block was capped to keep the body under its 60,000-character limit. Run the command it names for the whole report; `factory show TASK` has the planner's plan and every agent's full report |
 | `… not the factory's candidate: someone pushed to it` | A commit the factory didn't make is on the PR branch, so its CI isn't the factory's to fix. Fix it there, or `factory run TASK --force` to rebuild |
