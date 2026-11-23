@@ -34,6 +34,7 @@ models:
   build: "openrouter:moonshotai/kimi-k3.1-pro"
   review: "openrouter:z-ai/glm-5.3"         # deepseek-v4-pro left 4 of 26 reviews without a VERDICT line
   verify: "openrouter:deepseek/deepseek-v4-flash-0731"
+  select: "openrouter:z-ai/glm-5.3"
 # max_steps: {build: 150}
 
 # Agent flows: named step lists, chosen with `flow:` or per run with `factory run --flow NAME`.
@@ -43,6 +44,15 @@ models:
 #   test (map, trim, nudge) → build (map, trim, nudge, resume) → gates → review (prove, trim) → verify
 # The tester writes failing tests from the contract on another model, the builder can't change them,
 # and a reviewer's CHANGES needs a reproduced failure or a scope finding.
+# A build step can build several candidates (2 to 5): the first attempt builds them one after
+# another and the gates judge each; later attempts and reworks build one change.
+# flows:
+#   candidate-flow:
+#     - plan
+#     - {kind: build, candidates: 3}
+#     - gates
+#     - review
+#     - verify
 flow: strict
 flows:
   gates-first:              # the board's best before strict (81% first-attempt pass). Use it for docs-only

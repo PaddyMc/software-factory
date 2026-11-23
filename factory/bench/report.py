@@ -181,10 +181,12 @@ def cell_lines(results: dict, run_dir: Path) -> list[str]:
             directory = str(path if path.is_absolute() else run_dir / path)
         else:
             directory = "-"
+        built = cell.get("candidates_built", 0)
+        candidates = f", {built} candidates ({cell.get('candidates_passed', 0)} passed)" if built else ""
         lines.append(
             prefix + f"{cell['outcome']}, {attempts} attempt{'' if attempts == 1 else 's'}, "
             f"${float(cell.get('cost_usd') or 0.0):.2f}, "
-            f"{float(cell.get('seconds') or 0.0) / 60:.1f} min, {directory}"
+            f"{float(cell.get('seconds') or 0.0) / 60:.1f} min{candidates}, {directory}"
         )
     return lines
 
@@ -224,6 +226,9 @@ def _step_changes(a_id: str, a_variant: dict, b_id: str, b_variant: dict) -> lis
         a_prove, b_prove = a_step.get("prove", False), b_step.get("prove", False)
         if a_prove != b_prove:
             differences.append(f"prove {a_prove} → {b_prove}")
+        a_candidates, b_candidates = a_step.get("candidates", 1), b_step.get("candidates", 1)
+        if a_candidates != b_candidates:
+            differences.append(f"candidates {a_candidates} → {b_candidates}")
         if differences:
             changes.append(f"{name}: {', '.join(differences)}")
     return changes
@@ -273,6 +278,8 @@ def compare(a_id: str, a_results: dict, b_id: str, b_results: dict) -> str:
         changes = _step_changes(a_id, a_variants[variant], b_id, b_variants[variant])
         if changes:
             lines.append(f"{variant} · {' · '.join(changes)}")
+            # Candidate changes also have a step-prefixed line for direct step comparisons.
+            lines.extend(change for change in changes if "candidates " in change)
 
     a_cells, b_cells = a_results.get("cells", []), b_results.get("cells", [])
     variant_rows = []

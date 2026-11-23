@@ -56,6 +56,49 @@ def test_a_flow_is_a_list_of_steps_with_kinds_models_and_step_limits():
         C.parse({"flows": {"f": ["build", {"kind": "review", "max_steps": 0}]}})
 
 
+def test_candidates_is_a_build_step_option(repo, monkeypatch, capsys):
+    flow = C.parse({"flows": {"many": [{"kind": "build", "candidates": 3}]}}).flows["many"]
+    assert flow.steps[0] == F.Step("build", "build", candidates=3)
+    assert all(step.candidates == 1 for step in (*F.DEFAULT.steps, *F.STRICT.steps))
+    assert F.parse_flow("plain", ["build", "review"]).steps[0].candidates == 1
+
+    with pytest.raises(C.ConfigError) as e:
+        C.parse({"flows": {"broken": [{"name": "audit", "kind": "review", "candidates": 2}, "build"]}})
+    assert "flows.broken.audit" in str(e.value) and "only valid on build steps" in str(e.value)
+    for value in (1, 6, 0, "3", 2.5, True, None):
+        with pytest.raises(C.ConfigError) as e:
+            C.parse({"flows": {"broken": [{"kind": "build", "candidates": value}]}})
+        assert "flows.broken.build" in str(e.value) and "integer from 2 to 5" in str(e.value)
+
+    (repo / ".factory/config.yaml").write_text(
+        "flows:\n  many:\n    - {kind: build, candidates: 3}\n    - gates\n")
+    monkeypatch.chdir(repo)
+    assert main(["config"]) == 0
+    assert "candidates: 3" in capsys.readouterr().out
+
+
+def test_candidates_needs_one_build_step_followed_by_the_gates():
+    for steps in (
+        ["plan", {"kind": "build", "candidates": 3}, "gates", "review", "verify"],
+        [{"kind": "build", "candidates": 2}],
+        [{"kind": "build", "candidates": 2}, "verify"],
+    ):
+        flow = F.parse_flow("many", steps)
+        build = next(i for i, step in enumerate(flow.steps) if step.kind == "build")
+        assert flow.steps[build + 1].kind == "gates"
+
+    bad_flows = (
+        [{"kind": "build", "candidates": 2}, {"name": "another", "kind": "build"}, "gates"],
+        [{"kind": "build", "candidates": 3}, "review", "gates"],
+        [{"kind": "build", "candidates": 3}, "review"],
+    )
+    for steps in bad_flows:
+        with pytest.raises(C.ConfigError) as e:
+            C.parse({"flows": {"broken": steps}})
+        assert "flows.broken.build" in str(e.value)
+        assert "needs one build step followed by the gates" in str(e.value)
+
+
 def test_gates_go_after_the_last_review_unless_placed():
     def kinds(flow):
         return [s.kind for s in flow.steps]

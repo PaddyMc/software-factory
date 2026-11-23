@@ -19,7 +19,8 @@ from .config import ConfigError
 KINDS = ("plan", "test", "build", "review", "verify", "gates")
 LOOP = ("trim", "map", "nudge", "resume")
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
-RESERVED = ("resolve", "ci", "pr", "human_review", "planner", "tester", "builder", "reviewer", "verifier")
+RESERVED = ("resolve", "ci", "pr", "human_review", "planner", "tester", "builder", "reviewer", "verifier",
+            "select", "selector")
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class Step:
     max_steps: int | None = None          # model calls allowed; None = the kind's limit
     loop: tuple[str, ...] = ()            # loop behaviours, e.g. ("trim",)
     prove: bool = False                   # review only: CHANGES needs a reproduced failure or scope finding
+    candidates: int = 1                   # build only: first-attempt candidates, built and gated in turn
 
 
 @dataclass(frozen=True)
@@ -70,7 +72,7 @@ def parse_step(flow: str, raw) -> Step:
     if not isinstance(name, str):
         raise ConfigError(f"flows.{flow}: a step's `name` must be a string")
     where = f"flows.{flow}.{name}"
-    extra = sorted(str(k) for k in set(raw) - {"kind", "name", "model", "max_steps", "loop", "prove"})
+    extra = sorted(str(k) for k in set(raw) - {"kind", "name", "model", "max_steps", "loop", "prove", "candidates"})
     if extra:
         raise ConfigError(f"{where}: unknown key(s) {', '.join(extra)}")
     if kind == "gates":
@@ -98,7 +100,13 @@ def parse_step(flow: str, raw) -> Step:
         raise ConfigError(f"{where}: prove must be a boolean")
     if prove and kind != "review":
         raise ConfigError(f"{where}: 'prove' is only valid on review steps")
-    return Step(name, kind, model, max_steps, tuple(loop or ()), prove)
+    candidates = raw.get("candidates", 1)
+    if "candidates" in raw and (not isinstance(candidates, int) or isinstance(candidates, bool)
+                                or not 2 <= candidates <= 5):
+        raise ConfigError(f"{where}: candidates must be an integer from 2 to 5")
+    if "candidates" in raw and kind != "build":
+        raise ConfigError(f"{where}: 'candidates' is only valid on build steps")
+    return Step(name, kind, model, max_steps, tuple(loop or ()), prove, candidates)
 
 
 def validate(flow: str, steps: tuple[Step, ...]) -> None:
@@ -156,6 +164,14 @@ def _order(flow: str, steps: tuple[Step, ...]) -> None:
         raise ConfigError(f"flows.{flow}.{bad.name}: build steps come first (after any plan or test step) and are contiguous")
 
 
+def _candidates(flow: str, steps: tuple[Step, ...]) -> None:
+    """Candidates are gated before any other post-build step, so their flow has one fixed shape."""
+    builds = [s for s in steps if s.kind == "build"]
+    for i, step in enumerate(steps):
+        if step.candidates > 1 and (len(builds) != 1 or i + 1 >= len(steps) or steps[i + 1].kind != "gates"):
+            raise ConfigError(f"flows.{flow}.{step.name}: 'candidates' needs one build step followed by the gates")
+
+
 def parse_flow(name: str, raw) -> Flow:
     """A named flow: a list of steps, validated, with a gates step inserted when omitted."""
     if not isinstance(raw, list) or not raw:
@@ -167,6 +183,7 @@ def parse_flow(name: str, raw) -> Flow:
         # review when there is one, else the last build. There is always at least one build.
         after = max(i for i, s in enumerate(steps) if s.kind in ("build", "review"))
         steps = steps[:after + 1] + (Step("gates", "gates"),) + steps[after + 1:]
+    _candidates(name, steps)
     return Flow(name, steps)
 
 

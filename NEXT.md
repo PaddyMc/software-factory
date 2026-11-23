@@ -18,7 +18,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | ✓ | Factory PR descriptions are long and hard to read. Done: [Pull requests](docs/architecture.md#pull-requests) | — | — |
 | ✓ | Capture the thoughts a model shares. Shipped in [thoughts](docs/plans/thoughts.md). | — | — |
 | ✓ | You can't tell which factory version is running. Done: [Commands](docs/reference.md#commands) | — | — |
-| 14 | A review without a verdict costs a rebuild, a task gets one build per attempt, and nothing picks the default flow from data. Planned: [flow-tuning](docs/plans/flow-tuning.md) | medium | 8, 9 |
+| ✓ | A review without a verdict costs a rebuild, a task gets one build per attempt, and nothing picks the default flow from data. Done: [Build candidates](docs/architecture.md#build-candidates) | — | — |
 | 15 | Specify the shipped factory for implementers. Planned in [factory-spec](docs/plans/factory-spec.md) | medium | shipped factory |
 | 16 | Nothing reviews a change for security, and a builder can rewrite its reviewer's guidance. Planned: [security-review](docs/plans/security-review.md) | medium | 9, 14 |
 | 17 | Plans can't be read on the web page, and a task doesn't link to the plan that explains it. Planned: [plan-pages](docs/plans/plan-pages.md) | small | 10 |

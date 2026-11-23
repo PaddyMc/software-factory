@@ -1,7 +1,7 @@
 """Local task database (SQLite). The only place task state lives.
 
 tasks: one row per contract that has entered the factory.
-runs:  one row per role invocation (plan/test/build/review/verify/pr/merge, and resolve/ci/human_review), with its report.
+runs:  one row per role invocation (plan/test/build/select/review/verify/pr/merge, and resolve/ci/human_review), with its report.
        A run's role stays its kind; `flow` and `step` name the flow and the flow step it ran under.
 """
 
@@ -16,7 +16,7 @@ from .contracts import Task
 
 STATUSES = ("queued", "planning", "building", "reviewing", "verifying", "pr_open", "conflict", "ci_failed",
             "changes_requested", "merged", "failed", "abandoned")
-ROLES = ("plan", "test", "build", "resolve", "ci", "human_review", "review", "verify", "pr", "merge")
+ROLES = ("plan", "test", "build", "select", "resolve", "ci", "human_review", "review", "verify", "pr", "merge")
 ACTIVE = ("planning", "building", "reviewing", "verifying")
 
 SCHEMA = """
@@ -60,7 +60,7 @@ MIGRATIONS = {
     "runs": [("steps", "INTEGER NOT NULL DEFAULT 0"), ("tokens_in", "INTEGER NOT NULL DEFAULT 0"),
              ("tokens_out", "INTEGER NOT NULL DEFAULT 0"), ("cost_usd", "REAL"),
              ("refused", "INTEGER NOT NULL DEFAULT 0"), ("transcript", "TEXT"),
-             ("flow", "TEXT"), ("step", "TEXT"), ("prompt_version", "TEXT")],
+             ("flow", "TEXT"), ("step", "TEXT"), ("prompt_version", "TEXT"), ("candidate", "INTEGER")],
 }
 
 
@@ -145,12 +145,13 @@ class DB:
     # ------------------------------------------------------------ runs
 
     def start_run(self, task_id: str, role: str, attempt: int, model: str | None = None,
-                  flow: str | None = None, step: str | None = None) -> int:
+                  flow: str | None = None, step: str | None = None, candidate: int | None = None) -> int:
         if role not in ROLES:
             raise ValueError(f"unknown role {role!r}")
         cur = self.conn.execute(
-            "INSERT INTO runs (task_id, role, attempt, model, flow, step, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (task_id, role, attempt, model, flow, step, now()))
+            "INSERT INTO runs (task_id, role, attempt, model, flow, step, candidate, started_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (task_id, role, attempt, model, flow, step, candidate, now()))
         self.conn.commit()
         return cur.lastrowid
 

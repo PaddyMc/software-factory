@@ -416,10 +416,11 @@ sequenceDiagram
 | planner | `z-ai/glm-5.3` | 40 | read | The implementation plan |
 | tester | `openrouter:z-ai/glm-5.3` | 60 | read, write/edit limited to `test_paths`, sandboxed `run` | The task's tests, written before the build |
 | builder | `deepseek/deepseek-v4-pro-0813` | 120 | read, write anywhere in the worktree except `.git`, sandboxed `run` | The change, or a conflicting PR's resolution |
+| selector | `openrouter:z-ai/glm-5.3` | 30 | read | Which passing candidate carries on (fallback: the smallest diff) |
 | reviewer | `z-ai/glm-5.3` | 60 | read, `git_diff`; sandboxed `run` under `prove` | `VERDICT: APPROVE` or `CHANGES` (at the step limit, one more call without tools; a verdict still missing is asked for once more in the same conversation, then counts as CHANGES) |
 | verifier | `deepseek/deepseek-v4-flash-0731` | 30 | read, `git_diff`, sandboxed `run` | Nothing: it writes the PR's title and summary (what changed, what to check); **the gates decide** |
 
-The tester's prompt ships as `factory/prompts/tester.md`. Roles are **step kinds**: a flow step of kind `build` gets the builder's tools and default prompt whatever its name. Set models and step limits per kind with `models` and `max_steps` in `.factory/config.yaml`; `--model` overrides every step for one run. To replace a kind's whole prompt, put it in `.factory/agents/<planner|tester|builder|reviewer|verifier>.md` (frontmatter `model` and `max_steps` optional); the config's settings still win over its frontmatter. `factory prompt test` prints the shipped or overridden tester prompt. Any `provider:model` that LangChain's `init_chat_model` supports works, with the provider's key in the environment (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
+The tester's and selector's prompts ship as `factory/prompts/tester.md` and `factory/prompts/selector.md`. Every role except selector is a **step kind**: a flow step of kind `build` gets the builder's tools and default prompt whatever its name. The selector is the extra read-only role used by [Build candidates](#build-candidates), with config key `select`. Set models and step limits per kind, and for `select`, with `models` and `max_steps` in `.factory/config.yaml`; `--model` overrides every agent for one run. To replace a kind's or the selector's whole prompt, put it in `.factory/agents/<planner|tester|builder|reviewer|verifier|selector>.md` (frontmatter `model` and `max_steps` optional); the config's settings still win over its frontmatter. `factory prompt test` and `factory prompt select` print the shipped or overridden prompts. Any `provider:model` that LangChain's `init_chat_model` supports works, with the provider's key in the environment (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
 
 A **custom step** (a mapping step whose `name` differs from its `kind`) gets its own prompt from `.factory/agents/<name>.md` when that file exists, else its kind's prompt. Model precedence is `--model` > the step's `model` > `models[kind]` > prompt frontmatter > the default; step-limit precedence is the step's `max_steps` > `max_steps[kind]` > prompt frontmatter > 60.
 
@@ -437,7 +438,7 @@ No agent can commit, push, call `gh`, run `factory`, or touch the database. The 
 
 ## Agent flows
 
-A **flow** is a named, ordered list of agent steps under `flows:` in `.factory/config.yaml`; `flow:` picks the default for runs. `factory run TASK|PLAN --flow NAME` overrides it for one run, and a plan run passes it to every child. The built-in `default` flow — plan, build, review, gates, verify — is today's pipeline and can't be redefined. A step is a kind string (`plan`, `test`, `build`, `review`, `verify`, `gates`) or a mapping with `kind` required and optional `name`, `model`, `max_steps`, `loop` and `prove` (`gates` itself is a bare string). A step's kind fixes its tools, task message and output, as the [Roles](#roles) table describes.
+A **flow** is a named, ordered list of agent steps under `flows:` in `.factory/config.yaml`; `flow:` picks the default for runs. `factory run TASK|PLAN --flow NAME` overrides it for one run, and a plan run passes it to every child. The built-in `default` flow — plan, build, review, gates, verify — is today's pipeline and can't be redefined. A step is a kind string (`plan`, `test`, `build`, `review`, `verify`, `gates`) or a mapping with `kind` required and optional `name`, `model`, `max_steps`, `loop`, `prove` and `candidates` (`gates` itself is a bare string). A step's kind fixes its tools, task message and output, as the [Roles](#roles) table describes.
 
 ```mermaid
 flowchart TD
@@ -474,10 +475,40 @@ There is at most one test step, directly before the first build step. The new st
 | `loop: [resume]` | build steps only | Later attempts continue the first attempt's conversation with the new feedback |
 | kind `test` | once, before the build steps | A tester writes the task's tests under `test_paths`; they are committed, shown to fail, then locked |
 | `prove: true` | review steps only | The reviewer can run commands; CHANGES needs a reproduced failure or a scope finding |
+| `candidates: N` | one build step, directly before gates | An integer from 2 to 5; the first attempt of a fresh build makes and gates that many candidates before one carries on |
 
 `loop` must be a list containing only `trim`, `map`, `nudge` and `resume`, with no repeats; the first three work on any agent step, while `resume` is build-only. Their limits and exact behaviour are under [Inside one agent: the loop](#inside-one-agent-the-loop). `prove` must be a boolean and is valid only on review steps.
 
-The effective flow has exactly one gates step: when omitted, one is inserted after the last review step, else after the last build step. Step names are unique, match `^[a-z][a-z0-9-]*$`, and aren't reserved (`resolve`, `ci`, `pr`, `human_review`, `planner`, `tester`, `builder`, `reviewer`, `verifier`); a step named after a kind, including `test`, must have that kind.
+The effective flow has exactly one gates step: when omitted, one is inserted after the last review step, else after the last build step. Step names are unique, match `^[a-z][a-z0-9-]*$`, and aren't reserved (`resolve`, `ci`, `pr`, `human_review`, `planner`, `tester`, `builder`, `reviewer`, `verifier`, `select`, `selector`); a step named after a kind, including `test`, must have that kind.
+
+### Build candidates
+
+A build step can set `candidates: N` (2 to 5), opt-in: the first attempt of a fresh build builds N
+candidates one after another, each in its own worktree from the same start commit, and the gates
+judge each before anything else sees it. The flow must have only that one build step, with the gates
+step directly after it. One first attempt with three candidates looks like:
+
+```text
+attempt 1:  build#1.1 (task worktree) ─▶ gates#1.1 ─┐
+            build#1.2 (TASK.c2)       ─▶ gates#1.2 ─┼─▶ choice ─▶ reset branch ─▶ review ─▶ verify ─▶ PR
+            build#1.3 (TASK.c3)       ─▶ gates#1.3 ─┘
+                                                     none pass ─▶ closest candidate carries on
+attempt 2+: one build on the chosen (or carried) candidate, as without candidates
+```
+
+**How the choice is made.** When any candidates pass, only those can be selected. One passing candidate
+is kept directly. With several, the selector compares their diffstats, diffs and gate tables against
+the contract and ends with `CHOICE: K`; a missing or invalid choice falls back to the smallest passing
+diff (added plus deleted lines). If no candidates pass, the candidate with the fewest failing gates
+carries on, with its failures as the feedback for the next attempt; the earliest candidate breaks a tie.
+
+Attempt 2 and every later attempt, and every conflict, CI or human-review rework, builds one change,
+exactly as the flow without the option does. With `loop: [resume]`, the chosen or carried candidate's
+conversation is the one that resumes.
+
+**What candidates cost.** Three candidates are three first builds and three gates runs, plus a selector
+run when more than one passes. `--max-cost` counts every candidate and the selector, so a candidates
+task spends more of its budget up front.
 
 ### The strict flow
 
