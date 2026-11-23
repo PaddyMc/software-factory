@@ -208,17 +208,17 @@ tests: `tests/test_tools.py::test_reads_reach_dependency_sources_only`,
 `tests/test_config.py::test_full_config_parses`.]
 
 For example, `tests/test_tools.py::test_writes_go_anywhere_in_the_worktree_but_git`
-writes `src/lib.rs` and a new nested file successfully, then attempts:
+writes `src/b.rs` and `Cargo.toml` successfully, then attempts:
 
-    write_file(path=".git/config", content="[core]\n")
+    write_file(path=".git/config", content="x")
 
 The tool result is:
 
     refused: write to .git/config: git internals are off limits
 
-The test also verifies that the original `.git/config` content is unchanged.
-The same test refuses `../escape.txt` and an absolute `/tmp` write, and checks
-that neither file was created.
+The same test refuses `../escape.txt`, checks that `wt.parent/escape.txt` was
+not created, and checks that `log.written` contains only `src/b.rs` and
+`Cargo.toml`: neither refused write is recorded as an allowed write.
 [Source: `factory/tools.py::PathGuard.check_write`, `write_tools`;
 test: `tests/test_tools.py::test_writes_go_anywhere_in_the_worktree_but_git`.]
 
@@ -283,8 +283,8 @@ read-only; selected paths are then rebound as follows.
 
 The common/admin split lets ordinary local git inspection work in a linked
 worktree without making the whole common repository metadata writable.
-Configured `extra_rw` can add another RW path. Missing normal binds are
-skipped rather than making every machine have the same directory layout.
+Missing normal binds are skipped rather than making every machine have the
+same directory layout.
 [Source: `factory/sandbox.py::Bwrap.argv`;
 tests: `tests/test_sandbox.py::test_worktree_is_writable`,
 `tests/test_sandbox.py::test_host_filesystem_is_read_only`,
@@ -363,11 +363,13 @@ authentication. The no-token return is source-only.
 tests: `tests/test_github.py::test_git_gets_the_token_from_the_environment_for_github_only`,
 `tests/test_github.py::test_a_token_leaves_other_remotes_alone`.]
 
-These credentials belong to the host authority, not to the agent. The test
-`test_agents_never_see_the_token` uses an `Unsandboxed` shell with tokens set
-in the host environment and still observes `token=`. For Bwrap, `--clearenv`
-provides the stronger all-environment reset. Neither fact grants an agent
-permission to call GitHub: the command/tool boundary remains separate.
+These credentials belong to the host authority, not to the agent. The
+parametrized `test_agents_never_see_the_token` runs both Bwrap and Unsandboxed
+with `GH_TOKEN` and `GITHUB_TOKEN` set, then asserts that neither token value
+appears in the `env` output. In particular, Unsandboxed's name-based scrub
+removes both variables even without Bwrap's stronger all-environment reset.
+Neither fact grants an agent permission to call GitHub: the command/tool
+boundary remains separate.
 [Source: `factory/github.py::git_options`;
 `factory/sandbox.py::Bwrap.argv`, `Unsandboxed.run`;
 tests: `tests/test_github.py::test_agents_never_see_the_token`,

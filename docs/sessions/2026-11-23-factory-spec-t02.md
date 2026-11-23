@@ -27,3 +27,19 @@
 - Source/test citation audit against `8bd7012` — exit 0; no missing symbols or
   test node IDs (31 chapter-03 and 20 chapter-04 unique test references).
 - `git diff --check -- docs/spec/03-spec.txt docs/spec/04-spec.txt` — exit 0.
+
+## Attempt 2 review corrections
+
+- Corrected the refused-write illustration to the test's actual `src/b.rs` and
+  `Cargo.toml` writes, `.git/config` and `../escape.txt` refusals, non-creation
+  assertion, and `log.written` result.
+- Described the token test's Bwrap/Unsandboxed parametrization and absence-of-
+  secrets assertion, removed the non-configurable `extra_rw` wording, and
+  replaced the opaque flow-test wording with its `CHANGES`/`APPROVE` sequence.
+
+### Attempt 2 verification
+
+- `test -s docs/spec/03-spec.txt && test -s docs/spec/04-spec.txt` — exit 0.
+- Contract four-test selection — exit 0; 4 passed.
+- `uv run --offline pytest -q tests/test_github.py::test_agents_never_see_the_token tests/test_pipeline.py::test_run_ends_in_a_working_pr` — exit 0; 3 passed.
+- `uv run --offline pytest -q` — exit 0; 462 passed.

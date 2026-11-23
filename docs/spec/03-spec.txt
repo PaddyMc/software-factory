@@ -28,8 +28,9 @@ It is equivalent to these validated steps:
 With the default order, the reviewer must approve before the gates run, all
 gates must pass before the verifier runs, and the PR step follows the
 verifier. The PR step is the only step that pushes the candidate and opens or
-updates GitHub. The two-fixture behavior in
-`tests/test_pipeline.py::test_run_ends_in_a_working_pr` exercises this order.
+updates GitHub. The scripted review sequence `CHANGES`, then `APPROVE`, in
+`tests/test_pipeline.py::test_run_ends_in_a_working_pr` exercises this order
+and its review retry.
 [Source: `factory/flows.py::DEFAULT`;
 `factory/pipeline.py::Pipeline.graph`, `Pipeline.pr`.]
 
