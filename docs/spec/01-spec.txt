@@ -1,0 +1,341 @@
+01 Project inputs and task contracts
+
+Baseline: 8bd7012, the factory shipped on main at that revision.
+Scope: repository initialization, effective project settings, state location,
+plan discovery, and the eight-key task-contract protocol. Board persistence is
+covered behaviorally in 02-spec.txt; this chapter does not prescribe a database
+layout.
+
+1. Repository and initialization
+
+1.1 The project root
+
+Project configuration is repository input, not factory state. The configuration
+file is .factory/config.yaml at the repository root. factory.config.load reads
+that file when it exists and otherwise supplies defaults. In a linked worktree,
+factory.repo_root follows git's common directory back to the main checkout, so
+commands read the main checkout's configuration rather than a candidate's edited
+copy. That main-checkout rule is an implementation detail evidenced by source in
+factory/__init__.py::repo_root; it is not permission to edit the main checkout.
+
+1.2 What factory init creates
+
+Run:
+
+    factory init
+
+factory.scaffold.init creates missing project inputs and reports an action for
+each path:
+
+* .factory/config.yaml, with commented settings and the project name;
+* the three workflow skills under .claude/skills and relative links under
+  .agents/skills;
+* a session-log README, unless --no-session-log is given;
+* a managed section in AGENTS.md, or in CLAUDE.md when that is the existing
+  guidance file; and
+* docs/plans/example.md only when the repository has no plan documents.
+
+The configuration template infers a default unit-test command from pyproject.toml
+or Cargo.toml. Session-log flags select the directory or disable that scaffold.
+These are initialization defaults, not a second configuration-precedence layer.
+
+A successful run with an existing guidance file but no plan documents has this
+abridged output shape (the exact keep/write list depends on files already present):
+
+    $ factory init --no-session-log
+    wrote  .factory/config.yaml
+    wrote  docs/plans/example.md
+    update AGENTS.md
+
+    next:
+      1. review .factory/config.yaml (`factory config` prints the effective settings)
+      2. plan work with /plan-workstream (Codex: $plan-workstream), or replace the example plan
+      3. factory validate-plan && factory sync
+      4. export OPENROUTER_API_KEY=… and `factory run <plan>`
+
+The starter plan is a real contract: tests/test_templates.py::test_init_in_an_empty_repo_gets_a_valid_starter_plan
+parses it, validates it, and checks that validate-plan reports no warning.
+Initialization does not synchronize that plan or create a board; the displayed
+next steps make those separate operations.
+
+1.3 Repeat initialization and the failure path
+
+The write helper inside factory.scaffold.init keeps existing files by default.
+Consequently, plain repeated init is not a reset: an existing configuration and
+existing skill files survive, while missing pieces can still be added.
+factory.scaffold.guidance_section replaces only text between the factory markers
+in the guidance file and preserves prose before and after it. If the section is
+already current, the action is keep. Evidence:
+tests/test_templates.py::test_rerun_keeps_files_and_replaces_only_the_section and
+tests/test_templates.py::test_init_adds_codex_links_to_an_existing_installation.
+
+--force is the explicit rewrite override for the configuration and managed
+Claude skill files. It does not turn a custom non-symlink Codex skill into a link;
+tests/test_templates.py::test_init_preserves_existing_codex_skills_even_with_force
+covers both a file and a directory. --no-skills leaves existing skill files and
+links untouched, even with --force.
+
+Implementation note (the YAML-loader part of this error path is source-only):
+without --force, a semantically invalid existing configuration is not silently
+replaced. scaffold.init loads it before choosing session-log settings; invalid
+settings raise ConfigError, which cmd_init prints before returning 1. YAML syntax
+errors likewise propagate from the loader rather than being treated as an absent
+file. Plain repeat init therefore does not repair malformed YAML, unknown keys,
+or invalid value shapes by resetting the file.
+
+2. Effective settings and state location
+
+2.1 Project-setting precedence
+
+The effective settings are built in this order:
+
+1. Start with factory.config.Config defaults.
+2. If .factory/config.yaml exists, parse its mapping and replace only the keys it
+   supplies. A string accepted for a list-like setting is normalized to a
+   one-element tuple; nested settings that are omitted retain their defaults.
+3. Command-line options may override a particular operation later. They do not
+   rewrite the project file.
+
+There is no project-file requirement: an absent or empty file is valid. With no
+file, plans defaults to docs/plans/**/*.md, name comes from the repository
+directory, and optional unit/e2e/session-log checks are unset. Unknown top-level
+or nested keys, wrong value shapes, and invalid regular expressions raise
+ConfigError instead of being ignored. See factory/config.py::load,
+factory/config.py::parse, tests/test_config.py::test_defaults_without_a_file,
+tests/test_config.py::test_full_config_parses, and
+tests/test_config.py::test_bad_config_is_rejected.
+
+2.2 State-directory precedence
+
+The per-maintainer state directory is independent of the tracked plans. Resolve
+it in exactly this order using factory.config.Config.home_dir and
+factory.factory_home:
+
+1. a nonempty FACTORY_HOME environment variable;
+2. the home setting in .factory/config.yaml; then
+3. ~/.local/share/factory/<effective project name>.
+
+Source-only path detail: a configured home path is expanded for a leading tilde,
+whereas a FACTORY_HOME value is used as written. The default uses the effective
+project name, so name affects
+state location when no higher-precedence setting is present. Plans remain in the repository; runtime
+board state is not written back into them. This chapter deliberately specifies
+the location rule, not files or tables inside the state directory.
+
+For example, with home: /var/tmp/shop-config-state in the project file:
+
+    $ FACTORY_HOME=/var/tmp/shop-env-state factory config
+    # .factory/config.yaml; state in /var/tmp/shop-env-state; GitHub: <identity>
+    name: shop
+    ...
+
+The environment wins. Unset FACTORY_HOME and the displayed state path becomes
+/var/tmp/shop-config-state. Evidence:
+tests/test_config.py::test_home_precedence and
+tests/test_templates.py::test_config_command_prints_effective_settings.
+
+3. Plan discovery and extraction
+
+3.1 Discovery
+
+factory.contracts.discover_plans evaluates every configured plans glob against
+the repository root, keeps files, removes paths matching any exclude glob, and
+returns one sorted, de-duplicated path list. The default include is
+docs/plans/**/*.md. An exclude such as docs/user/** can remove user documentation
+that happens to contain contract-shaped YAML.
+
+Evidence: factory/contracts.py::discover_plans and
+tests/test_config.py::test_plans_and_exclude_globs. Discovery is only file
+selection: a plan may contain prose, tables, and other fenced examples.
+tests/test_contract_schema.py::test_non_contract_yaml_blocks_are_ignored covers
+that distinction for a non-list YAML mapping.
+
+3.2 Contract blocks
+
+factory.contracts.parse_text examines fenced blocks with a yaml language tag.
+A block becomes contract input only when its YAML value is a nonempty list and
+every item is a mapping containing id. Other YAML examples are ignored. Each
+recognized item must then pass task_from_mapping; a malformed recognized item is
+an error, not prose to skip. parse_plan records the repository-relative plan
+path on each task. YAML parser errors and invalid contracts propagate as
+validation failures; parsing never edits the plan.
+
+load_all reads every discovered plan into one ID-keyed mapping and rejects a
+duplicate ID, naming both plan paths. find_plan accepts a path or a unique file
+stem and rejects an ambiguous stem. These rules make plan selection and task
+selection different operations: factory run TASK looks up the global task ID,
+whereas factory run PLAN resolves a plan and schedules its tasks.
+
+4. The exact eight-key contract
+
+4.1 Required shape
+
+Every task mapping has exactly these eight keys; no ninth key is permitted and
+none may be omitted:
+
+    Key           Required value
+    id            Nonempty string matching ^[a-z0-9]+(?:-[a-z0-9]+)*-t\d{2}[a-z]?$
+    goal          Nonempty string describing the implementation outcome
+    spec_refs     List of nonempty strings; may be empty
+    depends_on    List of nonempty task-ID strings; may be empty
+    non_goals     List of nonempty strings; may be empty
+    acceptance    Nonempty list of nonempty criterion strings
+    verification  List of nonempty command strings; may be empty at parse time
+    risk          Exactly one nonempty string: low, medium, or high
+
+The ID must have a lowercase alphanumeric workstream prefix and a two-digit
+task suffix, with an optional lowercase letter after those digits; examples are
+billing-t03 and billing-t03a. Hyphens separate nonempty alphanumeric components.
+A scalar where a list is expected, a blank list item, an invalid ID,
+an unknown risk, or empty acceptance is rejected. The exact-key and value checks
+are in factory/contracts.py::task_from_mapping. Behavioral evidence is
+tests/test_contract_schema.py::test_parse_contract_exact_8_keys,
+tests/test_contract_schema.py::test_reject_missing_key,
+tests/test_contract_schema.py::test_reject_legacy_state_keys, and
+tests/test_contract_schema.py::test_reject_wrong_field_types.
+
+4.2 Valid example
+
+The following is one complete, valid contract. Its dependency list is empty, so
+it is valid both alone and in the repository-wide dependency graph.
+
+```yaml
+- id: docs-demo-t01
+  goal: Document the board readiness rules
+  spec_refs: [docs/reference.md#the-board]
+  depends_on: []
+  non_goals: [Changing scheduler behavior]
+  acceptance:
+    - "The chapter distinguishes stored status from derived readiness."
+  verification:
+    - "test -s docs/spec/02-spec.txt"
+  risk: low
+```
+
+This example separates implementation intent (goal and acceptance), bounding
+information (spec_refs and non_goals), graph input (depends_on), executable checks
+(verification), and a risk classification (risk). None of the eight keys
+is filled in by the parser.
+
+4.3 Additional static validation
+
+After parsing, validate_tasks performs graph and content checks:
+
+* duplicate IDs in the validated task list are errors;
+* every dependency must resolve in the supplied repository-wide task mapping;
+* dependency cycles are errors;
+* goal, acceptance, and verification entries must not contain the placeholder
+  tokens TODO, TBD, FIXME, or XXX, or an uppercase angle-bracket placeholder;
+* verification commands must shell-split successfully and must not start with a
+  prose imperative such as Run, Check, Verify, Ensure, or Confirm; and
+* two incomplete test selections are rejected explicitly: pytest -k without an
+  expression, and cargo test --exact without a test name.
+
+Static command validation does not execute the command and does not establish
+that its test selection is nonempty at runtime. Evidence:
+factory/contracts.py::validate_tasks, check_command, and check_placeholders;
+tests/test_contract_schema.py::test_command_selection_errors and
+tests/test_contract_schema.py::test_placeholder_is_an_error.
+
+5. Repository-wide IDs, dependencies, and cycles
+
+5.1 Cross-plan references
+
+Dependency IDs are repository-wide, not plan-local. cmd_validate_plan first
+loads every discovered plan as known tasks, then validates the selected plan
+against that mapping. A task in docs/plans/frontend.md may therefore name a task
+in docs/plans/platform.md. The reference uses the exact global ID; no plan name
+prefix is added. The same global mapping is used by sync and plan runs.
+
+A duplicate ID in two plan files is rejected by load_all rather than producing
+two addressable tasks. Evidence:
+factory/contracts.py::load_all, factory/cli.py::cmd_validate_plan, and
+tests/test_dependencies.py::test_cross_plan_dependency_resolves.
+
+Within one plan, plan_order produces dependency order while retaining plan order
+for ties. Dependencies outside that plan are treated as already external graph
+inputs for ordering; their readiness is a board question under 02-spec.txt
+sections 2 and 4, not a reason to inline the other plan's tasks.
+
+5.2 Rejected unknown dependency
+
+Suppose the valid example above instead says depends_on: [docs-demo-t99], and no
+discovered plan defines that ID. Validation succeeds in parsing all eight keys
+but rejects the graph:
+
+    $ factory validate-plan docs/plans/docs-demo.md
+    FAIL docs/plans/docs-demo.md (1 tasks)
+         docs-demo-t01: unknown dependency docs-demo-t99
+
+The command exits 1 and sync does not load an invalid graph. This is the required
+unsuccessful dependency example: contract shape alone is insufficient.
+
+5.3 Rejected cycle
+
+Given docs-demo-t01 depending on docs-demo-t02 and docs-demo-t02 depending on
+docs-demo-t01, the diagnostic identifies the closed path:
+
+    dependency cycle: docs-demo-t01 -> docs-demo-t02 -> docs-demo-t01
+
+plan_order also refuses a cycle within a plan rather than choosing an arbitrary
+starting task. Evidence: factory/contracts.py::check_dependencies and
+plan_order; tests/test_dependencies.py::test_reject_cycle_and_unknown_id and
+tests/test_dependencies.py::test_acyclic_graph_has_no_errors.
+
+6. Manual-only verification
+
+6.1 Validation warning versus execution refusal
+
+A verification command can be syntactically valid but outside factory authority.
+factory.gates.manual_reason combines the built-in denied-command patterns with
+the project's denied_commands regexes. Built-in examples include sudo, gh,
+factory itself, selected mutating git commands, and terraform apply or destroy.
+
+factory validate-plan does not run verification. If a task is otherwise valid,
+a denied verification command produces a warning and the plan command still
+returns 0:
+
+    ok   docs/plans/infra.md (1 tasks)
+         warn: infra-t01 is not factory-runnable: verification runs 'terraform apply', which the factory refuses; run it by hand
+
+The warning means manual-only, not approved automation. factory run TASK prints
+the reason and returns 1 before creating a worktree. A plan run puts the task in
+the scheduler's manual set: it is not launched, its dependents remain subject to
+normal readiness, and the summary labels it manual. Evidence:
+factory/gates.py::manual_reason, factory/cli.py::cmd_run_one and cmd_run_plan,
+tests/test_gates.py::test_a_verification_the_factory_refuses_makes_a_task_manual,
+tests/test_pipeline.py::test_run_refuses_a_manual_contract, and
+tests/test_scheduler.py::test_manual_tasks_are_reported_not_run.
+
+6.2 Explicit override and its limit
+
+The run implementation skips this refusal only when verification is included in
+--skip-gates. That option does not execute a refused command manually and does
+not make its result a passing verification gate; it explicitly removes that gate
+from the automated run. The safe default is therefore a warning at validation,
+refusal of an automatic task run, and a human performing the check outside the
+factory.
+
+7. Source and behavioral evidence index
+
+The normative rules above are anchored in factory/scaffold.py::init and
+guidance_section; factory/config.py::load, parse, and Config.home_dir;
+factory/contracts.py::discover_plans, parse_text,
+task_from_mapping, load_all, validate_tasks, check_dependencies, and plan_order;
+and factory/gates.py::manual_reason. CLI behavior is anchored in
+factory/cli.py::cmd_init, cmd_validate_plan, cmd_sync, cmd_run_one, and
+cmd_run_plan.
+
+The directly relevant executable specifications are
+tests/test_templates.py::test_init_writes_config_skills_session_log_and_guidance,
+tests/test_templates.py::test_init_in_an_empty_repo_gets_a_valid_starter_plan,
+tests/test_templates.py::test_rerun_keeps_files_and_replaces_only_the_section,
+tests/test_config.py::test_defaults_without_a_file,
+tests/test_config.py::test_home_precedence,
+tests/test_config.py::test_plans_and_exclude_globs,
+tests/test_contract_schema.py::test_parse_contract_exact_8_keys,
+tests/test_dependencies.py::test_cross_plan_dependency_resolves,
+tests/test_dependencies.py::test_reject_cycle_and_unknown_id, and
+tests/test_pipeline.py::test_run_refuses_a_manual_contract. Edge details that
+are identified above as source-only are not represented as separately tested
+behavior.

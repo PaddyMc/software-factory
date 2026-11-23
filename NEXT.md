@@ -9,16 +9,21 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | ✓ | The builder writes the test that judges it. Done: [The strict flow](docs/architecture.md#the-strict-flow); the without-change gate and holdout tests stay open | — | — |
 | ✓ | Nothing measures the factory itself. Done: `factory stats` ([Measuring the factory](docs/architecture.md#measuring-the-factory)) and `factory bench` ([Evaluating flows](docs/architecture.md#evaluating-flows-factory-bench)) | — | — |
 | 4 | Learn from feedback. Planned as a knowledge crew: [wiki](docs/plans/wiki.md) | medium | 1, 3 |
-| 5 | Steer a running agent | small | — |
+| 5 | Steer a running agent. Planned: [steer](docs/plans/steer.md) | small | flow-tuning |
 | 6 | Runs need this machine | large | a shared board |
 | ✓ | Reshape the agent flow. Done: [Agent flows](docs/architecture.md#agent-flows) | — | — |
 | ✓ | Compare flows and setups. Done: [Evaluating flows (factory bench)](docs/architecture.md#evaluating-flows-factory-bench) | — | — |
 | ✓ | The steps of a flow are still the first version's. Done: [The strict flow](docs/architecture.md#the-strict-flow) | — | — |
 | ✓ | Managing the factory takes many terminal commands. Done: [The web page](docs/architecture.md#the-web-page) | — | — |
 | ✓ | Factory PR descriptions are long and hard to read. Done: [Pull requests](docs/architecture.md#pull-requests) | — | — |
-| 12 | The models' reasoning is thrown away. Planned: [thoughts](docs/plans/thoughts.md) | small | 10 (its web task) |
+| ✓ | Capture the thoughts a model shares. Shipped in [thoughts](docs/plans/thoughts.md). | — | — |
 | ✓ | You can't tell which factory version is running. Done: [Commands](docs/reference.md#commands) | — | — |
-| ✓ | 14 | A review without a verdict costs a rebuild, a task gets one build per attempt, and nothing picks the default flow from data. Done: [Build candidates](docs/architecture.md#build-candidates) | — | — |
+| ✓ | A review without a verdict costs a rebuild, a task gets one build per attempt, and nothing picks the default flow from data. Done: [Build candidates](docs/architecture.md#build-candidates) | — | — |
+| 15 | Specify the shipped factory for implementers. Planned in [factory-spec](docs/plans/factory-spec.md) | medium | shipped factory |
+| 16 | Nothing reviews a change for security, and a builder can rewrite its reviewer's guidance. Planned: [security-review](docs/plans/security-review.md) | medium | 9, 14 |
+| 17 | Plans can't be read on the web page, and a task doesn't link to the plan that explains it. Planned: [plan-pages](docs/plans/plan-pages.md) | small | 10 |
+| 18 | The backlog moves only while someone is at the terminal. Planned: [devbox](docs/plans/devbox.md) | medium | — |
+| 20 | Follow a task’s agent thoughts across runs and retries in the terminal and web UI. [Thought timeline](docs/plans/thought-timeline.md) | small | 10, 12 (shipped) |
 
 ## 1. Act on human PR review comments
 
@@ -100,11 +105,19 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 
 **Sketch.** `factory say TASK "…"` appends to `$FACTORY_HOME/inbox/TASK`. A `before_model` middleware in `agents.py` drains the inbox into a `HumanMessage` on the agent's next step and records it in the transcript. The message goes to whichever role is running. It's cheap to build, and it doesn't touch the pipeline.
 
+**Plan.** [docs/plans/steer.md](docs/plans/steer.md) (planned 2026-11-18, tasks `steer-t01`…`t05`, after `flow-tuning-t04`). Decisions the plan locked differ from this sketch:
+- Messages live on the board, in a `messages` table tied to the run, not in an inbox file, so `factory show`, the web page and the PR body can read them.
+- The running agent keeps a message in its conversation, and every later agent in the run gets the run's messages in its task message. Messages end with the run.
+- A message is guidance only: the contract still decides scope. The reviewer reports work a message asked for outside the contract without blocking on it, and the PR body lists the messages.
+- `factory say` refuses a task that isn't running. A running task's web page has a box that runs it.
+
 ## 6. Runs need this machine
 
 **Gap.** Runs need this machine on. agent-orchestrator and Open SWE run in hosted workspaces.
 
 **Sketch.** First, a shared board: state in a server database (Postgres, say) instead of the local SQLite file, so agents run on a cloud box while you watch from the laptop. Keep the offline bubblewrap sandbox. The box needs dependencies fetched ahead of time, since the sandbox is offline, and its own `gh` login. Lowest priority: local runs are a deliberate trade for the offline sandbox.
+
+[Item 18](#18-run-the-backlog-unattended) covers the part that needs neither a shared board nor hosted workspaces: one long-running worker on one remote box, watched with `factory web` over `ssh -L`.
 
 ## 7. Reshape the agent flow
 
@@ -168,13 +181,7 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 
 ## 12. See what the models thought
 
-**Gap.** Every model the factory runs reasons before it answers, and the OpenRouter integration hands that reasoning to the factory with each reply. The factory records only the reply text (`factory/agents.py:329`), so transcripts, the live log and traces show what an agent did but never why. Its thinking tokens are paid for, and then thrown away.
-
-**Plan.** [docs/plans/thoughts.md](docs/plans/thoughts.md) (planned 2026-11-15, tasks `thoughts-t01`…`t03`, alongside [measure](docs/plans/measure.md) and [pr-descriptions](docs/plans/pr-descriptions.md)):
-- Each step's reasoning and thinking-token count go into its transcript, and the live log gets a short `thinks:` line per step.
-- `factory transcript` prints each step's thoughts before what it said and did, and `factory trace` counts thinking tokens.
-- The web transcript page shows the thoughts above what each step said, once `webui-t05` lands.
-- Model requests don't change: a model that doesn't share its reasoning is shown as not sharing it.
+Each transcript now records the reasoning a model shares and its reported thinking-token count. The live log includes a short preview. The terminal and web transcripts show each thought beside its reply, and `factory trace` includes thinking tokens. These features shipped in [thoughts](docs/plans/thoughts.md). The [task-wide timeline](#20-follow-a-tasks-agent-thoughts) builds on them.
 
 ## 13. Which factory is this?
 
@@ -197,3 +204,53 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 - A review without a verdict is asked once more in the same conversation. Still none counts as CHANGES, recorded as `CHANGES (no verdict)`, and the builder is told so.
 - A build step can set `candidates: N` (2 to 5). The first attempt builds N candidates one after another in their own worktrees, the gates judge each, and a selector agent picks among those that pass, falling back to the smallest diff.
 - bench records candidates, and a by-hand trial of six flows sets this repository's `flow:` by a fixed rule.
+
+## 15. Specify the shipped factory
+
+The architecture and reference explain how to run the factory. An implementer also needs to know the expected outcome when a dependency has an open PR, a check selects zero tests, or a human requests changes on a candidate.
+
+The [factory-spec plan](docs/plans/factory-spec.md) covers the behavior shipped at `8bd7012` in ten plain-text chapters under `docs/spec/`. Five tasks cover the subsystems and a sixth checks the complete series and publishes its reading guide in `00-spec.txt`. No other planned workstream is a prerequisite or waits on this edition.
+
+## 16. Nothing reviews a change for security
+
+**Gap.** No step or gate looks at a change for security:
+- The reviewer's checklist has one line on unchecked input. A custom review step can carry a security prompt, but its own `VERDICT:` line decides, so it blocks on every speculative finding or on none.
+- No gate catches an added credential, or an edit to CI, `.factory/`, skills, guidance or lockfiles. After merge, those run with the repository's secrets or steer later agents.
+- `_repo_guidance` (`factory/agents.py:153`) reads AGENTS.md from the task worktree, so a builder can rewrite its own reviewer's system prompt. That breaks the Policy's "settings come from the main checkout".
+
+**Plan.** [docs/plans/security-review.md](docs/plans/security-review.md) (planned 2026-11-17, tasks `security-review-t01`…`t07`, after [strict-flow](docs/plans/strict-flow.md) and [flow-tuning](docs/plans/flow-tuning.md), before [wiki](docs/plans/wiki.md)):
+- Guidance comes from the main checkout, as the config and prompt overrides do.
+- `security:` in `.factory/config.yaml` turns on two gates. `secrets` fails on credential-shaped strings in added lines. `guarded_paths` fails on changes to CI, `.factory/`, skills, guidance, lockfiles and configured globs that the contract doesn't name.
+- A `security` step kind ships with its own prompt, the repository's threat model, and a verdict the factory computes from its findings. Only critical or high findings with high confidence and an exploit block, and the builder gets only those. The rest go to a visible Security section in the PR.
+- A built-in flow, `secure`, is gates-first plus a security step. A command that reviews any ref or PR, and a crew that audits the existing codebase, are out of scope.
+
+## 17. Read plans in the web page
+
+**Gap.** The web page shows each plan as a strip of tasks. The plan doc that explains them, with its decisions, milestones, design and risks, is readable only in an editor or on GitHub, where contracts show no status. A task page's breadcrumb and spec refs don't reach the plan, and nothing says when a plan file and the board disagree.
+
+**Plan.** [docs/plans/plan-pages.md](docs/plans/plan-pages.md) (planned 2026-11-18, tasks `plan-pages-t01`…`t04`):
+- `factory web` gets a Plans page and a page per plan, rendered by a built-in Markdown subset with no new dependency.
+- Each contract becomes a task row with its board status, and task ids and other plans become links.
+- When the file and the board disagree, a notice offers Load plans.
+- Board cards, task breadcrumbs and spec refs link into the plan pages.
+
+## 18. Run the backlog unattended
+
+**Gap.** The backlog moves only while someone is at the terminal:
+- `factory run PLAN` runs one plan and ends when nothing more can start. A task whose dependency is in another plan waits until someone reruns its plan.
+- Merges, CI failures, review requests and conflicts reach the board only through `factory status --refresh`, and a plan run refreshes once, when it starts.
+- New plans and factory fixes reach the board only when someone pulls the checkout and runs `factory sync`.
+- A docs plan needs `--flow gates-first` typed by hand every time.
+- Nothing caps what a day of runs spends.
+
+**Seen in.** [agent-orchestrator](https://github.com/ComposioHQ/agent-orchestrator) and [Open SWE](https://blog.langchain.com/introducing-open-swe-an-open-source-asynchronous-coding-agent) keep workers running against a queue of tasks.
+
+**Plan.** [docs/plans/devbox.md](docs/plans/devbox.md) (planned 2026-11-22, tasks `devbox-t01`…`t06`, independent of the other plans):
+- `factory start --budget USD` is a foreground worker for any box that can run the factory. Every poll it loads the plans and checks GitHub, starts each ready task across every plan up to `--parallel`, reworks PRs that conflict, fail CI or get review requests, and waits for your merges. Keeping it alive and setting up the box stay yours.
+- `--budget` caps the day's spend, counted from the board since 00:00 UTC. Each failed task is retried once a UTC day.
+- When the checkout is clean and on the trunk, the worker fast-forwards it to origin after its task runs finish, and restarts itself when the factory's own code changed.
+- `plan_flows:` in `.factory/config.yaml` gives a plan its flow, for every way a task runs.
+- `factory status`, `factory top` and the web board show the worker, and `factory stop worker` stops it.
+## 20. Follow a task's agent thoughts
+
+Today an operator opens a separate transcript for each agent run. The [thought timeline](docs/plans/thought-timeline.md) brings every recorded thought for one task into `factory thoughts TASK` and a **Thoughts** link on the task page. Each entry identifies the agent, attempt and turn, shows the tool names or a short reply excerpt, and points to its full transcript. The CLI can follow and the web page refreshes as replies arrive. No current workstream waits on this one.

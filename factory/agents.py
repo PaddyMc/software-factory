@@ -54,6 +54,7 @@ class Ctx:
     earlier: tuple[str, ...] = ()           # build steps after the first: the earlier build steps' final messages
     test_files: tuple[str, ...] = ()         # build only: acceptance-test files locked at the test commit
     red_commands: tuple[str, ...] = ()       # build only: commands red before the change, green at the candidate
+    passing_before: tuple[str, ...] = ()     # test only: the test commands, when every one already passes at base
     log: Callable[[str, str], None] = field(default_factory=NullLog)          # (tag, message)
     # (steps, max_steps, tokens_in, tokens_out, cost_usd | None, refused_tool_calls)
     progress: Callable[..., None] = lambda *a: None
@@ -75,6 +76,7 @@ class Output:
     refused: int = 0                         # tool calls refused (paths, denied commands)
     stopped: str | None = None               # why the loop ended early, e.g. "step limit"
     wants_tools: bool = False                # last model call asked for tools (so it was not finished)
+    reasked: bool = False                    # review only: no VERDICT line, so the reviewer was asked once more
 
 
 class Roles(Protocol):
@@ -90,6 +92,11 @@ def parse_verdict(text: str) -> str:
     """Last VERDICT line; anything else (missing, malformed) fails safe to CHANGES."""
     found = _VERDICT.findall(text)
     return found[-1] if found else "CHANGES"
+
+
+def has_verdict(text: str) -> bool:
+    """Whether the report carries a VERDICT line (parse_verdict fails safe to CHANGES without one)."""
+    return bool(_VERDICT.search(text))
 
 
 def parse_choice(text: str) -> int | None:
@@ -323,6 +330,14 @@ NUDGE_FAILS = 3       # consecutive non-zero exits of one command before a faili
 PROVE_MAX = 5         # distinct REPRO commands the factory runs again after a proving review
 PROVE_TIMEOUT = 300   # seconds allowed for each REPRO command
 PROOF_OUTPUT_LINES = 20
+# The closing message of a review that ran out of model calls before its VERDICT line.
+VERDICT_CALL = ("You have used every model call this review is allowed, so no tool will run any more. Write "
+                "your complete final review now from what you have already checked, in the format your "
+                "instructions give, and end it with the VERDICT line. Say what you could not check rather "
+                "than guessing.")
+REASK_STEPS = 3       # extra model calls allowed when a review ends without a VERDICT line
+REASK = ("Your review ended without a VERDICT line. Reply with your report in the format your instructions give,\n"
+         "ending with exactly one line: VERDICT: APPROVE or VERDICT: CHANGES.")
 
 
 def repository_map(worktree: Path, spec_refs: tuple[str, ...]) -> str:
@@ -402,6 +417,16 @@ def _tool_details(messages) -> dict[int, tuple[str, dict]]:
             call = calls.get(m.tool_call_id, {})
             details[i] = (m.name or call.get("name") or "tool", call.get("args") or {})
     return details
+
+
+def _answered(messages) -> list:
+    """The conversation without the call-limit marker, ending after a tool result or a plain message:
+    a trailing tool call that never ran has no result, and providers reject a request that holds one."""
+    kept = [m for m in messages
+            if not (isinstance(m, AIMessage) and str(m.content).startswith(CALL_LIMIT_MARKER))]
+    while kept and isinstance(kept[-1], AIMessage) and kept[-1].tool_calls:
+        kept.pop()
+    return kept
 
 
 class TrimMiddleware(AgentMiddleware):
@@ -582,9 +607,8 @@ class LangChainRoles:
             carried_calls = sum(isinstance(m, AIMessage) and not str(m.content).startswith(CALL_LIMIT_MARKER)
                                 for m in carried)
             middleware.append(NudgeMiddleware(tag, ctx, steps, carried_calls))
-        agent = create_agent(
-            (self.model_factory or build_model)(spec), tools, system_prompt=system, middleware=middleware,
-        )
+        model = (self.model_factory or build_model)(spec)
+        agent = create_agent(model, tools, system_prompt=system, middleware=middleware)
         ctx.log(tag, f"start ({spec}, max {steps} steps)")
         if step.kind == "review" and "VERDICT:" not in instructions:
             ctx.log(tag, f"⚠ {step.name}'s prompt has no VERDICT: line; every review will count as CHANGES")
@@ -621,6 +645,18 @@ class LangChainRoles:
         if out.stopped:
             ctx.log(tag, f"⚠ stopped: {out.stopped} after {out.steps} steps (raise max_steps for this role in .factory/config.yaml)")
             ctx.record({"type": "stopped", "reason": out.stopped, "steps": out.steps})
+        verdict_call_failed = False
+        if step.kind == "review" and out.stopped == "step limit" and not _VERDICT.search(out.text):
+            conversation = [*carried, *history]
+            reply = self._verdict_call(model, tools, system, trimmer.view(conversation) if trimmer else conversation,
+                                       out, tag, ctx)
+            verdict_call_failed = reply is None
+            if reply is not None:
+                history[:] = _answered(history)
+                history.extend([HumanMessage(VERDICT_CALL), reply])
+            ctx.progress(out.steps, steps, out.tokens_in, out.tokens_out, out.cost_usd, out.refused)
+        if step.kind == "review" and not has_verdict(out.text) and not verdict_call_failed:
+            self._reask(ctx, tag, out, history, spec, tools, system, trimmer, steps)
         cost = f", ${out.cost_usd:.4f}" if out.cost_usd is not None else ""
         refused = f", {out.refused} tool calls refused" if out.refused else ""
         thinking_note = f" ({out.thinking} thinking)" if out.thinking else ""
@@ -630,6 +666,52 @@ class LangChainRoles:
         if step.kind == "review":
             out.verdict = parse_verdict(out.text)
         return out
+
+    def _verdict_call(self, model, tools, system: str, messages: list, out: Output, tag: str, ctx: Ctx) -> AIMessage | None:
+        """One more model call, with tools disabled, for a review that ran out of calls before its VERDICT
+        line. Without it the missing verdict counts as CHANGES, which skips a proving review's proof and
+        costs the task another build, gates and review. If the call fails, the review stays as it was."""
+        ctx.record({"type": "nudge", "kind": "verdict", "text": VERDICT_CALL})
+        ctx.log(tag, "nudge: verdict: out of model calls with no VERDICT line; one more call, without tools")
+        try:
+            try:
+                bound = model.bind_tools(tools, tool_choice="none")
+            except (TypeError, ValueError):
+                bound = model.bind_tools(tools)
+            reply = bound.invoke([SystemMessage(system), *_answered(messages), HumanMessage(VERDICT_CALL)])
+        except Exception as e:
+            ctx.log(tag, f"⚠ verdict call failed: {clip(f'{type(e).__name__}: {e}', 240)}")
+            return None
+        self._observe(reply, out, tag, ctx)
+        return reply
+
+    def _reask(self, ctx: Ctx, tag: str, out: Output, history: list, spec: str, tools: list, system: str,
+               trimmer: TrimMiddleware | None, steps: int) -> None:
+        """Ask a reviewer once more for its verdict, continuing the conversation with the same tools and prompt."""
+        out.reasked = True
+        ctx.log(tag, "⚠ no VERDICT line: asking once more")
+        ctx.record({"type": "reask", "content": REASK})
+        messages = _answered(history)
+        history.append(HumanMessage(REASK))
+        messages.append(history[-1])
+        middleware = [ModelCallLimitMiddleware(run_limit=REASK_STEPS, exit_behavior="end"),
+                      ModelRetryMiddleware(**MODEL_RETRY, on_failure="error"), tool_errors(ctx.worktree)]
+        if trimmer:
+            middleware.append(trimmer)
+        agent = create_agent(
+            (self.model_factory or build_model)(spec), tools, system_prompt=system, middleware=middleware,
+        )
+        try:
+            for update in agent.stream({"messages": messages},
+                                       config={"recursion_limit": recursion_limit(REASK_STEPS)}, stream_mode="updates"):
+                for payload in update.values():
+                    for m in (payload or {}).get("messages", []) if isinstance(payload, dict) else []:
+                        history.append(m)
+                        self._observe(m, out, tag, ctx)
+                ctx.progress(out.steps, steps, out.tokens_in, out.tokens_out, out.cost_usd, out.refused)
+        except GraphRecursionError:
+            out.stopped = out.stopped or "graph recursion limit"
+
 
     def _kit(self, step: Step, ctx: Ctx) -> tuple[list, str, ToolLog | None]:
         """A step kind's tools and task message (exactly what its role method builds today), plus the
@@ -647,6 +729,12 @@ class LangChainRoles:
             msg = (f"Write the acceptance tests for task {ctx.task.id}.\n\n# Test paths\n\n"
                    + _bullets(f"`{p}`" for p in self.cfg.test_paths) + "\n\n# Test commands\n\n"
                    + _bullets(f"`{c}`" for c in commands))
+            if ctx.passing_before:
+                msg += ("\n\n# These commands already pass\n\nEvery test command above selects existing tests and "
+                        "passes before the change. If the task changes only documentation or specs and needs no new "
+                        "test, write no tests and say why in your report: the step then passes, and the build starts "
+                        "without locked tests. Never make an existing test or a shared fixture (such as conftest.py) "
+                        "check this task's deliverable just to turn a command red.")
             if ctx.feedback:
                 msg += f"\n\n# Feedback to address first\n\n{ctx.feedback}"
             return tools, msg, None

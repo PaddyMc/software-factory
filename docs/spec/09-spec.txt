@@ -1,0 +1,597 @@
+09 Benchmarks and scoring
+
+First edition baseline: 8bd7012.
+
+Scope. This chapter specifies the observable behavior of the shipped
+`factory bench` implementation: benchmark case inputs, selection into cells,
+isolated execution, hidden scoring, recorded results, reports and comparisons.
+It describes the behavior at the baseline above; it does not prescribe a new
+case format, change gates or scoring, run a paid benchmark, or rank providers.
+The architectural rationale is in
+`docs/architecture.md#evaluating-flows-factory-bench`; command syntax and case
+authoring guidance are summarized in `docs/reference.md#bench`.
+
+Evidence convention. Requirements below describe the shipped implementation.
+Each section ends with repository-relative source symbols and behavioral pytest
+node IDs. Details introduced as “source-only implementation notes” are
+established by those source citations rather than by a separately named test.
+Worked examples are non-normative: they illustrate the required calculations
+and are not additional benchmark fixtures. The keywords MUST, MUST NOT,
+SHOULD, SHOULD NOT, and MAY have the normative meanings introduced by the
+specification overview; descriptive statements without those keywords still
+record baseline behavior.
+
+1. Case suites, inputs and the starting repository
+
+1.1 Suite discovery and validation
+
+A case suite contains immediate child directories, each with a `case.yaml`.
+With no `--cases DIR`, the suite is `factory/bench/fixtures`; `--cases DIR`
+loads that directory instead of, not in addition to, the shipped suite. Case
+IDs are directory names, MUST match `^[a-z][a-z0-9-]*$`, and MUST be unique
+across the loaded suite. Discovery ignores child directories without `case.yaml` and
+returns cases sorted by ID. A duplicate ID, a missing suite directory, or any
+invalid selected case is an error rather than a partial suite.
+
+A case has this layout:
+
+  CASE/
+    case.yaml       metadata and the commands used for hidden scoring
+    repo/           the starting repository tree
+    hidden/         files overlaid only for hidden scoring
+    solution/       the reference-solution overlay
+
+`case.yaml` MUST have exactly six keys: `title`, `kind`, `requires`, `config`,
+`contract`, and `hidden`. Missing and unknown keys are rejected. Their meanings
+and checks are:
+
+* `title` is the human-readable title printed by the cases command.
+* `kind` is one of `feature`, `bugfix`, `multi-file`, `refactor`, or
+  `algorithm`.
+* `requires` is a list of non-empty command-name strings. Before a real run,
+  each name must be found by `command -v` inside the case's sandbox.
+* `config` is a mapping accepted by the factory configuration parser. It is
+  written as `.factory/config.yaml` in the starting repository and supplies the
+  case's gates and sandbox settings.
+* `contract` is an ordinary validated eight-key task contract. Its ID must be
+  `<case id>-t01`; materialization writes it as the sole YAML contract in
+  `docs/plans/<case id>.md`.
+* `hidden` is a list of non-empty strings, each recognized as a test command.
+  The shipped recognition covers pytest, cargo test, and Python unittest
+  command forms. Recognition alone does not make a zero-test selection pass.
+
+`repo/` must be a directory. `hidden/` and `solution/` must each contain at
+least one file somewhere below the directory. These checks apply when a suite
+is loaded, including for `factory bench cases`; a malformed case names its ID
+and the validation reason in the error.
+
+1.2 Materialization and the reference solution
+
+Materialization copies only `repo/`, writes the parsed case `config` and
+`contract` into that copy, initializes a `main` branch, adds all files, and
+makes one commit. Fixed factory-bench author and committer identities and the
+fixed date `2026-01-01T00:00:00+00:00` make the base commit deterministic for
+unchanged fixture content. Neither `hidden/` nor `solution/` is copied into
+this starting tree.
+
+The `solution/` directory is the reference solution, not an answer made
+available to an agent. The fixture tests establish both directions for every
+shipped case: the base must not already pass hidden scoring, while laying
+`solution/` over the base and committing it must pass the configured gates and
+all hidden commands. A normal benchmark cell never overlays `solution/`; its
+only candidate is the pipeline's commit. A solution may overwrite a starting
+file, just as a candidate may.
+
+Source-only implementation notes: the exact key and ID checks are in
+`factory/bench/cases.py` (`KEYS`, `KINDS`, `ID_RE`, `load_case`, and
+`load_cases`); deterministic copying, generated metadata, and commit creation
+are in `materialize`. The reference solution's use is established by
+`tests/test_bench_cases.py::test_every_case_is_solvable_and_not_already_solved`.
+The fixed Git environment is source behavior in `factory/bench/cases.py`
+(`_GIT_ENV` and `materialize`).
+
+Evidence:
+`factory/bench/cases.py` (`Case`, `load_case`, `load_cases`, `materialize`);
+`tests/test_bench_cases.py::test_hidden_and_solution_files_stay_out_of_the_starting_tree`;
+`tests/test_bench_cases.py::test_a_case_materializes_to_the_same_base_commit_every_time`;
+`tests/test_bench_cases.py::test_every_case_is_solvable_and_not_already_solved`;
+`tests/test_bench_cases.py::test_bad_cases_are_rejected_with_the_reason`.
+
+2. Hidden tests and their visibility
+
+Hidden scoring and agent execution are deliberately separated. The starting
+repository and the agent's candidate worktree contain neither the hidden files
+nor the reference solution. Only after the pipeline returns `verified` does the
+scorer create a disposable, detached Git worktree at the candidate SHA, overlay
+`hidden/`, and run the case's hidden commands there. It removes that scratch
+worktree and scratch directory afterward, including on a scoring failure.
+
+Before creating a real run directory, preflight MUST reject unsafe or
+un-runnable inputs. In particular:
+
+* every required provider key and every `requires` command must be available;
+* a sandboxed run requires bubblewrap;
+* if a selected flow has a test step, each selected case must configure
+  `test_paths`;
+* no configured dependency source may contain the case's `hidden/` or
+  `solution/` directory; and
+* with the sandbox enabled, an attempt to read every hidden and solution file
+  from inside that case's sandbox must find none readable.
+
+The shipped cases have no `sandbox.ro_binds`, `sandbox.rw_binds`, or
+`sandbox.path` entries and no dependency sources, so they do not bind their
+answers in from the host or home directory. These are guards on the known paths
+to the answers, not a reason to put secrets in a benchmark fixture.
+
+`--no-sandbox` disables bubblewrap and the inside-sandbox readability probe.
+It is therefore unsafe for hidden evaluation: agents could read the hidden
+tests or reference solution through host access. The run records `sandbox:
+false`, and both report and comparison headers print the exact warning
+`unsandboxed: agents could read the hidden tests`. The dependency-source check
+still applies. The unsafe option changes visibility; it does not change the
+outcome names or scoring formula.
+
+Source-only implementation notes: preflight checks occur before the timestamped
+run directory is created. `_check_hidden_files` always invokes the sandbox for
+its probe even though the surrounding preflight also checks availability. The
+cleanup guarantee follows the `finally` blocks in `score_hidden`.
+
+Evidence:
+`factory/bench/cases.py` (`score_hidden`);
+`factory/bench/run.py` (`preflight`, `_check_requires`,
+`_check_dependency_sources`, `_check_hidden_files`, `_check_test_paths`,
+`run_bench`);
+`tests/test_bench_cases.py::test_hidden_and_solution_files_stay_out_of_the_starting_tree`;
+`tests/test_bench_cases.py::test_hidden_scoring_lays_the_hidden_files_over_the_candidate`;
+`tests/test_bench.py::test_hidden_files_readable_in_the_sandbox_are_refused`;
+`tests/test_bench.py::test_bench_run_refuses_before_any_work`;
+`tests/test_bench.py::test_report_shows_solved_rates_per_variant_and_case`.
+
+3. Variants, cells and isolated state
+
+3.1 The three cell axes
+
+A variant is a selected flow and an optional model override applied to every
+agent step. Without `--flow`, the invoking repository's configured `flow` is
+used. Repeated `--flow` and `--model` options form the flows-by-models product;
+without `--model` there is one model choice, namely no override. A variant ID
+is `FLOW` with no override and `FLOW@MODEL` with one. Repeating an identical
+flow or model flag does not duplicate a variant. An unknown flow is refused.
+
+A cell is the triple `(variant, case, repeat)`. Repeats are numbered from 1
+through `--repeat N`, which defaults to 1 and must be at least 1. Thus the
+requested cell count is:
+
+  number of selected cases × number of variants × repeat count
+
+`--case ID` is repeatable and selects a subset; by default every loaded case is
+selected. `--max-attempts N` defaults to 3 per cell and must be at least 1.
+`--parallel N` defaults to 1 and must be at least 1. Repeat count is part of a
+cell's identity, not an extra attempt within the pipeline.
+
+For example, two flows, two model overrides, five cases, and `--repeat 3`
+request 2 × 2 × 5 × 3 = 60 cells. They are four variants, not sixty variants.
+
+3.2 Configuration origin and one-cell execution
+
+Flows, model configuration, global `max_steps`, and resolved prompt files come
+from the repository that invoked bench, just as they do for `factory run`.
+Each case retains its own gate and sandbox configuration, with the selected
+flow and invoking repository's flow/model settings installed for that cell.
+Consequently, editing the invoking repository's prompt overlay can change a
+run without changing any case fixture; section 8 explains the recorded hash.
+
+A started cell performs the following observable sequence:
+
+1. Materialize the case at `repo/` beneath the cell directory.
+2. Create and claim the case task in that cell's own `factory.db`, then create
+   its normal pipeline worktree beneath the same cell directory.
+3. Run the selected pipeline with PR creation disabled and the cell's attempt
+   and cost limits. The case repository has no remote.
+4. If the pipeline is `verified`, score its recorded `candidate_sha` against
+   the hidden commands as specified in section 2 and write `hidden.log`.
+5. Convert the pipeline and hidden result to exactly one cell outcome and
+   collect counters from the cell database.
+
+Each started cell is an isolated factory home under:
+
+  $FACTORY_HOME/bench/RUN/cells/VARIANT_SLUG/CASE/rREPEAT/
+
+Its persistent state includes `factory.db`, `repo/`, `worktrees/`, `logs/`,
+`transcripts/`, the sandbox cache, and, after hidden scoring, `hidden.log`.
+The `dir` value in results locates this directory relative to the run. For
+inspection, `FACTORY_HOME=<cell directory> factory show <case id>-t01` reads
+its task; the same prefix works with `factory trace` and `factory transcript`.
+
+A bench run does not write the invoking factory home's board database, create
+refs or worktrees in the invoking repository, push, or call `gh`. Parallelism
+uses independent one-cell child processes rather than sharing a cell database
+or worktree. A skipped cell has no cell directory; a report-only `not run` cell
+has no recorded directory either.
+
+Source-only implementation notes: sequential scheduling iterates variants,
+then cases, then repeat numbers. Parallel pending cells use that same launch
+order, but their records are appended as children finish. The variant slug
+replaces characters outside `[A-Za-z0-9._@-]` with `_`.
+
+Evidence:
+`factory/bench/run.py` (`variants`, `cell_argv`, `default_launch`, `run_cell`,
+`_run_sequential`, `_run_parallel`);
+`tests/test_bench.py::test_each_variant_runs_its_flow_and_model`;
+`tests/test_bench.py::test_prompts_and_flows_come_from_the_invoking_repository`;
+`tests/test_bench.py::test_a_bench_run_leaves_the_board_and_the_repository_alone`;
+`tests/test_bench.py::test_parallel_cells_run_at_once_and_all_finish`;
+`tests/test_bench.py::test_a_cell_can_be_inspected_with_factory_show`.
+
+4. Gate results, hidden scores and exact outcome names
+
+The ordinary pipeline gates and the independent hidden score answer different
+questions. A gate failure is not a hidden-test failure, and passing the gates
+is not by itself a solve. Hidden commands run only for a pipeline result of
+`verified`, on the commit that passed those gates.
+
+Each hidden command is run and classified with the factory verification
+classifier as `pass`, `fail`, or `inconclusive`. A nonzero test exit is `fail`,
+except pytest's no-collection exit is `inconclusive`; a successful command
+whose output establishes that zero tests ran is also `inconclusive`. The hidden
+score passes only if every command's classification is exactly `pass`.
+A configured command that selects zero tests therefore prevents a solve; it
+does not count as a passing hidden test. `hidden.log` records each command, its
+classification and output, followed by `hidden: PASS` or `hidden: FAIL`.
+
+The complete cell outcome vocabulary is:
+
+  solved
+    The pipeline returned `verified` and every hidden command passed. This is
+    eligible for the solved-rate denominator and counts as one solve.
+
+  false_pass
+    The pipeline returned `verified`, but at least one hidden command failed
+    or was inconclusive. The candidate passed its visible gates but not the
+    independent score. This is eligible, but is not a solve.
+
+  failed
+    The pipeline itself returned `failed`, for example after exhausting its
+    build attempts or making no progress against the same gate failure. This
+    is eligible, but is not a solve. Hidden scoring is not reached merely
+    because visible gates failed.
+
+  stopped
+    The cell pipeline hit its cost limit. It is not eligible. This name is for
+    a cost stop; an interrupted cell is normally `error`, not `stopped`.
+
+  error
+    An exception, interruption, launch failure, or child crash prevented a
+    normal scored or failed result. It is not eligible. Parallel child failures
+    may also leave a `crash.log` with the exit status and stderr tail.
+
+  skipped
+    The run did not start this cell because its recorded budget was exhausted.
+    It has zero attempts, zero cost and seconds, and a null directory in the
+    standard empty record. It is not eligible and did not run.
+
+  not run
+    A report reconstruction for a requested `(variant, case, repeat)` triple
+    absent from an interrupted run's recorded cells. It is not a pipeline
+    result and normally is not written as a cell in `results.json`. It is not
+    eligible, has zero attempts, cost and seconds, a null directory, and did
+    not run.
+
+The recorded cell's `failed_gates` field contains gate names parsed as `FAIL`
+from the last gates run report, when such a report exists. It is diagnostic
+metadata; the outcome, not this list alone, determines scoring.
+
+Evidence:
+`factory/bench/run.py` (`run_cell`, `_record_from_db`, `_recover_record`,
+`_hidden_log`);
+`factory/bench/cases.py` (`CommandResult`, `HiddenScore.passed`,
+`score_hidden`);
+`factory/verification.py` (`PASS`, `FAIL`, `INCONCLUSIVE`, `classify`);
+`factory/bench/report.py` (`ELIGIBLE`, `_expanded`);
+`tests/test_bench.py::test_a_bench_run_scores_each_cell_with_gates_and_hidden_tests`;
+`tests/test_bench.py::test_the_budget_caps_cells_and_stops_starting_new_ones`;
+`tests/test_bench.py::test_a_crashed_cell_process_is_recorded_as_an_error`;
+`tests/test_bench.py::test_report_of_an_interrupted_run_counts_cells_not_run`.
+
+5. Worked cells and report denominators
+
+5.1 Gate failure, false pass and solve in one run
+
+The following non-normative example uses one variant, `default`, one case,
+`slugify`, and five repeats. It assumes the first three candidates differ even
+though the case and variant IDs do not.
+
+  repeat  outcome     visible/pipeline gates       hidden scoring
+  ------  ----------  ---------------------------  ----------------------
+  #1      failed      unit_tests FAIL; run failed  not reached
+  #2      false_pass  all PASS; verified           hidden: FAIL
+  #3      solved      all PASS; verified           hidden: PASS
+  #4      stopped     cost stop before completion  not reached
+  #5      skipped     not started; budget spent    not reached
+
+Repeat #1 is a gate failure and has outcome `failed`. Repeat #2 is the crucial
+false-pass case: its gates passed, so hidden scoring ran, but the outcome is
+`false_pass`, not `failed` and not `solved`. Repeat #3 passes both independent
+checks and is `solved`. A hidden zero-test selection in #2 would likewise make
+the score non-passing, with classification `inconclusive`, rather than making
+it solved.
+
+The report calls exactly the outcomes `solved`, `false_pass`, and `failed`
+eligible. For a group of cells:
+
+  eligible = count(solved) + count(false_pass) + count(failed)
+  solved rate = count(solved) / eligible
+
+The example has eligible = 1 + 1 + 1 = 3 and one solve. `stopped` and
+`skipped` do not enlarge the denominator. The relevant per-variant fields are
+therefore:
+
+  variant  cells  solved    false  failed  err/stop/skip/not run
+  default  5      1/3 33%   1      1       0/1/1/0
+
+The per-case solved count for this one-variant example is `slugify  1/3`.
+It is not `1/5`, and it is not a percentage in the per-case table. The `cells`
+column includes all five requested cells, which is intentionally a different
+denominator from solved/eligible. If a group has no eligible cells, the
+per-variant solved display is `-` rather than a divide-by-zero percentage.
+
+5.2 Other report denominators
+
+For each variant, `false` counts `false_pass`, `failed` counts `failed`, and
+`err/stop/skip/not run` counts `error`, `stopped`, `skipped`, and `not run` in
+that order. The `attempts`, `cost/cell`, and `min/cell` values are arithmetic
+means over cells that ran: every outcome except `skipped` and `not run`.
+Thus `error` and `stopped` cells enter these means even though they are not
+eligible. In the example, #4 enters the means and #5 does not. `total` sums
+recorded cost over all cells, while minutes are seconds divided by 60 before
+the mean is displayed. The per-case table reports solved/eligible counts; it
+does not display cost or time means.
+
+A report expands missing requested cells before calculating these tables.
+Consequently its `cells` count is the full requested matrix even after an
+interruption. `not run` cells do not enter the solved denominator or any of the
+attempt, cost, or time means.
+
+Evidence:
+`factory/bench/report.py` (`ELIGIBLE`, `_repeat`, `_expanded`, `_mean`,
+`_variant_stats`, `summary`, `cell_lines`);
+`tests/test_bench.py::test_report_shows_solved_rates_per_variant_and_case`;
+`tests/test_bench.py::test_report_cells_lists_each_cell_and_its_directory`;
+`tests/test_bench.py::test_report_of_an_interrupted_run_counts_cells_not_run`.
+The five-repeat table above is an explanatory example, not output captured
+from a paid run.
+
+6. Budgets, dry runs, interruption and exit status
+
+6.1 Budget and preflight
+
+A real `factory bench run` spends money and requires `--max-cost USD`; omitting
+it is an error that suggests `--dry-run`. The budget, repeat, attempt and
+parallel counts are validated before cells start. A negative budget is invalid;
+zero is allowed but starts no cell. Unpriced model specifications produce a
+warning that `--max-cost` cannot limit them, so the budget is not a guarantee
+for such a model.
+
+Sequentially, a cell starts only while recorded spend is below the total
+budget. It receives the remaining amount, `max_cost - spent`, as its pipeline
+cost limit. After each cell, its recorded cost is added to spend. Once spend is
+at least the budget, every later requested cell is recorded `skipped` without
+being started. Cost accounting can cross a limit before the pipeline observes
+it, so `stopped` is a limit outcome, not a promise that recorded spend equals
+the cap exactly.
+
+With `--parallel N`, up to N children are in flight. Pending cells share the
+remaining budget, and each new child's limit is based on completed spend plus
+best-effort live costs read from running cell databases. Cells launched
+together can spend before the next poll sees their costs, so their combined
+spend can overshoot the total. Pending cells are skipped when the recorded
+estimate reaches the cap; already running cells are not converted to `skipped`.
+
+`--dry-run` needs no budget and creates no run directory, database, worktree,
+or model call. It prints the expanded variants, each agent step's resolved
+model and step limit, provider key names, and every requested cell, then exits
+0. It still loads and validates the configuration and cases and applies the
+`test_paths` compatibility check; it is not the full real-run provider-key,
+bubblewrap, requirements, or hidden-visibility preflight.
+
+6.2 Interruption and partial results
+
+After every completed, stopped, skipped, or recovered cell, the parent appends
+its record and atomically rewrites `results.json`. Finished cells therefore
+survive an interruption. The run's `ended_at` remains null until the run loop
+finishes its handled exit path.
+
+On sequential Ctrl-C or a stopped child, the current cell's database counters
+are recovered where possible and its outcome is `error`; no later cell starts.
+The interrupted cell is recorded, while requested cells never reached are
+absent. On parallel Ctrl-C, the parent terminates and waits for running
+children, reads their complete `cell.json` records or recovers `error` records,
+and leaves pending cells absent. Reports reconstruct those absent triples as
+`not run`.
+
+For a second non-normative example, request `default × slugify × 3`. If #1 is
+recorded `solved`, Ctrl-C interrupts #2 as `error`, and #3 is never reached,
+then the report shows:
+
+  not run: 1 of 3 cells
+  default: cells = 3, solved = 1/1 100%, err/stop/skip/not run = 1/0/0/1
+  default · slugify #3: not run, -, -, -, -
+
+The single eligible cell, not all three requested cells, is the solved-rate
+denominator. The recorded `error` also makes the bench command unsuccessful.
+
+The run command returns 1 if any recorded cell is `error`, `stopped`, or
+`skipped`; otherwise it returns 0. In particular, `failed` and `false_pass`
+are valid measured outcomes and do not by themselves make the command fail.
+A missing `not run` reconstruction is not itself an exit-code input, although
+the interruption that caused it ordinarily also records an `error`. Invalid
+arguments and preflight refusals return 1 before any cell starts.
+
+Source-only implementation notes: live cost that cannot be read counts as zero
+for that poll. Parallel children publish `cell.json` only after the complete
+JSON is ready; a missing or malformed record after child exit is recovered as
+an `error` and accompanied by `crash.log`.
+
+Evidence:
+`factory/bench/run.py` (`run_bench`, `_run_sequential`, `_running_cost`,
+`_run_parallel`, `_crash_record`, `_dry_run`);
+`factory/bench/report.py` (`_expanded`, `exit_code`);
+`tests/test_bench.py::test_the_budget_caps_cells_and_stops_starting_new_ones`;
+`tests/test_bench.py::test_parallel_runs_keep_to_the_budget`;
+`tests/test_bench.py::test_dry_run_prints_the_cells_and_creates_nothing`;
+`tests/test_bench.py::test_results_are_written_after_every_cell`;
+`tests/test_bench.py::test_ctrl_c_stops_starting_cells_and_records_them_as_errors`;
+`tests/test_bench.py::test_report_of_an_interrupted_run_counts_cells_not_run`.
+
+7. Recorded results and the five bench commands
+
+7.1 What a run records
+
+A run directory is `$FACTORY_HOME/bench/RUN/results.json`, where RUN is the UTC
+start time formatted `YYYYmmdd-HHMMSS`. An existing directory with that ID is
+refused rather than reused. The initial results file is written before any
+cell and atomically replaced after every cell. Its four top-level keys are:
+
+* `run`: `id`, UTC `started_at` and `ended_at`, `factory` version, `sandbox`,
+  total `max_cost`, per-cell `max_attempts`, and `repeat`. `ended_at` is null
+  until the run finishes its handled path.
+* `cases`: for each selected case ID, its `kind`, deterministic `base` commit
+  SHA once materialized, and `fixture_sha`. The fixture hash is SHA-256 over
+  every file below the case directory in sorted relative-path order, hashing
+  each relative path and its bytes; it includes case metadata, starting tree,
+  hidden files, and solution files.
+* `variants`: for each variant ID, its `flow`, optional `model` override, and
+  `steps`. Every non-gates agent step records `name`, `kind`, resolved `model`,
+  `max_steps`, `prompt_sha`, `loop`, and `prove`. The prompt hash is SHA-256 of
+  the whole resolved prompt file, including frontmatter, not just its body.
+* `cells`: one object per recorded cell with `variant`, `case`, `repeat`,
+  `outcome`, `attempts`, `cost_usd`, `seconds`, `model_calls`, `tokens_in`,
+  `tokens_out`, `review_changes`, `step_limit_stops`, `failed_gates`, and
+  run-relative `dir` when a directory exists.
+
+Attempts and task cost come from the cell task row. Model calls and input and
+output tokens are summed over its run rows; reviewer `CHANGES` outcomes and
+step-limit stops are counted separately. Hidden command output is in the
+cell's `hidden.log`, not duplicated as a JSON field. An unreadable result file,
+non-mapping JSON, or a results mapping missing any of the four top-level keys
+is a report error, not an empty successful run.
+
+7.2 Running and reading
+
+The five subcommands have these observable roles:
+
+* `factory bench run` expands and executes the selected case × variant × repeat
+  matrix as specified above. Its live line for each recorded cell identifies
+  the triple, outcome, attempts, cost, and elapsed time, and its final output
+  includes the report summary. `--cases`, `--case`, `--flow`, `--model`,
+  `--repeat`, `--max-cost`, `--max-attempts`, `--parallel`, `--dry-run`, and
+  `--no-sandbox` have the meanings in sections 1 through 6.
+
+* `factory bench report [RUN] [--cells]` reads one run without rerunning it.
+  With no RUN it resolves the lexically latest run ID; no runs or an unknown ID
+  is an error naming the available IDs where applicable. It prints the run
+  header, per-variant table, and per-case solved counts. The header includes
+  cost and optional budget, factory version, an unsandboxed warning, and a
+  count of reconstructed missing cells. `--cells` adds each recorded or
+  reconstructed triple with outcome, attempts, cost, minutes, and directory.
+
+* `factory bench compare RUN_A RUN_B` reads two runs and prints A → B setup
+  differences and score tables as specified in section 8. It does not rerun
+  cells and does not return failure merely because scores or setups differ.
+  Unknown or unreadable runs are errors.
+
+* `factory bench list` lists run directories newest ID first, with start time,
+  case and variant counts, recorded cells/expected cells, and total recorded
+  cost. Unlike report, this cell count is not expanded with `not run`. It
+  prints `no bench runs yet` for no usable rows. An unreadable run is reported
+  on stderr and skipped while other runs remain listed.
+
+* `factory bench cases [--cases DIR]` loads and validates the selected suite
+  and prints each case's ID, kind, and title in case-ID order. It neither
+  materializes repositories nor invokes models. A case validation error makes
+  the command fail.
+
+Source-only implementation notes: run IDs have one-second resolution, which is
+why an existing directory is explicitly rejected. Report cell directories are
+resolved against the run directory when relative. The comparison's treatment
+of incomplete runs is called out separately in section 8.
+
+Evidence:
+`factory/bench/run.py` (`fixture_sha`, `variant_steps`, `write_results`,
+`_empty_record`, `_record_from_db`, `run_bench`);
+`factory/bench/report.py` (`runs`, `load`, `resolve`, `header`, `summary`,
+`cell_lines`, `list_row`);
+`factory/cli.py` (`cmd_bench_run`, `cmd_bench_report`, `cmd_bench_compare`,
+`cmd_bench_list`, `cmd_bench_cases`);
+`tests/test_bench.py::test_a_bench_run_scores_each_cell_with_gates_and_hidden_tests`;
+`tests/test_bench.py::test_results_record_loop_and_prove_and_compare_flags_a_change`;
+`tests/test_bench.py::test_report_shows_solved_rates_per_variant_and_case`;
+`tests/test_bench.py::test_list_shows_runs_newest_first_and_cases_lists_the_suite`.
+
+8. Comparisons and the meaning of changed inputs
+
+8.1 What is paired and displayed
+
+`factory bench compare A B` compares only case IDs and variant IDs present in
+both runs. Its header gives the number shared and names one-sided cases and
+variants as only in A or only in B. One-sided IDs do not enter the shared score
+tables. A warning is printed for either unsandboxed run.
+
+For each shared variant, the table shows A → B solved/eligible counts, false
+pass counts, mean cost per ran cell, mean attempts per ran cell, and mean
+minutes per ran cell. For each shared case and shared variant it shows the
+corresponding solved/eligible counts. These are aggregate counts over each
+side's recorded cells for that case or variant, not pairwise replay matching of
+individual repeat numbers, and comparison solved columns do not add
+percentages. A side with no recorded cells for a compared group displays `-`.
+
+Source-only implementation note: unlike `report`, `compare` does not call the
+missing-cell expansion. Absent cells in an interrupted results file therefore
+do not become `not run` rows in the comparison; the comparison aggregates the
+recorded cells that each side actually has. Recorded `error`, `stopped`, and
+`skipped` cells still follow the same eligibility and ran-cell rules described
+in section 5.
+
+8.2 Changed cases, prompts and models
+
+A shared case whose `fixture_sha` differs is printed as changed, with the first
+12 characters of each hash. Because that hash covers every case file and
+relative path, the difference can be in the visible starting repository,
+`case.yaml`, hidden tests, reference solution, or any other fixture file. The
+comparison still shows that shared case's A → B counts; it does not discard,
+normalize, or declare the scores equivalent. The meaning is that the fixed
+problem or its scoring inputs changed, so the two numbers are not a controlled
+case-for-case measurement of only a flow change.
+
+For each shared variant, steps are matched by `name`. A step present on only
+one side is named. For a step present on both, compare prints changes in:
+
+* `model`: the resolved model for that named step changed;
+* `prompt_sha`: the whole resolved prompt file, including frontmatter, changed;
+* `loop`: the configured loop behavior list changed; or
+* `prove`: the review-step prove setting changed.
+
+Hashes are displayed with their first 12 characters in these change lines.
+A changed prompt hash means the loaded prompt input differs; it does not
+identify which line changed. A changed resolved model means that step did not
+run under the same recorded model specification. Neither warning proves which
+change caused a score difference. The compare command reports these conditions
+but performs no causal adjustment, significance test, automatic rerun, or
+provider ranking. A like-with-like interpretation requires unchanged cases and
+setup, or an explicit accounting for every reported difference.
+
+As an operational sample-size note, the architecture recommends at least
+`--repeat 3` before acting on a difference and reading counts and means rather
+than one percentage. More repeats do not make a changed fixture, prompt, or
+model disappear; those changes remain visible in the comparison header.
+
+Evidence:
+`factory/bench/run.py` (`fixture_sha`, `variant_steps`);
+`factory/bench/report.py` (`_step_changes`, `_solved_count`, `compare`,
+`_variant_stats`);
+`tests/test_bench.py::test_compare_flags_changed_cases_models_and_prompts`;
+`tests/test_bench.py::test_compare_pairs_variants_and_cases_across_runs`;
+`tests/test_bench.py::test_results_record_loop_and_prove_and_compare_flags_a_change`.
+The absence of missing-cell expansion and repeat-by-repeat pairing in compare
+is a source-only implementation note established by `factory/bench/report.py`
+(`compare`).

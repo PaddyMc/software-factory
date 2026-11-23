@@ -76,6 +76,55 @@ def test_run_ends_in_a_working_pr(factory_repo, home, fake_gh, monkeypatch, caps
     assert "demo-t01" in capsys.readouterr().out
 
 
+def test_a_review_without_a_verdict_tells_the_builder_none_came(factory_repo, home, fake_gh, monkeypatch):
+    _use_model(monkeypatch, scripts(review_verdicts=["", ""]))
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    assert db.task("demo-t01")["status"] == "pr_open" and db.task("demo-t01")["attempts"] == 2
+    runs = db.runs("demo-t01")
+    assert [(r["role"], r["outcome"]) for r in runs] == [
+        ("plan", "done"), ("build", "committed"), ("review", "CHANGES (no verdict)"),
+        ("build", "no-changes"), ("review", "APPROVE"), ("verify", "pass"),
+        ("verify", "report"), ("pr", "opened")]
+    review = next(r for r in runs if r["role"] == "review")
+    assert review["outcome"] == "CHANGES (no verdict)" and review["steps"] == 3
+    assert review["report"].endswith("Final verdict: APPROVE")
+    events = [json.loads(line) for line in open(review["transcript"])]
+    assert any(e["type"] == "reask" and e["content"].startswith("Your review ended without a VERDICT line.")
+               for e in events)
+    assert "[review#1] ⚠ no VERDICT line: asking once more" in (home / "logs/demo-t01.log").read_text()
+
+    second_build = [r for r in runs if r["role"] == "build"][-1]
+    events = [json.loads(line) for line in open(second_build["transcript"])]
+    task_message = next(e["content"] for e in events if e["type"] == "human")
+    feedback = ("# Feedback to address first\n\nReviewer gave no verdict, so the change counts as rejected.\n\n"
+                f"{review['report']}\n\nAddress any blocker or major finding it lists.")
+    assert feedback in task_message
+    assert "1. [major] src/greet.txt:1" in task_message
+
+
+def test_a_review_answered_when_asked_again_routes_on_its_verdict(factory_repo, home, fake_gh, monkeypatch):
+    plays = scripts(review_verdicts=["", "CHANGES", "", "APPROVE"])
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    assert db.task("demo-t01")["status"] == "pr_open" and db.task("demo-t01")["attempts"] == 2
+    runs = db.runs("demo-t01")
+    reviews = [r for r in runs if r["role"] == "review"]
+    assert [r["outcome"] for r in reviews] == ["CHANGES (asked again)", "APPROVE (asked again)"]
+    second_build = [r for r in runs if r["role"] == "build"][-1]
+    events = [json.loads(line) for line in open(second_build["transcript"])]
+    task_message = next(e["content"] for e in events if e["type"] == "human")
+    assert f"Reviewer requested changes:\n\n{reviews[0]['report']}" in task_message
+
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    assert "Reviewed by review: APPROVE (asked again)." in body
+    assert "Reviewer report (review)" in body and "VERDICT: APPROVE" in body
+    assert [step for role, step in plays["_calls"] if role == "REVIEWER"] == [0, 1, 2, 0, 1, 2]
+
+
 def test_a_new_pr_is_titled_with_the_verifiers_title(factory_repo, home, fake_gh, monkeypatch):
     _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
     assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
@@ -367,6 +416,22 @@ def test_no_progress_stops_before_max_attempts(factory_repo, home, fake_gh, monk
     row = open_db(home).task("demo-t01")
     assert row["attempts"] == 2 and row["note"].startswith("no progress (same failure twice): Verification gates failed: verification")
     assert "no progress" in (home / "logs/demo-t01.log").read_text()
+
+
+def test_a_review_out_of_calls_gives_its_verdict_instead_of_another_build(factory_repo, home, fake_gh, monkeypatch):
+    """Regression: a review that ran out of model calls before its VERDICT line counted as CHANGES and sent
+    the task back to the builder; factory-spec-t04 built three times, twice for reviews with no verdict."""
+    (factory_repo / ".factory/agents/reviewer.md").write_text(
+        "---\nmodel: fake:reviewer\nmax_steps: 1\n---\nYou are the REVIEWER for one task.\n")
+    git(factory_repo, "commit", "-q", "-am", "reviewer: one call")
+    git(factory_repo, "push", "-q", "origin", "main")
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))   # git_diff, then the verdict
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    assert db.task("demo-t01")["attempts"] == 1
+    assert [(r["role"], r["outcome"]) for r in db.runs("demo-t01") if r["role"] in ("build", "review")] == [
+        ("build", "committed"), ("review", "APPROVE (step limit)")]
 
 
 def test_run_refuses_a_manual_contract(factory_repo, home, monkeypatch, capsys):
@@ -2021,6 +2086,71 @@ def test_a_verification_command_that_selects_no_tests_sends_the_tester_back(
     events = [json.loads(line) for line in open(runs[-1]["transcript"])]
     message = next(e["content"] for e in events if e["type"] == "human")
     assert reason in message
+    assert not any(role == "BUILDER" for role, _ in calls)
+
+
+EXISTING = ('import unittest\n\n\nclass ExistingTest(unittest.TestCase):\n'
+            '    def test_existing(self):\n        self.assertTrue(True)\n')
+
+
+def _existing_tests_only(repo):
+    """demo-t01's test command names a test that already exists and passes, as a docs or spec task's does."""
+    (repo / "tests/test_existing.py").write_text(EXISTING)
+    plan = repo / "docs/plans/demo/demo.md"
+    plan.write_text(plan.read_text().replace("python3 -m unittest tests.test_greet",
+                                             "python3 -m unittest tests.test_existing"))
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "name an existing test")
+    git(repo, "push", "-q", "origin", "main")
+
+
+def test_a_tester_that_writes_no_tests_passes_when_the_commands_already_pass(
+        factory_repo, home, fake_gh, monkeypatch):
+    """factory-spec-t02: a spec task whose test commands name existing, passing tests needs no new test. Its
+    tester rightly wrote none, and the step failed twice with "The try wrote no tests." before any build."""
+    _test_flow(factory_repo, planner=False, strict=True)
+    _existing_tests_only(factory_repo)
+    plays = scripts(review_verdicts=["APPROVE"])
+    plays["TESTER"] = [AIMessage("No new test is needed: the task changes only documentation.")]
+    _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    assert row["status"] == "pr_open" and row["attempts"] == 1
+    runs = [(r["role"], r["step"], r["attempt"], r["outcome"]) for r in db.runs("demo-t01")]
+    assert runs[:2] == [("test", "test", 1, "no tests needed"), ("build", "build", 1, "committed")]
+    test_run = db.runs("demo-t01")[0]
+    assert test_run["sha"] is None and test_run["report"].startswith("No new test is needed")
+    assert "No tests written" in test_run["report"] and "`python3 -m unittest tests.test_existing`" in test_run["report"]
+    events = [json.loads(line) for line in open(test_run["transcript"])]
+    assert "# These commands already pass" in next(e["content"] for e in events if e["type"] == "human")
+
+    subjects = git(factory_repo, "log", "--format=%s", f"{row['base_sha']}..{row['candidate_sha']}").splitlines()
+    assert len(subjects) == 1 and "acceptance tests" not in subjects[0]       # nothing committed or locked
+    gates = next(r for r in db.runs("demo-t01") if r["step"] == "gates")
+    assert "acceptance_untouched" not in gates["report"]
+    body = json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["body"]
+    block = body.split("<details><summary>Acceptance tests (test)</summary>", 1)[1].split("</details>", 1)[0]
+    assert "No tests written" in block
+
+
+def test_a_tester_that_writes_no_tests_still_fails_when_a_command_names_a_new_test(
+        factory_repo, home, fake_gh, monkeypatch):
+    _test_flow(factory_repo, planner=False, strict=True)        # tests.test_greet doesn't exist yet
+    plays = scripts(review_verdicts=[])
+    plays["TESTER"] = [AIMessage("No new test is needed.")]
+    calls = _use_model(monkeypatch, plays)
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 1
+
+    db = open_db(home)
+    row = db.task("demo-t01")
+    assert row["status"] == "failed" and "The try wrote no tests." in row["note"]
+    runs = db.runs("demo-t01")
+    assert [(r["role"], r["attempt"], r["outcome"]) for r in runs] == [
+        ("test", 1, "no-changes"), ("test", 2, "no-changes")]
+    events = [json.loads(line) for line in open(runs[0]["transcript"])]
+    assert "# These commands already pass" not in next(e["content"] for e in events if e["type"] == "human")
     assert not any(role == "BUILDER" for role, _ in calls)
 
 

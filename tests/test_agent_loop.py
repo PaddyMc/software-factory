@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from factory import agents, observe, prices
 from factory.agents import Ctx, LangChainRoles, recursion_limit
@@ -23,6 +23,34 @@ def _ctx(tmp_path, events):
     task = parse_text(plan_text(), "p.md")[0]
     return Ctx(task=task, worktree=tmp_path, base_sha="0" * 40, attempt=0, sandbox=None,
                record=events.append, log=lambda tag, msg: events.append({"type": "log", "msg": msg}))
+
+
+def _review_roles(tmp_path, max_steps):
+    d = tmp_path / ".factory/agents"
+    d.mkdir(parents=True)
+    (d / "reviewer.md").write_text(
+        f"---\nmodel: fake:x\nmax_steps: {max_steps}\n---\n"
+        "You are the REVIEWER.\n\nEnd with VERDICT: APPROVE or VERDICT: CHANGES.\n")
+    return LangChainRoles(tmp_path)
+
+
+def _review_ctx(tmp_path, events):
+    task = parse_text(plan_text(), "p.md")[0]
+    return Ctx(task=task, worktree=tmp_path, base_sha="0" * 40, attempt=1, sandbox=None,
+               record=events.append,
+               log=lambda tag, msg: events.append({"type": "log", "tag": tag, "msg": msg}))
+
+
+def _watch_reviewer(monkeypatch, plays):
+    seen = []
+
+    class SeenModel(ScriptedModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            seen.append(list(messages))
+            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    monkeypatch.setattr(agents, "build_model", lambda spec: SeenModel(plays=plays))
+    return seen
 
 
 def test_finishing_on_the_last_allowed_step_is_not_killed(tmp_path, monkeypatch):
@@ -46,6 +74,72 @@ def test_hitting_the_step_limit_is_reported_not_raised(tmp_path, monkeypatch):
     assert {"type": "stopped", "reason": "step limit", "steps": 5} in events
     assert any("⚠ stopped: step limit" in e.get("msg", "") for e in events)
 
+
+
+def _reviewer_roles(tmp_path, max_steps):
+    d = tmp_path / ".factory/agents"
+    d.mkdir(parents=True)
+    (d / "reviewer.md").write_text(f"---\nmodel: fake:x\nmax_steps: {max_steps}\n---\n"
+                                   "You are the REVIEWER. End with VERDICT: APPROVE or VERDICT: CHANGES.\n")
+    return LangChainRoles(tmp_path)
+
+
+class Recording(ScriptedModel):
+    """Records how tools were bound and every request the model was sent."""
+    def bind_tools(self, tools, **kwargs):
+        self.plays["_binds"].append(kwargs)
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.plays["_seen"].append(list(messages))
+        return super()._generate(messages, stop, run_manager, **kwargs)
+
+
+def _review_plays(*script):
+    return {"REVIEWER": list(script), "_calls": [], "_verdicts": [], "_binds": [], "_seen": []}
+
+
+def test_a_review_out_of_calls_gets_one_more_call_for_its_verdict(tmp_path, monkeypatch):
+    """Regression: a review that ran out of model calls before its VERDICT line counted as CHANGES, skipping
+    a proving review's proof and costing another build (factory-spec-t04 built three times for it)."""
+    report = "## Findings\n1. [minor] fine\n\nVERDICT: APPROVE"
+    plays = _review_plays(call("list_dir", path="."), call("list_dir", path="."), AIMessage(report))
+    monkeypatch.setattr(agents, "build_model", lambda spec: Recording(plays=plays))
+    events = []
+    out = _reviewer_roles(tmp_path, 2).review(_ctx(tmp_path, events))
+
+    assert out.verdict == "APPROVE" and out.text == report
+    assert out.stopped == "step limit" and out.steps == 3          # the limit is still reported
+    closing = plays["_seen"][-1]
+    assert isinstance(closing[-1], HumanMessage) and closing[-1].content == agents.VERDICT_CALL
+    assert sum(isinstance(m, ToolMessage) for m in closing) == 2   # it judges from what it already read
+    assert not any(str(m.content).startswith(agents.CALL_LIMIT_MARKER) for m in closing)
+    assert plays["_binds"][-1].get("tool_choice") == "none"
+    assert {"type": "nudge", "kind": "verdict", "text": agents.VERDICT_CALL} in events
+
+
+def test_a_review_with_its_verdict_gets_no_extra_call(tmp_path, monkeypatch):
+    plays = _review_plays(call("list_dir", path="."), AIMessage("VERDICT: CHANGES"))
+    monkeypatch.setattr(agents, "build_model", lambda spec: Recording(plays=plays))
+    events = []
+    out = _reviewer_roles(tmp_path, 2).review(_ctx(tmp_path, events))
+    assert out.verdict == "CHANGES" and out.steps == 2 and out.stopped is None
+    assert len(plays["_seen"]) == 2 and not any(e["type"] == "nudge" for e in events)
+
+
+def test_a_failed_verdict_call_leaves_the_review_without_a_verdict(tmp_path, monkeypatch):
+    class FailsToClose(Recording):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            if messages[-1].content == agents.VERDICT_CALL:
+                raise RuntimeError("502: provider unavailable")
+            return super()._generate(messages, stop, run_manager, **kwargs)
+
+    plays = _review_plays(call("list_dir", path="."))
+    monkeypatch.setattr(agents, "build_model", lambda spec: FailsToClose(plays=plays))
+    events = []
+    out = _reviewer_roles(tmp_path, 1).review(_ctx(tmp_path, events))
+    assert out.verdict == "CHANGES" and out.stopped == "step limit" and out.steps == 1
+    assert any("⚠ verdict call failed: RuntimeError: 502" in e.get("msg", "") for e in events)
 
 def test_a_failing_tool_call_goes_back_to_the_model(tmp_path, monkeypatch):
     """Regression: list_dir on a directory the task is meant to create raised FileNotFoundError and killed the run."""
@@ -200,3 +294,86 @@ def test_cached_input_is_priced_at_the_cache_rate(home):
     assert abs(prices.cost("openrouter:deepseek/v4", 1000, 10, cache_read=800) - (200e-6 + 80e-6 + 20e-6)) < 1e-12
     assert abs(prices.cost("openrouter:z/no-cache", 1000, 10, cache_read=800) - (1000e-6 + 20e-6)) < 1e-12
     prices._memo.clear()
+
+
+def test_a_review_without_a_verdict_is_asked_once_more(tmp_path, monkeypatch):
+    first = "## Findings\n1. [major] src/greet.txt:1 — check the greeting\n\nFinal verdict: APPROVE"
+    reply = "## Findings\n1. [major] src/greet.txt:1 — the greeting is wrong\n\nVERDICT: CHANGES"
+    plays = {"REVIEWER": [AIMessage(first), call("git_diff", stat=True), AIMessage(reply)],
+             "_calls": [], "_verdicts": []}
+    seen = _watch_reviewer(monkeypatch, plays)
+    events = []
+
+    out = _review_roles(tmp_path, 5).review(_review_ctx(tmp_path, events))
+
+    assert out.reasked and out.verdict == "CHANGES" and out.text == reply and out.steps == 3
+    reask = next(e for e in events if e["type"] == "reask")
+    assert reask["content"].startswith("Your review ended without a VERDICT line.")
+    assert ("review#1", "⚠ no VERDICT line: asking once more") in [
+        (e["tag"], e["msg"]) for e in events if e["type"] == "log"]
+    reask_at = events.index(reask)
+    assert [e["type"] for e in events[reask_at + 1:] if e["type"] != "log"] == ["ai", "tool", "ai"]
+
+    assert len(seen) == 3
+    request = seen[1]
+    assert isinstance(request[0], SystemMessage)
+    assert isinstance(request[1], HumanMessage) and request[1].content == seen[0][1].content
+    assert isinstance(request[2], AIMessage) and request[2].text == first
+    assert isinstance(request[-1], HumanMessage) and request[-1].content == agents.REASK
+    assert not any(str(m.content).startswith(agents.CALL_LIMIT_MARKER) for m in request)
+
+
+def test_a_review_stopped_at_its_step_limit_is_asked_for_its_verdict(tmp_path, monkeypatch):
+    closing = "## Findings\n1. [major] src/greet.txt:1 — still checking the greeting"
+    reply = "## Findings\n1. [major] src/greet.txt:1 — the greeting is wrong\n\nVERDICT: CHANGES"
+    plays = {"REVIEWER": [call("list_dir", path="."), call("list_dir", path="."), AIMessage(closing), AIMessage(reply)],
+             "_calls": [], "_verdicts": []}
+    seen = _watch_reviewer(monkeypatch, plays)
+    events = []
+
+    out = _review_roles(tmp_path, 2).review(_review_ctx(tmp_path, events))
+
+    assert out.stopped == "step limit" and out.reasked
+    assert out.verdict == "CHANGES" and out.text == reply
+    kinds = [e["type"] for e in events]
+    assert kinds.index("stopped") < kinds.index("reask")
+    assert len(seen) == 4
+    assert isinstance(seen[2][-1], HumanMessage) and seen[2][-1].content == agents.VERDICT_CALL
+    assert isinstance(seen[3][-1], HumanMessage) and seen[3][-1].content == agents.REASK
+    assert not any(str(m.content).startswith(agents.CALL_LIMIT_MARKER) for m in seen[3])
+
+
+def test_a_review_still_without_a_verdict_counts_as_changes(tmp_path, monkeypatch):
+    first = "## Findings\n1. [major] one unfinished finding"
+    last = "## Findings\n1. [major] the last unfinished report\n\nFinal verdict: APPROVE"
+    plays = {"REVIEWER": [AIMessage(first), AIMessage(last)], "_calls": [], "_verdicts": []}
+    monkeypatch.setattr(agents, "build_model", lambda spec: ScriptedModel(plays=plays))
+    events = []
+
+    out = _review_roles(tmp_path, 5).review(_review_ctx(tmp_path, events))
+
+    assert out.verdict == "CHANGES" and out.reasked and out.text == last and out.steps == 2
+    assert len(plays["_calls"]) == 2
+
+    cap_root = tmp_path / "capped"
+    capped = {"REVIEWER": [call("list_dir", path=".")], "_calls": [], "_verdicts": []}
+    monkeypatch.setattr(agents, "build_model", lambda spec: ScriptedModel(plays=capped))
+    out = _review_roles(cap_root, 1).review(_review_ctx(cap_root, []))
+    assert agents.REASK_STEPS == 3
+    # The step-limit VERDICT_CALL precedes the REASK_STEPS calls in the same run.
+    assert out.steps == 1 + 1 + agents.REASK_STEPS and out.verdict == "CHANGES"
+    assert len(capped["_calls"]) == 1 + 1 + agents.REASK_STEPS
+
+
+def test_a_review_with_a_verdict_is_not_asked_again(tmp_path, monkeypatch):
+    reply = "## Findings\n1. [minor] ok\n\nVERDICT: APPROVE"
+    plays = {"REVIEWER": [AIMessage(reply)], "_calls": [], "_verdicts": []}
+    seen = _watch_reviewer(monkeypatch, plays)
+    events = []
+
+    out = _review_roles(tmp_path, 5).review(_review_ctx(tmp_path, events))
+
+    assert out.reasked is False and out.verdict == "APPROVE" and out.text == reply
+    assert not any(e["type"] == "reask" for e in events)
+    assert not any("asking once more" in e.get("msg", "") for e in events)
+    assert len(seen) == 1 and plays["_calls"] == [("REVIEWER", 0)]

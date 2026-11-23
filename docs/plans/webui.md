@@ -606,10 +606,11 @@ None: the project sets no `e2e`. `test_web_serves_the_board_and_its_assets_over_
 ## Cross-Workstream Coordination
 
 - **Depends on:** nothing. The pages read `runs.flow` and `runs.step` from [agent-flows](agent-flows.md), which are on main.
-- **Required by:** [thoughts](thoughts.md). `thoughts-t03` waits for `webui-t05`: it adds each step's thoughts to the transcript page, and renames the page's model time from "thinking" to "in the model". The mockup `transcript.html` and the `.thinks` rules in `app.css` already show it.
+- **Required by:** [thoughts](thoughts.md). `thoughts-t03` waits for `webui-t05`: it adds each step's thoughts to the transcript page, and renames the page's model time from "thinking" to "in the model". The mockup `transcript.html` and the `.thinks` rules in `app.css` already show it. [plan-pages](plan-pages.md) (planned 2026-11-18) adds a Plans page and a page per plan to `factory web`. Their mockups, `plans.html` and `plan.html`, and their rules in `app.css` follow this plan's look. The other mockups gained the Plans navigation item.
+- **Required by** [thought-timeline](thought-timeline.md). Its task page links to a timeline and each thought links back to the turn on the `webui-t05` transcript page.
 - **Overlaps:** [measure](measure.md), [bench](bench.md) and [strict-flow](strict-flow.md) also change `factory/cli.py`, `factory/db.py`, `factory/pipeline.py` and `factory/scheduler.py`. This plan only adds to them (see Risk 8), so whichever lands second has a small conflict for the factory's conflict resolution.
 - **Related:** [pr-descriptions](pr-descriptions.md). `webui-t05` failed when GitHub refused its PR body as over 65,536 characters; it runs again after `pr-descriptions-t01`, which keeps every body under the limit. Factory PRs then point to `factory show` and this plan's task page for the planner's plan and every agent's full report.
-- **Later:** once measure's `factory stats` lands, a stats page can render its numbers. Once NEXT.md item 5 (steer a running agent) lands, the task page can have a box to message the running agent.
+- **Later:** once measure's `factory stats` lands, a stats page can render its numbers. NEXT.md item 5 (steer a running agent) is planned in [steer](steer.md): `steer-t04` adds a box to a running task's page that runs `factory say`, and a "You said" block to the transcript page.
 - **Supersedes** the unmerged `web-board` plan on branch `plan/web-board`, which was read-only and used system fonts and a different palette.
 
 ## Notes / Out of Scope

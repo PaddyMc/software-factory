@@ -9,7 +9,8 @@ plans: ["docs/plans/**/*.md"]
 exclude: []
 
 # Paths a `test` step may write (globs); required by a flow that has one.
-# test_paths: ["tests/**"]
+# strict's tests are committed before the build, must fail first, and are locked by acceptance_untouched.
+test_paths: ["tests/**"]
 
 # Repository guidance appended to every agent's system prompt: the first file that exists.
 guidance: ["AGENTS.md", "CLAUDE.md"]
@@ -18,28 +19,31 @@ guidance: ["AGENTS.md", "CLAUDE.md"]
 session_log: docs/sessions
 
 # Uncomment to require every task to add a new end-to-end test, and to run it.
-# e2e:
-#   dir: tests/e2e/            # new tests must be added directly under this directory
-#   language: python           # rust (#[test] fns) | python (def test_*)
-#   run_new: "pytest {path}::{name}"     # {target} = file stem, {name} = test fn, {path} = repo-relative file
-#   run_all: "pytest tests/e2e"
-#   run_all_when: ["^src/core/"]         # changed-path regexes that run the whole suite instead
+# Not used here: the end-to-end tests (CLI runs with a scripted model) live beside the unit tests in
+# tests/, and each contract's verification names the new tests it adds.
 
 # Commands for the unit_tests gate (omit for none).
 unit_tests: ["uv run pytest -q"]
 
 # Models and step limits per role (plan, test, build, review, verify), over the shipped prompts' defaults.
 # A whole prompt can be replaced with .factory/agents/<planner|tester|builder|reviewer|verifier>.md.
+# Every role is pinned, so this repository doesn't change models when the shipped defaults do.
 models:
+  plan: "openrouter:z-ai/glm-5.3"
+  test: "openrouter:z-ai/glm-5.3"           # not the builder's model: the tests that decide come from another model
   build: "openrouter:moonshotai/kimi-k3.1-pro"
   review: "openrouter:z-ai/glm-5.3"         # deepseek-v4-pro left 4 of 26 reviews without a VERDICT line
+  verify: "openrouter:deepseek/deepseek-v4-flash-0731"
+  select: "openrouter:z-ai/glm-5.3"
 # max_steps: {build: 150}
 
 # Agent flows: named step lists, chosen with `flow:` or per run with `factory run --flow NAME`.
 # The built-in `default` is plan, build, review, gates, verify. Steps follow
 # [plan]? [test]? build+ (review | gates)* [verify]?; a gates step goes after the last review when omitted.
-# flow: default
 # strict: test step, resumed builds, gates first, a proving review.
+#   test (map, trim, nudge) → build (map, trim, nudge, resume) → gates → review (prove, trim) → verify
+# The tester writes failing tests from the contract on another model, the builder can't change them,
+# and a reviewer's CHANGES needs a reproduced failure or a scope finding.
 # A build step can build several candidates (2 to 5): the first attempt builds them one after
 # another and the gates judge each; later attempts and reworks build one change.
 # flows:
@@ -49,11 +53,10 @@ models:
 #     - gates
 #     - review
 #     - verify
-# flow: strict
-flow: gates-first           # `factory run --flow default` runs the built-in order instead
+flow: strict
 flows:
-  gates-first:              # reviewers only see changes that already pass the gates
-    - plan
+  gates-first:              # the board's best before strict (81% first-attempt pass). Use it for docs-only
+    - plan                  # tasks, whose test commands have nothing to turn red: --flow gates-first
     - build
     - gates
     - review
@@ -67,10 +70,17 @@ flows:
 # denied_commands: ["\\bkubectl\\s+delete\\b"]
 
 # Directories the agents may also read (never write) by absolute path: dependency sources.
-# dependency_sources: ["~/.cargo/registry/src", "~/.cargo/git/checkouts", "~/.rustup/toolchains"]
+# The defaults are Rust sources; this repository's dependencies are in each worktree's .venv.
+dependency_sources: []
 
 # What the bubblewrap sandbox exposes; the defaults mount rustup/cargo and uv if present.
-# sandbox:
-#   ro_binds: ["~/.rustup", "~/.local/bin", "~/.local/share/uv"]
-#   rw_binds: ["~/.cargo"]
-#   env: {CARGO_TARGET_DIR: "{cache}/target", UV_CACHE_DIR: "{cache}/uv"}
+# Only what a uv project needs: uv and its Pythons read-only, and the shared uv cache. The Rust
+# mounts (~/.rustup, and ~/.cargo writable) are left out, so an agent can't write to ~/.cargo/bin.
+sandbox:
+  ro_binds: ["~/.local/bin", "~/.local/share/uv"]
+  rw_binds: []
+  hide: []
+  path: ["~/.local/bin"]
+  env: {UV_CACHE_DIR: "{cache}/uv"}
+  offline_env: {UV_OFFLINE: "1"}
+  cache_dirs: ["uv"]

@@ -11,6 +11,7 @@ from factory.contracts import parse_text
 from factory.db import DB, open_db
 from factory.log import RunLog
 from conftest import plan_text
+from test_spec_chapters_01_02 import chapter_02_acceptance
 
 
 @pytest.fixture
@@ -32,6 +33,7 @@ def test_upsert_keeps_status_and_refreshes_contract(db):
     row = db.task(t1.id)
     assert row["status"] == "pr_open" and row["pr_url"] == "u"
     assert db.contract(t1.id) == t1
+    chapter_02_acceptance()   # factory-spec-t01: docs/spec/02-spec.txt meets its acceptance criteria
 
 
 def test_dependencies_are_stacked_on_open_prs_or_merged(db):

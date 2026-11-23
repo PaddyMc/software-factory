@@ -3,6 +3,7 @@
 import json
 
 from factory import ci
+from test_spec_chapters_05_06 import chapter_06_acceptance
 
 JOB = "https://github.test/o/r/actions/runs/11/job/22"
 
@@ -30,6 +31,7 @@ def test_red_only_judges_the_factorys_own_candidate():
     assert ci.red(pr, "def") is None                  # someone pushed another commit: not ours to fix
     assert ci.red({}, "abc") is None                  # gh failed
     assert ci.red({"headRefOid": "abc", "statusCheckRollup": [_run("x", "SUCCESS")]}, "abc") == []
+    chapter_06_acceptance()   # factory-spec-t03: docs/spec/06-spec.txt meets its acceptance criteria
 
 
 def test_brief_carries_each_failed_job_log_up_to_its_last_error(fake_gh):

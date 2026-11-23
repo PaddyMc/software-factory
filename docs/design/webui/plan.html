@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bench · software-factory</title>
+<link rel="stylesheet" href="../../../factory/web/static/app.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="board.html">factory <span>/ software-factory</span></a>
+    <nav class="nav" aria-label="Pages">
+      <a href="board.html">Board</a>
+      <a href="plans.html" aria-current="page">Plans</a>
+      <a href="activity.html">Activity</a>
+    </nav>
+    <div class="top-end">
+      <span class="live-dot" data-state="live">Live</span>
+    </div>
+  </div>
+</header>
+
+<!-- A plan is read, not watched: <main> has no data-refresh, so a refresh never takes your place or your selection. -->
+<main class="wrap">
+
+  <div class="page-head">
+    <ol class="crumbs">
+      <li><a href="board.html">Board</a></li>
+      <li><a href="plans.html">Plans</a></li>
+      <li>bench</li>
+    </ol>
+    <h1 class="lede">Evaluate flows and setups (factory bench)</h1>
+    <dl class="facts">
+      <div><dt>tasks</dt><dd><span class="strip" role="img" aria-label="2 merged, 1 CI failing, 1 failed, 2 waiting"><i class="s-merged"></i><i class="s-merged"></i><i class="s-attn"></i><i class="s-failed"></i><i class="s-waiting"></i><i class="s-waiting"></i></span></dd></div>
+      <div><dt>status</dt><dd>2 of 6 merged, 1 CI failing, 1 failed, 2 waiting</dd></div>
+      <div><dt>spent</dt><dd>$4.31</dd></div>
+      <div><dt>file</dt><dd>docs/plans/bench.md</dd></div>
+    </dl>
+    <div class="page-acts">
+      <a class="btn" href="run.html">Run plan</a>
+      <a class="btn btn-quiet" href="board.html#plan-bench">Show on the board</a>
+    </div>
+  </div>
+
+  <div class="notice notice-you" role="status">
+    <span>This plan has changed since the board loaded it: 1 new task, 1 changed. Load plans to bring the board up to date.</span>
+    <form class="inline" method="post" action="#"><input type="hidden" name="next" value="/plans/bench"><button class="btn" title="factory sync">Load plans</button></form>
+  </div>
+
+  <div class="doc">
+
+    <nav class="toc" aria-labelledby="h-toc">
+      <h2 id="h-toc">Contents</h2>
+      <ol>
+        <li><a href="#execution-plan">Execution Plan</a>
+          <ol>
+            <li><a href="#locked-decisions">Locked Decisions</a></li>
+            <li><a href="#milestones">Milestones</a></li>
+            <li><a href="#task-contracts">Task Contracts</a></li>
+            <li><a href="#risks">Risks</a></li>
+          </ol>
+        </li>
+        <li><a href="#problem">Problem</a></li>
+        <li><a href="#design">Design</a>
+          <ol>
+            <li><a href="#a-case">A case</a></li>
+          </ol>
+        </li>
+        <li><a href="#cross-workstream-coordination">Cross-Workstream Coordination</a></li>
+      </ol>
+    </nav>
+
+    <div class="prose">
+      <p><strong>Status:</strong> Planned (2026-11-11). Workstream scoped; awaiting kickoff: <a class="task-ref" href="task.html"><i class="s-merged"></i>bench-t01</a> can run now. Roadmap: <span class="ref" title="NEXT.md#8-compare-flows-and-setups">NEXT.md item 8</span>, the <code>factory bench</code> half of <span class="ref" title="NEXT.md#3-nothing-measures-the-factory-itself">item 3</span>.</p>
+      <hr>
+
+      <h2 id="execution-plan">Execution Plan</h2>
+
+      <h3 id="locked-decisions">Locked Decisions</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Decision</th><th>Choice</th></tr></thead>
+        <tbody>
+          <tr><td>What an eval runs on</td><td><strong>Synthetic fixture repositories shipped with the factory.</strong> Each case is a small standard-library Python project with one task contract, hidden tests and a reference solution. <code>--cases DIR</code> runs a directory of your own cases in the same format.</td></tr>
+          <tr><td>How a candidate is scored</td><td><strong>Gates plus hidden tests.</strong> A cell is solved when the case's gates pass on the candidate and the case's hidden tests, laid over the candidate afterwards, pass too.</td></tr>
+          <tr><td>Sequencing</td><td><strong>Independent of <a href="https://github.com/PaddyMc/software-factory/pull/18">measure</a>.</strong> <a class="task-ref" href="task.html"><i class="s-merged"></i><code>bench-t01</code></a> and <a class="task-ref" href="task.html"><i class="s-merged"></i><code>bench-t02</code></a> touch only new files and run now.</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3 id="milestones">Milestones</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>#</th><th>Deliverable</th><th>Exit criteria</th><th>Parallelizable with</th></tr></thead>
+        <tbody>
+          <tr><td><strong>M1</strong></td><td>The case format and two cases</td><td><code>tests/test_bench_cases.py</code> passes: each case loads, materializes to the same base commit every time, and is solved by its reference solution</td><td>agent-flows t04–t05</td></tr>
+          <tr><td><strong>M3</strong></td><td><code>factory bench run</code></td><td>The run tests in <code>tests/test_bench.py</code> pass: scoring, variants, isolation, budget, refusals, dry run</td><td>M2</td></tr>
+          <tr><td><strong>M4</strong></td><td>Reading results</td><td>The report, compare, list and inspection tests in <code>tests/test_bench.py</code> pass</td><td>—</td></tr>
+        </tbody>
+      </table></div>
+      <p><strong>Sequence:</strong> <code>M1 → (M2 ∥ [agent-flows-t04 →] M3) → M4 → M5 → [agent-flows-t05 →] M6</code>.</p>
+
+      <h3 id="task-contracts">Task Contracts</h3>
+      <p>Each contract below is one task on the board. Its square and word are the task's status now.</p>
+      <ul class="rows task-cards">
+        <li class="row" id="task-bench-t01">
+          <span class="status s-merged"><i class="mark"></i>Merged</span>
+          <a class="id" href="task.html">bench-t01</a>
+          <div class="what"><div class="goal">factory/bench/ ships a fixture case format with its first two cases (slugify, money-rounding), each solved by its reference solution and not by its starting tree</div></div>
+          <div class="end"><span class="num quiet">low</span><span class="num quiet builds">1 build</span><span class="num cost">$1.30</span></div>
+        </li>
+        <li class="row" id="task-bench-t02">
+          <span class="status s-merged"><i class="mark"></i>Merged</span>
+          <a class="id" href="task.html">bench-t02</a>
+          <div class="what"><div class="goal">Three more shipped cases, report-json, ini-refactor and rate-limiter, complete the five-case suite</div></div>
+          <div class="end"><span class="num quiet">low</span><span class="num quiet builds">1 build</span><span class="num cost">$0.75</span></div>
+        </li>
+        <li class="row" id="task-bench-t03">
+          <span class="status s-attn"><i class="mark"></i>CI failing</span>
+          <a class="id" href="task.html">bench-t03</a>
+          <div class="what"><div class="goal"><code>factory bench run</code> runs every selected case under every variant in an isolated cell, scores it with the gates and the hidden tests, and prints a table</div><div class="why"><a href="https://github.com/PaddyMc/software-factory/pull/28">pull request #28</a></div></div>
+          <div class="end"><span class="num quiet">high</span><span class="num quiet builds">1 build</span><span class="num cost">$1.84</span></div>
+        </li>
+        <li class="row" id="task-bench-t04">
+          <span class="status s-failed"><i class="mark"></i>Failed</span>
+          <a class="id" href="task.html">bench-t04</a>
+          <div class="what"><div class="goal"><code>factory bench report</code>, <code>compare</code>, <code>list</code> and <code>cases</code> read bench results: one run's scores per variant and case, two runs side by side, past runs, and the available cases</div><div class="why">waits for <a href="task.html">bench-t03</a></div></div>
+          <div class="end"><span class="num quiet">low</span><span class="num quiet builds">3 builds</span><span class="num cost">$0.42</span></div>
+        </li>
+        <li class="row" id="task-bench-t05">
+          <span class="status s-waiting"><i class="mark"></i>Waiting</span>
+          <a class="id" href="task.html">bench-t05</a>
+          <div class="what"><div class="goal"><code>factory bench run --parallel N</code> runs up to N cells at once, one process per cell</div><div class="why">waits for <a href="task.html">bench-t04</a></div></div>
+          <div class="end"><span class="num quiet">medium</span><span class="num quiet builds"></span><span class="num cost"></span></div>
+        </li>
+        <li class="row" id="task-bench-t06">
+          <span class="status s-waiting"><i class="mark"></i>Waiting</span>
+          <a class="id" href="task.html">bench-t06</a>
+          <div class="what"><div class="goal">The docs describe <code>factory bench</code>: the case format, what a run does and how it scores</div><div class="why">waits for <a href="task.html">bench-t05</a>, <a href="task.html">agent-flows-t05</a></div></div>
+          <div class="end"><span class="num quiet">low</span><span class="num quiet builds"></span><span class="num cost"></span></div>
+        </li>
+        <li class="row" id="task-bench-t07">
+          <span class="status s-new"><i class="mark"></i>Not loaded</span>
+          <span class="id">bench-t07</span>
+          <div class="what"><div class="goal">bench can replay a merged task from the board as a case</div><div class="why">waits for <a href="task.html">bench-t06</a></div></div>
+          <div class="end"><span class="num quiet">medium</span><span class="num quiet builds"></span><span class="num cost"></span></div>
+        </li>
+      </ul>
+      <details class="fold" id="contracts-1">
+        <summary>The contracts as written, 7 tasks</summary>
+        <pre class="code"><code>- id: bench-t01
+  goal: "factory/bench/ ships a fixture case format with its first two cases (slugify, money-rounding), each solved by its reference solution and not by its starting tree"
+  spec_refs:
+    - "docs/plans/bench.md#cases"
+  depends_on: []
+  non_goals:
+    - "Running cases under the pipeline (bench-t03)"
+  acceptance:
+    - "factory.bench.cases.load(DIR) returns a Case with its contract, files, hidden tests and solution"
+  verification:
+    - "uv run pytest -q tests/test_bench_cases.py"
+  risk: low
+…</code></pre>
+      </details>
+      <p>Planned test additions: each verification command names its tests, so a missing test fails the gate rather than passing with zero selected.</p>
+
+      <h3 id="risks">Risks</h3>
+      <ol>
+        <li><strong>A case the starting tree already solves proves nothing.</strong> <strong>Action:</strong> <a class="task-ref" href="task.html"><i class="s-merged"></i><code>bench-t01</code></a> checks that every shipped case fails its hidden tests before the reference solution is applied.</li>
+        <li><strong>Runs cost money.</strong> <strong>Action:</strong> <code>--max-cost</code> caps the whole run, and <code>--dry-run</code> prints the cells without starting one.</li>
+      </ol>
+
+      <hr>
+
+      <h2 id="problem">Problem</h2>
+      <p>There is no controlled way to tell whether a change to a role prompt, a model or a flow made runs better. <code>factory stats</code> reports what happened on the board, but no two tasks are the same, so it can't compare two setups on the same work.</p>
+
+      <h2 id="design">Design</h2>
+      <pre class="code"><code>factory bench run --flow default --flow strict --cases slugify,money-rounding --repeat 2
+        │
+        ▼  one cell per variant × case × repeat, each in its own FACTORY_HOME
+   materialize case ─► factory run TASK --no-pr ─► gates ─► hidden tests ─► result.json</code></pre>
+      <h3 id="a-case">A case</h3>
+      <ul>
+        <li>A directory under <code>factory/bench/fixtures/</code> with:
+          <ul>
+            <li><code>case.yaml</code>: the contract, as in a plan;</li>
+            <li><code>repo/</code>: the starting tree, committed as the base;</li>
+            <li><code>hidden/</code> and <code>solution/</code>, which the builder never sees.</li>
+          </ul>
+        </li>
+        <li>A case is solved when its gates pass and its hidden tests pass on the candidate.</li>
+      </ul>
+
+      <h2 id="cross-workstream-coordination">Cross-Workstream Coordination</h2>
+      <ul>
+        <li><strong>Depends on:</strong> <a href="plan.html">agent-flows</a>: <a class="task-ref" href="task.html"><i class="s-merged"></i><code>agent-flows-t04</code></a> for flows in the pipeline.</li>
+        <li><strong>Required by:</strong> <a href="plan.html">flow-tuning</a>, which compares its flows with bench.</li>
+      </ul>
+    </div>
+  </div>
+
+  <footer class="foot">
+    <span>factory web 0.1.0</span>
+    <span>127.0.0.1:8765, this machine only</span>
+    <span>state in ~/.local/share/factory/software-factory</span>
+  </footer>
+</main>
+
+</body>
+</html>

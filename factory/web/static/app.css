@@ -254,6 +254,22 @@ form.inline { display: inline; }
 .next-step .acts { display: flex; gap: 0.5rem; }
 .next-step pre { grid-column: 1 / -1; margin: 0; padding: 0.85rem 1rem; background: var(--bg); border: 1px solid var(--border);
   color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 14rem; overflow: auto; }
+/* a running task's panel: a box to tell its agent something, and what became of this run's messages */
+.say { grid-column: 1 / -1; display: grid; gap: 0.5rem; }
+.say label { font-size: 0.875rem; color: var(--text-bright); }
+.say textarea { font: 400 0.875rem/1.5 var(--font-mono); color: var(--text-bright); background: var(--bg);
+  border: 1px solid var(--border-accent); padding: 0.6rem 0.75rem; width: 100%; min-height: 4.5rem; resize: vertical; border-radius: 0; }
+.say textarea:focus { border-color: var(--text-bright); outline: none; }
+.say-end { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem 1rem; flex-wrap: wrap; }
+.say-end .hint { font-size: 0.8125rem; color: var(--text-secondary); max-width: 62ch; }
+.messages { grid-column: 1 / -1; border-top: 1px solid var(--border); }
+.messages li { display: grid; grid-template-columns: 4.5rem minmax(0, 1fr) auto; column-gap: 1rem; align-items: baseline;
+  padding: 0.55rem 0; border-bottom: 1px solid var(--border); }
+.messages li:last-child { border-bottom: 0; }
+.messages time { font: 400 0.75rem var(--font-mono); color: var(--text-secondary); }
+.messages .text { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+.messages .fate { font: 400 0.75rem var(--font-mono); color: var(--text-secondary); white-space: nowrap; }
+.messages .fate.is-waiting { color: var(--text-bright); }
 
 .cols { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 3.5rem; }
 .contract h3, .runs-head { font: 600 0.8125rem var(--font-body); color: var(--text-secondary); margin: 1.5rem 0 0.5rem; }
@@ -303,8 +319,94 @@ form.inline { display: inline; }
   white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-secondary); max-height: 18rem; overflow: auto; }
 .result.refused { border-left-color: var(--bad); color: var(--bad); }
 .stopped { margin-top: 0.9rem; font: 400 0.8125rem var(--font-mono); color: var(--bad); }
+/* a message you sent, where the agent received it: between the steps, ruled in the brightest text colour */
+.said > div:last-child { border-left: 2px solid var(--text-bright); padding-left: 0.85rem; }
+.said .step-n, .said .says { color: var(--text-bright); }
+.said-via { margin-top: 0.35rem; font: 400 0.75rem var(--font-mono); color: var(--text-secondary); }
 .fold > summary { cursor: pointer; font: 400 0.8125rem var(--font-mono); color: var(--text-secondary); margin-top: 0.4rem; }
 .fold > summary:hover { color: var(--text-bright); }
+
+/* ---------------------------------------------------------------- plans */
+
+/* a task that is in its plan's file but not on the board yet */
+.s-new { color: var(--text-secondary); }     .s-new .mark, i.s-new { border-style: dotted; border-color: var(--text-secondary); }
+
+.notice-you { border-left-color: var(--you); }
+.notice form { margin-left: auto; }
+
+/* the plans page: one line per plan doc, laid out like a plan card's summary */
+.plan-list > li { display: grid; grid-template-columns: 14rem minmax(9rem, auto) minmax(0, 1fr) auto; column-gap: 1.5rem;
+  align-items: center; padding: 1.1rem 0; border-bottom: 1px solid var(--border); }
+a.plan-name { text-decoration: none; }
+a.plan-name:hover { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 0.2em; }
+.plan-about { min-width: 0; display: grid; gap: 0.15rem; }
+.plan-title { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.plan-path { font: 400 0.75rem var(--font-mono); color: var(--text-secondary); }
+.page-acts { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1.75rem; }
+
+/* a plan document: its contents beside the prose */
+.doc { display: grid; grid-template-columns: 13rem minmax(0, 1fr); gap: 3.5rem; padding-bottom: 3.5rem; }
+.toc { position: sticky; top: 5rem; align-self: start; max-height: calc(100vh - 6rem); overflow: auto; font-size: 0.8125rem; }
+.toc h2 { font: 600 0.8125rem var(--font-body); color: var(--text-secondary); margin-bottom: 0.6rem; }
+.toc a { display: block; padding: 0.2rem 0; color: var(--text-secondary); text-decoration: none; }
+.toc a:hover { color: var(--text-bright); }
+.toc ol ol a { padding-left: 0.85rem; }
+
+.prose { min-width: 0; }
+.prose > * + * { margin-top: 1rem; }
+.prose > :first-child { margin-top: 0; }
+.prose h2 { font: 400 1.875rem/1.2 var(--font-display); letter-spacing: -.01em; color: var(--text-bright);
+  margin-top: 3.5rem; padding-top: 1rem; border-top: 1px solid var(--border-accent); scroll-margin-top: 4.5rem; }
+.prose h3 { font: 600 1rem var(--font-body); color: var(--text-bright); margin-top: 2.25rem; scroll-margin-top: 4.5rem; }
+.prose h4, .prose h5, .prose h6 { font: 600 0.875rem var(--font-body); color: var(--text-secondary); margin-top: 1.75rem; }
+.prose p, .prose li { max-width: 72ch; }
+.prose strong { color: var(--text-bright); font-weight: 600; }
+.prose ul > li { position: relative; padding-left: 1.1rem; }
+.prose ul > li::before { content: ""; position: absolute; left: 0; top: 0.8em; width: 5px; height: 1px; background: var(--text-muted); }
+.prose ol { list-style: decimal; padding-left: 1.5rem; }
+.prose ol > li::marker { font: 400 0.8125rem var(--font-mono); color: var(--text-secondary); }
+.prose li + li, .prose li > ul, .prose li > ol { margin-top: 0.35rem; }
+.prose :not(pre) > code { background: var(--bg-elevated); border: 1px solid var(--border); padding: 0.05rem 0.3rem;
+  color: var(--text-bright); overflow-wrap: anywhere; }
+.prose pre.code { margin: 0; padding: 0.85rem 1rem; background: var(--bg-elevated); border: 1px solid var(--border);
+  overflow: auto; color: var(--text); line-height: 1.55; }
+.prose blockquote { margin: 0; padding-left: 1rem; border-left: 1px solid var(--border-accent); color: var(--text-secondary); }
+.prose hr { border: 0; border-top: 1px solid var(--border); margin: 2.5rem 0; }
+.prose hr + h2 { margin-top: 0; padding-top: 0; border-top: 0; }
+.table-wrap { overflow-x: auto; }
+.prose table { border-collapse: collapse; width: 100%; font-size: 0.875rem; }
+.prose th { text-align: left; font-weight: 600; color: var(--text-secondary); padding: 0.5rem 1rem 0.5rem 0;
+  border-bottom: 1px solid var(--border-accent); vertical-align: bottom; }
+.prose td { padding: 0.55rem 1rem 0.55rem 0; border-bottom: 1px solid var(--border); vertical-align: top; }
+/* a link the page can't follow: a repository file factory web doesn't serve. Its target is in the title */
+.ref { text-decoration: underline dotted var(--text-muted); text-underline-offset: 0.2em; }
+/* a task id in the prose: its status mark, then the id, linking to the task's page */
+.task-ref { white-space: nowrap; text-decoration: none; }
+.task-ref i { display: inline-block; width: 7px; height: 7px; border: 1px solid currentColor; margin-right: 0.35em; vertical-align: 0.05em; }
+a.task-ref:hover { text-decoration: underline; }
+
+/* a plan's contracts, shown as the board shows tasks; the goal wraps, since here it is what you read */
+.task-cards { border-top: 1px solid var(--border-accent); }
+.task-cards .row { grid-template-columns: 8.5rem minmax(0, 1fr) auto; row-gap: 0.35rem; scroll-margin-top: 4.5rem; }
+.task-cards .row .what { grid-column: 2 / -1; grid-row: 2; }
+.task-cards .row .end { grid-column: 3; grid-row: 1; }
+.task-cards .goal { white-space: normal; color: var(--text); }
+.task-cards .why a { color: var(--text-secondary); }
+.prose .task-cards > li { padding-left: 0; margin-top: 0; max-width: none; }
+.prose .task-cards > li::before { content: none; }
+.prose .fold pre.code { margin-top: 0.5rem; max-height: 28rem; }
+
+@media (max-width: 60rem) {
+  .doc { grid-template-columns: minmax(0, 1fr); gap: 2rem; }
+  .toc { position: static; max-height: none; }
+  .plan-list > li { grid-template-columns: minmax(0, 1fr) auto; row-gap: 0.6rem; }
+  .plan-about { grid-column: 1 / -1; grid-row: 2; }
+}
+@media (max-width: 45rem) {
+  .task-cards .row { grid-template-columns: minmax(0, 1fr); }
+  .task-cards .row .status, .task-cards .row .id, .task-cards .row .what, .task-cards .row .end { grid-column: 1; grid-row: auto; }
+  .task-cards .row .end { justify-content: flex-start; }
+}
 
 /* ---------------------------------------------------------------- foot */
 
@@ -319,6 +421,10 @@ form.inline { display: inline; }
   .fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .plan > summary { grid-template-columns: minmax(0, 1fr) auto; row-gap: 0.6rem; }
   .plan-counts { grid-column: 1 / -1; grid-row: 2; }
+}
+@media (max-width: 45rem) {
+  .messages li { grid-template-columns: minmax(0, 1fr) auto; row-gap: 0.2rem; }
+  .messages .text { grid-column: 1 / -1; grid-row: 2; }
 }
 @media (max-width: 45rem) {
   :root { --gutter: 1.25rem; }

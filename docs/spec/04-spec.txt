@@ -1,0 +1,472 @@
+SOFTWARE FACTORY SPECIFICATION
+Chapter 04 — Isolation and authority
+
+Edition: 8bd7012
+Status: normative for the factory at that revision.
+
+Scope
+=====
+
+There are two different access mechanisms. Direct file tools enforce a
+worktree/dependency-source path guard in the factory process. The `run` tool
+instead executes a shell command through the selected sandbox. A permission
+on one mechanism does not imply the same permission on the other. Provider
+API calls and GitHub operations are a third case: the host factory performs
+them outside the command sandbox.
+
+The main checkout supplies the trusted configuration and prompt overrides.
+The task worktree is the candidate checkout. Editing a copy of
+`.factory/config.yaml` in that candidate therefore does not rewrite the
+configuration, gates, mounts, or credentials of the run already in progress.
+[Source: `factory/config.py` module contract; `factory/pipeline.py::Options`;
+`factory/agents.py::LangChainRoles`; `factory/cli.py::cmd_run_one`.]
+
+1. Authority by actor
+=====================
+
+The table describes the default, sandboxed configuration. “File RO” means the
+direct read tools; “shell RO/RW” describes a command's bubblewrap mount. A
+role with no `run` tool cannot use the shell route at all. Configured extra
+binds and the explicit unsafe overrides in section 5 can widen shell access.
+
+    Actor       Main checkout
+    -----       -------------
+    plan        No direct path through file tools. The host supplies the
+                selected prompt, contract, and project rules as model input.
+
+    build       Its file tools are confined as for plan. Its shell sees the
+                main checkout through the host-root read-only mount.
+
+    review      No direct main-checkout path and no shell. The host supplies
+                the prompt and a fixed base..HEAD view of the task worktree.
+
+    verify      File tools are confined as for review; its shell has the same
+                read-only view of the main checkout as build.
+
+    gates       No direct file tools or model. Commands have the same default
+                shell view of the main checkout as build and verify.
+
+    factory host
+                Reads trusted config/prompts and manages repository/worktree
+                metadata with the operator's OS authority. It does not commit
+                the task change to the main checkout's working tree.
+
+    operator / human
+                Outside the agent sandbox. Owns the checkout, configuration,
+                credentials, CLI overrides, and the decision to merge.
+
+    Actor       Task worktree and git metadata
+    -----       ------------------------------
+    plan        Read-only file tools; no shell, write tool, commit, or push.
+
+    build       Read tools plus write/edit anywhere in the worktree except
+                .git; shell worktree mount is RW. The host, not the agent,
+                commits each build step. Agent push/commit/reset and similar
+                commands are denied.
+
+    review      Read-only file tools plus fixed git_diff; no shell or writes.
+
+    verify      Read-only file tools plus fixed git_diff, but shell commands
+                run with the worktree mounted RW. Thus tests and other commands
+                can create or modify files even though verify has no write_file
+                or edit_file tool. The host does not commit a verify step.
+
+    gates       No direct file tools; gate commands have an RW worktree mount.
+                Gate success does not itself commit or push.
+
+    factory host
+                Creates the worktree, commits build output, records SHAs,
+                pushes only after successful routing, and cleans up the
+                worktree on failure.
+
+    operator / human
+                Full authority outside the agent restrictions, including
+                reviewing the diff and merging the resulting PR.
+
+    Actor       Dependency sources
+    -----       -------------------
+    plan        File RO over the configured dependency-source directories as
+                well as the worktree. No shell access to those directories.
+
+    build       The same file RO scope. Shell paths are RO by default except
+                paths reopened by rw_binds; notably the default ~/.cargo bind
+                is RW and can overlap Cargo registry/checkouts sources.
+
+    review      File RO over configured sources; no shell.
+
+    verify      The same file RO scope as review, plus the default shell mount
+                rules described for build.
+
+    gates       Shell mount rules only: host paths are RO unless explicitly
+                rebound RW. There is no dependency-source file-tool grant.
+
+    factory host
+                Resolves the configured source paths for PathGuard and performs
+                host-side reads needed by its own operations.
+
+    operator / human
+                Full external authority. Chooses dependency_sources and any
+                shell binds that independently expose those paths.
+
+    Actor       Shared cache
+    -----       ------------
+    plan        No default file-tool or shell access to the cache.
+
+    build       The whole configured cache directory is shell RW. Default
+                CARGO_TARGET_DIR and UV_CACHE_DIR point into it.
+
+    review      No default file-tool or shell access.
+
+    verify      The same shell RW cache access as build.
+
+    gates       The same shell RW cache access as build and verify.
+
+    factory host
+                Creates the cache and configured subdirectories and passes the
+                cache path to the sandbox. The cache is shared, not reset per
+                attempt or private to a task.
+
+    operator / human
+                Owns the cache and can change its location, environment, and
+                configured subdirectories.
+
+    Actor       Provider requests and GitHub
+    -----       ---------------------------
+    plan        One configured model client for its agent loop; no direct
+                endpoint or credential tool. No GitHub operation.
+
+    build       Configured model requests, with prompts and tool results sent
+                by the host client. No GitHub operation; gh and push are denied.
+
+    review      Configured model requests, including candidate/diff content
+                supplied to the model. No GitHub operation.
+
+    verify      Configured model requests for the PR report. No GitHub
+                operation; the later host pr step is separate.
+
+    gates       Neither provider requests nor GitHub operations.
+
+    factory host
+                Preflights recognized providers' environment keys, constructs
+                model clients, and performs provider I/O outside Bwrap. After
+                successful routing it alone pushes and invokes gh pr create/edit
+                (and the rework/answer operations where applicable).
+
+    operator / human
+                Supplies provider and GitHub credentials and model choices.
+                Merging the PR is the human approval; the agent pipeline does
+                not merge it.
+
+[Source: `factory/tools.py::read_tools`, `write_tools`, `run_tool`,
+`diff_tool`; `factory/agents.py::LangChainRoles._kit`, `build_model`,
+`missing_keys`; `factory/sandbox.py::Bwrap.argv`, `Unsandboxed`;
+`factory/pipeline.py::create_worktree`, `Pipeline._commit`, `Pipeline.pr`;
+tests: `tests/test_flows.py::test_each_kind_gets_its_tools`,
+`tests/test_tools.py::test_run_refuses_privileged_commands`,
+`tests/test_sandbox.py::test_host_filesystem_is_read_only`.]
+
+Two qualifications are essential. First, “review and verify are read-only”
+refers to their direct write tools, not to verify's shell: its RW worktree and
+cache mounts are intentional. Second, “dependency sources are read-only” is a
+PathGuard guarantee. It is not a promise that every source is read-only in
+the shell, because an independent RW bind such as the default `~/.cargo` can
+contain a source directory.
+[Source: `factory/config.py::Config.dependency_dirs`, `SandboxConfig`;
+`factory/tools.py::PathGuard.readable`, `PathGuard.check_write`;
+`factory/sandbox.py::Bwrap.argv`;
+tests: `tests/test_tools.py::test_reads_reach_dependency_sources_only`,
+`tests/test_sandbox.py::test_host_filesystem_is_read_only`.]
+
+2. Direct file-tool scope
+=========================
+
+2.1 PathGuard
+-------------
+
+Every file-tool path is expanded, resolved (including symlinks), and then
+checked. A relative `..` or an absolute path does not escape the check merely
+because it names an existing file. Reads are allowed only inside the worktree
+or one of the configured dependency sources. Writes are allowed only inside
+the worktree, and any path whose first worktree-relative component is `.git`
+is refused. `write_file` creates parent directories; `edit_file` replaces one
+exact occurrence. Both write tools have the same guard.
+[Source: `factory/tools.py::PathGuard._abs`, `PathGuard.readable`,
+`PathGuard.check_write`, `read_tools`, `write_tools`;
+tests: `tests/test_tools.py::test_reads_reach_dependency_sources_only`,
+`tests/test_tools.py::test_writes_go_anywhere_in_the_worktree_but_git`,
+`tests/test_tools.py::test_reads_cannot_escape_worktree`.]
+
+The default dependency sources are the user's Cargo registry source and git
+checkouts, plus the Rust toolchain directories under `~/.rustup/toolchains`.
+Configured `dependency_sources` replaces that list and expands `~` against
+the invoking user's home. These paths grant direct reads to every agent kind;
+they do not grant direct writes outside the worktree and do not, by
+themselves, add or change a bubblewrap bind.
+[Source: `factory/config.py::Config.dependency_dirs`;
+`factory/agents.py::LangChainRoles._guard`;
+tests: `tests/test_tools.py::test_reads_reach_dependency_sources_only`,
+`tests/test_config.py::test_full_config_parses`.]
+
+For example, `tests/test_tools.py::test_writes_go_anywhere_in_the_worktree_but_git`
+writes `src/b.rs` and `Cargo.toml` successfully, then attempts:
+
+    write_file(path=".git/config", content="x")
+
+The tool result is:
+
+    refused: write to .git/config: git internals are off limits
+
+The same test refuses `../escape.txt`, checks that `wt.parent/escape.txt` was
+not created, and checks that `log.written` contains only `src/b.rs` and
+`Cargo.toml`: neither refused write is recorded as an allowed write.
+[Source: `factory/tools.py::PathGuard.check_write`, `write_tools`;
+test: `tests/test_tools.py::test_writes_go_anywhere_in_the_worktree_but_git`.]
+
+Review and verify also receive `git_diff`. That tool is not a general shell
+or arbitrary git interface: the host runs a fixed `git diff base_sha..HEAD`
+with only the tool's path and stat options. It therefore exposes the
+candidate diff without granting a reviewer a shell, commit, or GitHub right.
+[Source: `factory/tools.py::diff_tool`;
+`factory/agents.py::LangChainRoles._kit`;
+test: `tests/test_flows.py::test_each_kind_gets_its_tools`.]
+
+2.2 The shell tool's command guard
+----------------------------------
+
+Before starting a process, `run` refuses command text matching the built-in
+patterns for git push/commit/reset/checkout/switch/rebase/merge/tag/worktree/
+remote, sudo, terraform apply/destroy, gh, or a `factory` command. Project
+`denied_commands` adds regular expressions. Refusal is returned as tool
+output; an allowed command is executed by `bash -c`, has a timeout, and
+returns only its last 200 output lines. These are command guardrails in
+addition to, not a replacement for, filesystem and network isolation.
+[Source: `factory/tools.py::DENIED_COMMANDS`, `run_tool`;
+`factory/sandbox.py::Unsandboxed.run`, `Bwrap.run`;
+tests: `tests/test_tools.py::test_run_refuses_privileged_commands`,
+`tests/test_config.py::test_bad_config_is_rejected`.]
+
+The path guard on `write_file` does not constrain an allowed shell command's
+own file operations. Conversely, an RW shell bind does not make an outside
+path writable through `write_file`, and a readable shell path does not make
+it readable through `read_file` unless PathGuard independently allows it.
+Build, verify, and gate commands must therefore be described by both scopes,
+not by the role's file-tool list alone.
+[Source: `factory/tools.py::PathGuard`, `run_tool`;
+`factory/sandbox.py::Bwrap.argv`;
+tests: `tests/test_sandbox.py::test_sandbox_settings_come_from_config`,
+`tests/test_flows.py::test_each_kind_gets_its_tools`.]
+
+3. Default bubblewrap isolation
+===============================
+
+3.1 Filesystem and process namespace
+------------------------------------
+
+`Bwrap` requires the `bwrap` executable and starts with
+`--die-with-parent --unshare-all`. Unless networking was explicitly enabled,
+it does not add `--share-net`, so the command has no host network namespace.
+It mounts `/dev`, `/proc`, fresh tmpfs filesystems at the user's home, `/tmp`,
+and `/run`, and sets `HOME` to that fresh home. The initial `/` mount is
+read-only; selected paths are then rebound as follows.
+
+    path or mount                       default access
+    host /                              RO starting mount
+    task worktree                       RW
+    shared git common dir               RO
+    this worktree's git admin dir       RW
+    ~/.rustup                           RO, if it exists
+    ~/.local/bin                        RO, if it exists
+    ~/.local/share/uv                   RO, if it exists
+    ~/.cargo                            RW, if it exists
+    configured cache directory          RW
+    ~/.cargo/credentials*               hidden by existing default hide paths
+
+The common/admin split lets ordinary local git inspection work in a linked
+worktree without making the whole common repository metadata writable.
+Missing normal binds are skipped rather than making every machine have the
+same directory layout.
+[Source: `factory/sandbox.py::Bwrap.argv`;
+tests: `tests/test_sandbox.py::test_worktree_is_writable`,
+`tests/test_sandbox.py::test_host_filesystem_is_read_only`,
+`tests/test_sandbox.py::test_home_and_secrets_are_hidden`,
+`tests/test_sandbox.py::test_no_network_by_default`.]
+
+The host-root RO mount means the main checkout and arbitrary host files are
+not generally hidden from build/verify/gate shell commands; their default
+protection is read-only mounting, except where fresh home or a hide path
+masks them. In contrast, plan and review have no shell, and direct file tools
+still cannot read arbitrary host files. The fresh home masks the default
+factory data location, while the cache and explicitly configured binds are
+deliberate exceptions.
+[Source: `factory/sandbox.py` module contract, `Bwrap.argv`;
+test: `tests/test_sandbox.py::test_host_filesystem_is_read_only`.]
+
+The cache is `$FACTORY_HOME/cache` (or the configured factory home's `cache`).
+`Bwrap.argv` creates it and each `cache_dirs` entry before the command.
+Default entries are `target/` and `uv/`; default environment entries point
+Cargo and uv into them. The entire cache directory is bound RW, so these are
+naming and environment conventions, not separate per-tool sandboxes. Parallel
+tasks and successive attempts can observe writes left by earlier commands.
+[Source: `factory/sandbox.py::Bwrap.argv`;
+`factory/config.py::SandboxConfig`, `Config.home_dir`;
+test: `tests/test_sandbox.py::test_sandbox_settings_come_from_config`.]
+
+3.2 Environment and offline behavior
+------------------------------------
+
+Bwrap uses `--clearenv`; provider keys, GitHub tokens, and other host
+variables are not inherited by the shell. It then sets only HOME, the
+configured/default PATH, LANG, TERM, explicit `sandbox.env`, and—when network
+is disabled—`sandbox.offline_env`. The default offline settings are
+`CARGO_NET_OFFLINE=true` and `UV_OFFLINE=1`. Clearing the host environment is
+the secret boundary here, rather than relying only on command denial.
+[Source: `factory/sandbox.py::Bwrap.argv`;
+`factory/config.py::SandboxConfig`;
+tests: `tests/test_sandbox.py::test_home_and_secrets_are_hidden`,
+`tests/test_sandbox.py::test_no_network_by_default`.]
+
+This environment guarantee applies to commands, not to the host provider
+client. A model request is issued by the host and can use the provider key
+that was preflighted there. Shell network isolation therefore does not block
+provider API traffic, and readable worktree/dependency content included in a
+prompt or tool result can be sent to the configured provider. Recognized
+provider prefixes and their required environment variables are
+`openrouter`/`OPENROUTER_API_KEY`, `anthropic`/`ANTHROPIC_API_KEY`, and
+`openai`/`OPENAI_API_KEY`.
+[Source: `factory/agents.py::PROVIDER_KEYS`, `build_model`, `missing_keys`,
+`LangChainRoles.step`; `factory/cli.py::cmd_run_one`;
+tests: `tests/test_templates.py::test_missing_provider_key_is_reported_before_work`,
+`tests/test_pipeline.py::test_run_refuses_without_provider_key`.]
+
+4. GitHub authority and credential scope
+========================================
+
+No agent kind receives a GitHub tool. The shell command guard denies `gh` and
+git network/mutation commands, and Bwrap does not inherit GitHub environment
+variables. Only the host pipeline's PR and existing-PR maintenance paths push
+or invoke `gh`; those paths run after the applicable reviews and gates, not
+inside a builder's tool call.
+[Source: `factory/tools.py::DENIED_COMMANDS`; `factory/pipeline.py::Pipeline.pr`;
+tests: `tests/test_tools.py::test_run_refuses_privileged_commands`,
+`tests/test_github.py::test_agents_never_see_the_token`.]
+
+For host git operations, `git_options` chooses `GH_TOKEN` before
+`GITHUB_TOKEN`. With a token, it resets other credential helpers, attaches an
+ephemeral helper only for `https://github.com`, and rewrites both
+`git@github.com:` and `ssh://git@github.com/` URLs to HTTPS. The host git child
+inherits the token variable and the helper reads it when credentials are
+requested; the token is not placed in the git arguments or persisted to git
+config. With no token, `git_options` returns no options, so neither the helper
+nor the URL rewrite is installed; `gh` may still use its own existing
+authentication. The no-token return is source-only.
+[Source: `factory/github.py::token_var`, `_HELPER`, `git_options`;
+tests: `tests/test_github.py::test_git_gets_the_token_from_the_environment_for_github_only`,
+`tests/test_github.py::test_a_token_leaves_other_remotes_alone`.]
+
+These credentials belong to the host authority, not to the agent. The
+parametrized `test_agents_never_see_the_token` runs both Bwrap and Unsandboxed
+with `GH_TOKEN` and `GITHUB_TOKEN` set, then asserts that neither token value
+appears in the `env` output. In particular, Unsandboxed's name-based scrub
+removes both variables even without Bwrap's stronger all-environment reset.
+Neither fact grants an agent permission to call GitHub: the command/tool
+boundary remains separate.
+[Source: `factory/github.py::git_options`;
+`factory/sandbox.py::Bwrap.argv`, `Unsandboxed.run`;
+tests: `tests/test_github.py::test_agents_never_see_the_token`,
+`tests/test_sandbox.py::test_no_network_by_default`.]
+
+5. Overrides and their limits
+=============================
+
+5.1 Main-checkout configuration
+-------------------------------
+
+`SandboxConfig` supports `ro_binds`, `rw_binds`, `hide`, `path`, `env`,
+`offline_env`, and `cache_dirs`. Paths expand `~`; sandbox paths and
+environment values also support `{cache}` for the factory cache. `path`
+replaces the configurable PATH prefix before the standard system entries;
+`env` and `offline_env`, when present, replace their respective default
+mappings rather than being merged key by key. Unspecified sandbox
+keys keep their defaults. Top-level `dependency_sources` and
+`denied_commands` control PathGuard sources and extra command regexes
+respectively; neither is a bubblewrap mount setting.
+[Source: `factory/config.py::SandboxConfig`, `Config.parse`,
+`Config.dependency_dirs`; `factory/sandbox.py::Bwrap`;
+tests: `tests/test_config.py::test_full_config_parses`,
+`tests/test_sandbox.py::test_sandbox_settings_come_from_config`.]
+
+The authority consequences are deliberate:
+
+* An `rw_binds` entry gives build, verify, and gate shell commands write access
+  outside the worktree, but does not widen direct write tools.
+* A `ro_binds` or `rw_binds` entry can expose data to a shell without making
+  it visible to plan/review file tools. A `dependency_sources` entry has the
+  converse scope: direct file reads, not an automatic shell bind.
+* `hide` masks an existing path with read-only `/dev/null`, but does not undo
+  access granted through some other path or an unsandboxed process.
+* Explicit `sandbox.env` values are applied after environment isolation and
+  can therefore reintroduce a secret by operator choice. Configuration is
+  trusted input, not a safe thing for an agent to change mid-run.
+* The shared cache and RW binds are not clean-room storage. Do not infer
+  attempt hermeticity or protection against a malicious configured gate.
+
+[Source: `factory/config.py::SandboxConfig`;
+`factory/sandbox.py::Bwrap.argv`;
+tests: `tests/test_config.py::test_full_config_parses`,
+`tests/test_sandbox.py::test_sandbox_settings_come_from_config`.]
+
+5.2 Network override
+--------------------
+
+`factory run --network` constructs `Bwrap(network=True)`. This adds
+`--share-net` and omits the default offline environment, so both the namespace
+restriction and the Cargo/uv offline defaults are relaxed. At plan level,
+`--network-for id,id` adds `--network` only to the named task children; other
+tasks keep the default isolation. The override does not change PathGuard,
+role tools, the denied-command list, mount writability, or GitHub authority.
+Provider calls already occur on the host and are not what this flag enables.
+[Source: `factory/sandbox.py::Bwrap.argv`;
+`factory/cli.py::cmd_run_one`, `_child_args`; `factory/scheduler.py::run`;
+tests: `tests/test_sandbox.py::test_network_when_asked`,
+`tests/test_scheduler.py::test_network_and_flags_pass_through_to_children`.]
+
+5.3 No-sandbox override and missing bubblewrap
+---------------------------------------------
+
+`factory run --no-sandbox` explicitly selects `Unsandboxed`. Allowed commands
+then run directly with the host user's filesystem and network authority, in
+the task worktree as current directory. The direct file-tool guards and
+`run_tool` command deny list still apply, and output timeout/tail handling
+remains. However, there is no RO host mount, fresh home, hide mount, network
+namespace, or `--clearenv`: this mode is intentionally unsafe and must not be
+described as equivalent isolation.
+[Source: `factory/sandbox.py::Unsandboxed`, `make`;
+`factory/tools.py::run_tool`; `factory/cli.py::cmd_run_one`.]
+
+`Unsandboxed` does scrub inherited variables whose names match
+`KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH`. That name-based scrub is
+narrower than Bwrap's clearing of the entire environment and does not remove
+credentials stored in files.
+The GitHub test cited above demonstrates the scrub, not filesystem or network
+isolation. If bubblewrap is unavailable while sandboxing was requested,
+`make` raises an error instead of silently choosing this weaker mode; the
+operator must install bubblewrap or explicitly request `--no-sandbox`.
+[Source: `factory/sandbox.py::SECRET_ENV`, `Unsandboxed.run`, `make`;
+tests: `tests/test_github.py::test_agents_never_see_the_token`,
+`tests/test_bench.py::test_bench_run_refuses_before_any_work`.]
+
+6. Resulting boundary
+=====================
+
+The default design gives agents enough authority to inspect approved sources,
+build a candidate in a separate worktree, and use shared tool caches, while
+reserving commits, pushes, PR operations, credential use, and configuration
+changes to the host/operator side. It is not a claim that all readable data
+stays on the machine—configured providers receive model input—and it is not a
+claim that shell commands have the same narrow path scope as file tools.
+Those boundaries follow from the separate PathGuard, Bwrap/Unsandboxed, host
+provider, and host GitHub mechanisms specified above.
+[Source: `factory/tools.py::PathGuard`; `factory/sandbox.py::Bwrap`;
+`factory/agents.py::LangChainRoles.step`; `factory/github.py::git_options`;
+tests: `tests/test_tools.py::test_reads_reach_dependency_sources_only`,
+`tests/test_github.py::test_agents_never_see_the_token`.]

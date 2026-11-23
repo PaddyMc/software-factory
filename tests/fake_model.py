@@ -21,6 +21,7 @@ TEST = ('import unittest\n'
 
 
 def scripts(review_verdicts: list[str], greeting: str = "hello") -> dict[str, list]:
+    """Build role scripts; an empty review verdict means a report without a VERDICT line."""
     return {
         "PLANNER": [call("list_dir", path="."), AIMessage("**Files**: src/greet.txt, crates/e2e/tests/greet.rs\n**Steps**: write them")],
         "TESTER": [call("write_file", path="tests/test_greet.py", content=TEST), AIMessage(
@@ -71,7 +72,11 @@ class ScriptedModel(BaseChatModel):
         msg = script[min(step, len(script) - 1)]
         if msg == "VERDICT":
             v = self.plays["_verdicts"].pop(0) if self.plays["_verdicts"] else "APPROVE"
-            msg = AIMessage(f"## Findings\n1. [minor] ok\n\nVERDICT: {v}")
+            if v:
+                msg = AIMessage(f"## Findings\n1. [minor] ok\n\nVERDICT: {v}")
+            else:
+                msg = AIMessage("## Findings\n1. [major] src/greet.txt:1 — the greeting needs another look\n\n"
+                                "Final verdict: APPROVE")
         if msg == "CHOICE":
             choice = self.plays["_choices"].pop(0) if self.plays.get("_choices") else ""
             msg = AIMessage(f"## Choice\n\nCandidate {choice} fits the contract best.\n\nCHOICE: {choice}" if choice

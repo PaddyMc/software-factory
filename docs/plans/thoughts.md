@@ -300,6 +300,7 @@ The project configures no e2e directory. `test_a_recorded_runs_thoughts_show_in_
 
 - **Depends on:** [webui](webui.md). `thoughts-t03` waits for `webui-t05`, the transcript page it changes. `webui-t05` runs again after [pr-descriptions](pr-descriptions.md)' `pr-descriptions-t01` (see the prerequisite above).
 - **Required by:** [flow-tuning](flow-tuning.md). `flow-tuning-t01` stacks on `thoughts-t01`: its re-ask continues a review's conversation through the same `_observe`, so the re-asked turns keep their thoughts.
+- **Required by** [thought-timeline](thought-timeline.md). Its CLI builds on `thoughts-t02` and its web page on `thoughts-t03` to follow one task across roles and retries.
 - **Overlaps:** [measure](measure.md), [pr-descriptions](pr-descriptions.md) and [strict-flow](strict-flow.md) also change `factory/agents.py`. This plan runs alongside the first two by decision; see Risk 5. strict-flow builds on whatever is on main when it starts, and its loop records each step through the same `_observe`, so its runs keep their thoughts.
 - **Related:** [measure](measure.md)'s `factory stats` could later report thinking tokens per role from the transcripts. This plan doesn't add a column for them to the `runs` table.
 

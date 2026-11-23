@@ -4,6 +4,7 @@ import copy
 import datetime as dt
 import hashlib
 import json
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -686,6 +687,60 @@ def _write_run(home, run_id, cases, variants, cells, *, repeat=1, sandbox=True, 
     return run_dir
 
 
+SPEC_09 = Path(__file__).resolve().parents[1] / "docs/spec/09-spec.txt"
+
+
+def _spec_09() -> str:
+    """The shipped benchmarks chapter, docs/spec/09-spec.txt (factory-spec-t05)."""
+    assert SPEC_09.is_file(), f"missing chapter: {SPEC_09}"
+    chapter = SPEC_09.read_text(encoding="utf-8")
+    assert chapter.strip(), f"empty chapter: {SPEC_09}"
+    return chapter
+
+
+def chapter_09_covers_cells_outcomes_and_budget() -> None:
+    """factory-spec-t05's acceptance: docs/spec/09-spec.txt covers variant/case/repeat cells,
+    isolated state, budget and interruption semantics, the run/report/compare/list/cases commands
+    and recorded results, using the implementation's exact outcome names and denominators."""
+    chapter = _spec_09()
+    for outcome in ("solved", "false_pass", "failed", "error", "stopped", "skipped", "not run"):
+        assert outcome in chapter, f"the chapter names the cell outcome {outcome!r} exactly"
+    assert "eligible" in chapter, \
+        "the chapter names the solved-rate denominator: the eligible cells (report.py: ELIGIBLE)"
+    assert re.search(r"\d+/\d+", chapter), \
+        "the chapter's worked cell shows the report's solved/eligible counts (e.g. 3/4 75%)"
+    assert "gate" in chapter, \
+        "the chapter's worked cell distinguishes a gate failure from a false pass and a solve"
+    for axis in ("variant", "case", "repeat", "cell"):
+        assert axis in chapter, f"the chapter covers the {axis} axis of a bench cell"
+    assert any(flag in chapter for flag in ("--max-cost", "max_cost")), \
+        "the chapter covers the run budget"
+    assert "interrupt" in chapter.lower(), "the chapter covers interruption semantics"
+    assert "isolat" in chapter.lower(), "the chapter covers the cells' isolated state"
+    assert "results.json" in chapter, "the chapter covers what a run records in results.json"
+    commands = {"run": ("bench run", "`run`"), "report": ("bench report", "`report`"),
+                "compare": ("bench compare", "`compare`"), "list": ("bench list", "`list`"),
+                "cases": ("bench cases", "`cases`", "cases command")}
+    for name, forms in commands.items():
+        assert any(form in chapter for form in forms), \
+            f"the chapter explains the `factory bench {name}` command"
+    for source in ("factory/bench/run.py", "factory/bench/report.py"):
+        assert source in chapter, f"the chapter cites {source}"
+    assert "tests/test_bench.py::test_report_shows_solved_rates_per_variant_and_case" in chapter, \
+        "the chapter cites this test by its node id"
+
+
+def chapter_09_covers_comparisons() -> None:
+    """factory-spec-t05's acceptance: docs/spec/09-spec.txt covers what a changed case, prompt or
+    model means when two runs are compared, and cites the named test for those flags."""
+    chapter = _spec_09()
+    for anchor, subject in {"fixture_sha": "a changed case", "prompt_sha": "a changed prompt",
+                            "model": "a changed model"}.items():
+        assert anchor in chapter, f"the chapter covers {subject} in a comparison: {anchor!r}"
+    assert "tests/test_bench.py::test_compare_flags_changed_cases_models_and_prompts" in chapter, \
+        "the chapter cites this test by its node id"
+
+
 def test_report_shows_solved_rates_per_variant_and_case(home, capsys):
     older = "20261115-060000"
     newest = "20261115-063000"
@@ -726,6 +781,10 @@ def test_report_shows_solved_rates_per_variant_and_case(home, capsys):
     _write_run(home, newest, cases, variants, cells, repeat=2, sandbox=False)
     assert main(["bench", "report", newest]) == 0
     assert "unsandboxed: agents could read the hidden tests" in capsys.readouterr().out
+
+    # factory-spec-t05: the chapter names this test as its evidence for the report's outcome
+    # names and denominators.
+    chapter_09_covers_cells_outcomes_and_budget()
 
 
 def test_report_cells_lists_each_cell_and_its_directory(home, capsys):
@@ -836,6 +895,9 @@ def test_compare_flags_changed_cases_models_and_prompts(home, capsys):
     assert "review: prompt_sha qqqqqqqqqqqq → zzzzzzzzzzzz" in out
     assert f"verify: only in {a}" in out
     assert any(line.startswith("default ") and "1/1 → 1/1" in line for line in out.splitlines())
+
+    # factory-spec-t05: the chapter names this test as its evidence for what a comparison flags.
+    chapter_09_covers_comparisons()
 
 
 def test_results_record_loop_and_prove_and_compare_flags_a_change(bench_repo, home, capsys):
