@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from . import stats as S
 
-ELIGIBLE = ("solved", "false_pass", "failed")
+
+ELIGIBLE = S.ELIGIBLE
 
 
 class ReportError(RuntimeError):
@@ -105,28 +107,87 @@ def _number(value: float | None, format_spec: str = ".1f", prefix: str = "") -> 
     return f"{prefix}{value:{format_spec}}" if value is not None else "-"
 
 
+def _signed_points(value: float | None) -> str:
+    if value is None:
+        return "-"
+    formatted = f"{100 * value:+.0f}"
+    if formatted in ("-0", "+0"):
+        formatted = "+0"
+    return formatted.replace("-", "−")
+
+
+def _signed_money(value: float | None) -> str:
+    if value is None:
+        return "-"
+    formatted = f"{value:+.2f}"
+    sign = "−" if formatted.startswith("-") else "+"
+    if float(formatted) == 0:
+        sign = "+"
+    return f"{sign}${abs(float(formatted)):.2f}"
+
+
+def _comparison_line(a_variant: str, b_variant: str, comparison: dict) -> str:
+    solved = comparison["solved_diff"]
+    cost = comparison["cost_diff"]
+    solved_low, solved_high = solved["ci"]
+    cost_low, cost_high = cost["ci"]
+    return (
+        f"{b_variant} vs {a_variant}: solved {_signed_points(solved['mean'])} pts "
+        f"[{_signed_points(solved_low)}, {_signed_points(solved_high)}] {solved['verdict']} · "
+        f"cost {_signed_money(cost['mean'])}/cell "
+        f"[{_signed_money(cost_low)}, {_signed_money(cost_high)}] {cost['verdict']}"
+    )
+
+
+def _cells_for(results: dict, variant: str) -> list[dict]:
+    return [cell for cell in results.get("cells", []) if cell["variant"] == variant]
+
+
 def summary(results: dict) -> str:
     """Render the per-variant table followed by solved counts per case and variant."""
     results, _ = _expanded(results)
     cells = results.get("cells", [])
     variant_ids = list(results.get("variants", {}))
-    stats = {variant: _variant_stats([cell for cell in cells if cell["variant"] == variant])
-             for variant in variant_ids}
+    raw_stats = {variant: _variant_stats(_cells_for(results, variant)) for variant in variant_ids}
+    analyses = {variant: S.variant_stats(_cells_for(results, variant)) for variant in variant_ids}
+    pareto = S.pareto(analyses)
+    solved_columns = {}
+    pass_columns = {}
+    for variant in variant_ids:
+        raw, analysis = raw_stats[variant], analyses[variant]
+        if analysis["solved"]["rate"] is None:
+            solved_columns[variant] = "-"
+        else:
+            low, high = analysis["solved"]["ci"]
+            solved_columns[variant] = (
+                f"{raw['solved']}/{raw['eligible']} {100 * analysis['solved']['rate']:.0f}% "
+                f"[{100 * low:.0f}–{100 * high:.0f}]"
+            )
+        if analysis["pass_k"] is None:
+            pass_columns[variant] = "-"
+        else:
+            pass_columns[variant] = f"pass^{analysis['pass_k']['k']} {100 * analysis['pass_k']['rate']:.0f}%"
+
     variant_width = max([len("variant"), *(len(variant) for variant in variant_ids)])
+    solved_width = max([len("solved"), *(len(value) for value in solved_columns.values())])
+    pass_width = max([len("pass^k"), *(len(value) for value in pass_columns.values())])
     lines = [
-        f"{'variant':<{variant_width}}  {'cells':>5}  {'solved':<11}  {'false':>5}  {'failed':>6}  "
-        f"{'err/stop/skip/not run':>21}  {'attempts':>8}  {'cost/cell':>9}  {'total':>9}  {'min/cell':>8}"
+        f"{'variant':<{variant_width}}  {'cells':>5}  {'solved':<{solved_width}}  "
+        f"{'pass^k':<{pass_width}}  {'false':>5}  {'failed':>6}  "
+        f"{'err/stop/skip/not run':>21}  {'attempts':>8}  {'cost/cell':>9}  "
+        f"{'cost/solved':>11}  {'total':>9}  {'min/cell':>8}  *"
     ]
     for variant in variant_ids:
-        stat = stats[variant]
-        solved = (f"{stat['solved']}/{stat['eligible']} {100 * stat['solved'] / stat['eligible']:.0f}%"
-                  if stat["eligible"] else "-")
-        interruptions = f"{stat['error']}/{stat['stopped']}/{stat['skipped']}/{stat['not_run']}"
+        raw, analysis = raw_stats[variant], analyses[variant]
+        interruptions = f"{raw['error']}/{raw['stopped']}/{raw['skipped']}/{raw['not_run']}"
+        marker = "  *" if variant in pareto else ""
         lines.append(
-            f"{variant:<{variant_width}}  {stat['cells']:>5}  {solved:<11}  {stat['false']:>5}  "
-            f"{stat['failed']:>6}  {interruptions:>21}  {_number(stat['attempts']):>8}  "
-            f"{_number(stat['cost'], '.2f', '$'):>9}  {_number(stat['total'], '.2f', '$'):>9}  "
-            f"{_number(stat['minutes']):>8}"
+            f"{variant:<{variant_width}}  {raw['cells']:>5}  {solved_columns[variant]:<{solved_width}}  "
+            f"{pass_columns[variant]:<{pass_width}}  {raw['false']:>5}  {raw['failed']:>6}  "
+            f"{interruptions:>21}  {_number(raw['attempts']):>8}  "
+            f"{_number(analysis['cost_per_cell']['mean'], '.2f', '$'):>9}  "
+            f"{_number(analysis['cost_per_solved'], '.2f', '$'):>11}  "
+            f"{_number(raw['total'], '.2f', '$'):>9}  {_number(raw['minutes']):>8}{marker}"
         )
 
     case_ids = list(results.get("cases", {}))
@@ -144,6 +205,14 @@ def summary(results: dict) -> str:
     for case in case_ids:
         lines.append(f"{case:<{case_width}}" + "".join(
             f"  {counts[case, variant]:<{widths[variant]}}" for variant in variant_ids))
+
+    if len(variant_ids) > 1:
+        first = variant_ids[0]
+        comparisons = [
+            _comparison_line(first, variant, S.compare(_cells_for(results, first), _cells_for(results, variant)))
+            for variant in variant_ids[1:]
+        ]
+        lines += ["", *comparisons]
     return "\n".join(lines).rstrip()
 
 
@@ -241,11 +310,28 @@ def _solved_count(cells: list[dict]) -> str:
     return f"{stat['solved']}/{stat['eligible']}"
 
 
-def compare(a_id: str, a_results: dict, b_id: str, b_results: dict) -> str:
+def _variant_pairs(a_id: str, a_results: dict, b_id: str, b_results: dict,
+                   a_variant: str | None, b_variant: str | None) -> list[tuple[str, str]]:
+    a_variants, b_variants = a_results.get("variants", {}), b_results.get("variants", {})
+    if a_variant is None and b_variant is None:
+        return [(variant, variant) for variant in a_variants if variant in b_variants]
+    if a_variant is None:
+        a_variant = b_variant
+    if b_variant is None:
+        b_variant = a_variant
+    for run_id, variants, variant in ((a_id, a_variants, a_variant), (b_id, b_variants, b_variant)):
+        if variant not in variants:
+            raise ReportError(f"unknown bench variant {variant} in run {run_id}")
+    return [(a_variant, b_variant)]
+
+
+def compare(a_id: str, a_results: dict, b_id: str, b_results: dict, *,
+            a_variant: str | None = None, b_variant: str | None = None) -> str:
     a_cases, b_cases = a_results.get("cases", {}), b_results.get("cases", {})
     a_variants, b_variants = a_results.get("variants", {}), b_results.get("variants", {})
     shared_cases = [case for case in a_cases if case in b_cases]
-    shared_variants = [variant for variant in a_variants if variant in b_variants]
+    pairs = _variant_pairs(a_id, a_results, b_id, b_results, a_variant, b_variant)
+    explicit = a_variant is not None or b_variant is not None
     lines = [f"compare {a_id} → {b_id}"]
     for run_id, results in ((a_id, a_results), (b_id, b_results)):
         if not results.get("run", {}).get("sandbox", True):
@@ -268,24 +354,26 @@ def compare(a_id: str, a_results: dict, b_id: str, b_results: dict) -> str:
             case_line += f" · only in {run_id}: {', '.join(only)}"
     lines.append(case_line)
 
-    variant_line = f"variants: {len(shared_variants)} in both"
-    for run_id, own, other in ((a_id, a_variants, b_variants), (b_id, b_variants, a_variants)):
-        only = [variant for variant in own if variant not in other]
-        if only:
-            variant_line += f" · only in {run_id}: {', '.join(only)}"
+    variant_line = f"variants: {len(pairs)} in both"
+    if not explicit:
+        for run_id, own, other in ((a_id, a_variants, b_variants), (b_id, b_variants, a_variants)):
+            only = [variant for variant in own if variant not in other]
+            if only:
+                variant_line += f" · only in {run_id}: {', '.join(only)}"
     lines.append(variant_line)
-    for variant in shared_variants:
-        changes = _step_changes(a_id, a_variants[variant], b_id, b_variants[variant])
+    for own_variant, other_variant in pairs:
+        changes = _step_changes(a_id, a_variants[own_variant], b_id, b_variants[other_variant])
         if changes:
-            lines.append(f"{variant} · {' · '.join(changes)}")
+            label = own_variant if own_variant == other_variant else f"{own_variant} → {other_variant}"
+            lines.append(f"{label} · {' · '.join(changes)}")
             # Candidate changes also have a step-prefixed line for direct step comparisons.
             lines.extend(change for change in changes if "candidates " in change)
 
-    a_cells, b_cells = a_results.get("cells", []), b_results.get("cells", [])
     variant_rows = []
-    for variant in shared_variants:
-        own = [cell for cell in a_cells if cell["variant"] == variant]
-        other = [cell for cell in b_cells if cell["variant"] == variant]
+    comparison_lines = []
+    for own_variant, other_variant in pairs:
+        own = [cell for cell in a_results.get("cells", []) if cell["variant"] == own_variant]
+        other = [cell for cell in b_results.get("cells", []) if cell["variant"] == other_variant]
         a_stat = _variant_stats(own) if own else None
         b_stat = _variant_stats(other) if other else None
 
@@ -294,8 +382,9 @@ def compare(a_id: str, a_results: dict, b_id: str, b_results: dict) -> str:
             right = _number(b_stat[key], format_spec, prefix) if b_stat is not None else "-"
             return f"{left} → {right}"
 
+        label = own_variant if own_variant == other_variant else f"{own_variant} → {other_variant}"
         variant_rows.append([
-            variant,
+            label,
             f"{_solved_count(own)} → {_solved_count(other)}",
             f"{a_stat['false'] if a_stat is not None else '-'} → "
             f"{b_stat['false'] if b_stat is not None else '-'}",
@@ -303,22 +392,102 @@ def compare(a_id: str, a_results: dict, b_id: str, b_results: dict) -> str:
             paired("attempts"),
             paired("minutes"),
         ])
+        comparison_lines.append(_comparison_line(own_variant, other_variant, S.compare(own, other)))
 
+    pair_labels = [own if own == other else f"{own} → {other}" for own, other in pairs]
     case_rows = []
     for case in shared_cases:
         row = [case]
-        for variant in shared_variants:
-            own = [cell for cell in a_cells if cell["case"] == case and cell["variant"] == variant]
-            other = [cell for cell in b_cells if cell["case"] == case and cell["variant"] == variant]
+        for own_variant, other_variant in pairs:
+            own = [cell for cell in a_results.get("cells", [])
+                   if cell["case"] == case and cell["variant"] == own_variant]
+            other = [cell for cell in b_results.get("cells", [])
+                     if cell["case"] == case and cell["variant"] == other_variant]
             row.append(f"{_solved_count(own)} → {_solved_count(other)}")
         case_rows.append(row)
-    return "\n".join([
+    parts = [
         "\n".join(lines),
         "",
         _table(["variant", "solved", "false", "cost/cell", "attempts", "min/cell"], variant_rows),
         "",
-        _table(["case", *shared_variants], case_rows),
-    ]).rstrip()
+        _table(["case", *pair_labels], case_rows),
+    ]
+    if comparison_lines:
+        parts += ["", *comparison_lines]
+    return "\n".join(parts).rstrip()
+
+
+def _json_variant(results: dict, variant: str, analysis: dict, on_front: bool) -> dict:
+    cells = _cells_for(results, variant)
+    raw = _variant_stats(cells)
+    entry = dict(analysis)
+    entry.update({
+        "false_pass": sum(cell["outcome"] == "false_pass" for cell in cells),
+        "regressed": sum(cell["outcome"] == "regressed" for cell in cells),
+        "tampered": sum(cell["outcome"] == "tampered" for cell in cells),
+        "integrity": {
+            "gamed": sum(cell["outcome"] == "gamed" for cell in cells),
+            "cells": sum(cell["outcome"] in ("held", "gamed") for cell in cells),
+        },
+        "minutes_per_cell": raw["minutes"],
+        "pareto": on_front,
+        "fingerprint": results.get("variants", {}).get(variant, {}).get("fingerprint"),
+    })
+    return entry
+
+
+def _comparison_record(a_id: str, a_variant: str, a_results: dict,
+                       b_id: str, b_variant: str, b_results: dict) -> dict:
+    comparison = S.compare(_cells_for(a_results, a_variant), _cells_for(b_results, b_variant))
+    return {"a": f"{a_id}:{a_variant}", "b": f"{b_id}:{b_variant}", **comparison}
+
+
+def report_data(run_id: str, results: dict) -> dict:
+    """Return one run's statistics and comparisons as a JSON-ready mapping."""
+    variant_ids = list(results.get("variants", {}))
+    analyses = {variant: S.variant_stats(_cells_for(results, variant)) for variant in variant_ids}
+    front = S.pareto(analyses)
+    variants = {
+        variant: _json_variant(results, variant, analyses[variant], variant in front)
+        for variant in variant_ids
+    }
+    comparisons = []
+    if variant_ids:
+        first = variant_ids[0]
+        comparisons = [
+            _comparison_record(run_id, first, results, run_id, variant, results)
+            for variant in variant_ids[1:]
+        ]
+    return {"runs": [run_id], "variants": variants, "comparisons": comparisons}
+
+
+def compare_data(a_id: str, a_results: dict, b_id: str, b_results: dict, *,
+                 a_variant: str | None = None, b_variant: str | None = None) -> dict:
+    """Return selected cross-run comparisons and their variant statistics."""
+    pairs = _variant_pairs(a_id, a_results, b_id, b_results, a_variant, b_variant)
+    run_ids = [a_id] if a_id == b_id else [a_id, b_id]
+    analyses_by_run = {}
+    fronts = {}
+    for run_id, results in ((a_id, a_results), (b_id, b_results)):
+        if run_id in analyses_by_run:
+            continue
+        analyses = {variant: S.variant_stats(_cells_for(results, variant))
+                    for variant in results.get("variants", {})}
+        analyses_by_run[run_id] = analyses
+        fronts[run_id] = S.pareto(analyses)
+
+    variants = {}
+    for own_variant, other_variant in pairs:
+        for run_id, results, variant in ((a_id, a_results, own_variant), (b_id, b_results, other_variant)):
+            key = f"{run_id}:{variant}"
+            if key not in variants:
+                variants[key] = _json_variant(
+                    results, variant, analyses_by_run[run_id][variant], variant in fronts[run_id])
+    comparisons = [
+        _comparison_record(a_id, own_variant, a_results, b_id, other_variant, b_results)
+        for own_variant, other_variant in pairs
+    ]
+    return {"runs": run_ids, "variants": variants, "comparisons": comparisons}
 
 
 def list_row(run_id: str, results: dict) -> str:
