@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 from langchain_core.messages import AIMessage
+from langchain_core.messages import SystemMessage
 
 from factory import agents, prices
 from factory.cli import main
@@ -922,3 +923,171 @@ def test_a_cell_can_be_inspected_with_factory_show(bench_repo, home, monkeypatch
     capsys.readouterr()
     assert main(["transcript", "adder-t01"]) == 0
     assert transcripts[-1] in capsys.readouterr().out
+
+
+def _candidates_flow(repo):
+    """Give the invoking repository the plan's trial flow: `gates-first-x3`, whose build step
+    makes three candidates that the gates judge before the review sees the chosen one."""
+    with (repo / ".factory/config.yaml").open("a") as f:
+        f.write("  gates-first-x3: [plan, {kind: build, candidates: 3}, gates, review, verify]\n")
+
+
+def _x3_plays():
+    """GOOD plays plus one builder script per candidate — each writes the solution with a comment
+    naming its candidate, so the three candidates differ and every gate still passes — and a
+    selector that chooses candidate 2."""
+    def builder(number):
+        return [
+            call("write_file", path="calc/__init__.py", content=GOOD_CALC + f"# candidate {number}\n"),
+            call("write_file", path="tests/test_adder.py", content=VISIBLE_TEST),
+            call("run", command="python3 -m unittest -q"),
+            AIMessage(f"Implemented add as candidate {number}.\nRESULT: DONE"),
+        ]
+
+    return {
+        **copy.deepcopy(GOOD),
+        "SELECTOR": [call("list_dir", path="."), "CHOICE"],
+        "_builders": [builder(number) for number in (1, 2, 3)],
+        "_choices": [2],
+    }
+
+
+class CandidatesModel(ScriptedModel):
+    """A scripted model for a flow with candidates: every fresh builder conversation plays the
+    next candidate's script, so the candidates build three different changes. The plays dict is
+    shared across the model instances the roles build, so the rotation survives a step."""
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        system = next(m.content for m in messages if isinstance(m, SystemMessage))
+        if "You are the BUILDER" not in system:
+            return super()._generate(messages, stop, run_manager, **kwargs)
+        if not any(isinstance(m, AIMessage) for m in messages):
+            number = self.plays.get("_fresh_builds", 0)
+            self.plays["_fresh_builds"] = number + 1
+            self.plays["_current"] = self.plays["_builders"][number % len(self.plays["_builders"])]
+        usual, self.plays["BUILDER"] = self.plays.get("BUILDER"), self.plays["_current"]
+        try:
+            return super()._generate(messages, stop, run_manager, **kwargs)
+        finally:
+            self.plays["BUILDER"] = usual
+
+
+def _scripted_candidates(monkeypatch, plays_by_spec):
+    """Like `_scripted`, but with one shared plays dict per spec and `CandidatesModel`, whose
+    per-candidate builder scripts need state that outlives a single model instance."""
+    def build(spec):
+        if spec not in plays_by_spec:
+            raise AssertionError(f"unexpected model spec: {spec}")
+        return CandidatesModel(plays=plays_by_spec[spec])
+
+    monkeypatch.setattr(agents, "build_model", build)
+
+
+def test_results_record_candidates_and_compare_flags_a_change(bench_repo, home, capsys):
+    import factory.bench.run as bench_run
+    from factory import config as C
+
+    _candidates_flow(bench_repo)
+    cfg = C.load(bench_repo)
+    x3 = bench_run.variant_steps(bench_repo, cfg.flows["gates-first-x3"], cfg, "scripted:x3")
+    assert [(step["name"], step["candidates"]) for step in x3] == [
+        ("plan", 1), ("build", 3), ("review", 1), ("verify", 1)]
+    lean = bench_run.variant_steps(bench_repo, cfg.flows["lean"], cfg, "scripted:x3")
+    assert [(step["name"], step["candidates"]) for step in lean] == [("build", 1), ("review", 1)]
+
+    fewer = copy.deepcopy(x3)
+    next(step for step in fewer if step["name"] == "build")["candidates"] = 1
+    a, b = "20261122-121000", "20261122-121500"
+    _write_run(home, a, {"adder": "a" * 64}, {"gates-first-x3": x3}, [_cell("gates-first-x3", "adder")])
+    _write_run(home, b, {"adder": "a" * 64}, {"gates-first-x3": fewer}, [_cell("gates-first-x3", "adder")])
+    recorded = json.loads((home / "bench" / a / "results.json").read_text())
+    assert all(set(step) >= {"candidates"} for step in recorded["variants"]["gates-first-x3"]["steps"])
+
+    assert main(["bench", "compare", a, b]) == 0
+    out = capsys.readouterr().out
+    assert "build: candidates 3 → 1" in out
+    assert "gates-first-x3 · build: candidates 3 → 1" in out
+    changed = [line for line in out.splitlines()
+               if line.startswith(("plan: ", "build: ", "review: ", "verify: "))]
+    assert changed == ["build: candidates 3 → 1"]
+
+
+def test_cells_count_the_candidates_built_and_passed(bench_repo, home, monkeypatch, capsys):
+    _candidates_flow(bench_repo)
+    _scripted_candidates(monkeypatch, {"scripted:x3": _x3_plays()})
+    assert main(_args("--flow", "default", "--flow", "gates-first-x3", "--model", "scripted:x3")) == 0
+
+    results = load_results(home)
+    cells = {cell["variant"]: cell for cell in results["cells"]}
+    plain = cells["default@scripted:x3"]
+    assert plain["outcome"] == "solved"
+    assert plain.get("candidates_built", 0) == 0 and plain.get("candidates_passed", 0) == 0
+    x3 = cells["gates-first-x3@scripted:x3"]
+    assert x3["outcome"] == "solved"
+    assert x3["candidates_built"] == 3 and x3["candidates_passed"] == 3
+
+    capsys.readouterr()
+    assert main(["bench", "report", "--cells"]) == 0
+    out = capsys.readouterr().out
+    plain_line = next(l for l in out.splitlines() if "default@scripted:x3 · adder #1" in l)
+    assert "candidates" not in plain_line
+    line = next(l for l in out.splitlines() if "gates-first-x3@scripted:x3 · adder #1" in l)
+    assert "solved" in line and "3 candidates (3 passed)" in line
+
+
+def test_a_candidates_cell_is_scored_on_the_chosen_candidate(bench_repo, home, monkeypatch):
+    _candidates_flow(bench_repo)
+    _scripted_candidates(monkeypatch, {"scripted:x3": _x3_plays()})
+    assert main(_args("--flow", "gates-first-x3", "--model", "scripted:x3")) == 0
+
+    results = load_results(home)
+    variant = "gates-first-x3@scripted:x3"
+    steps = {step["name"]: step for step in results["variants"][variant]["steps"]}
+    assert steps["build"]["candidates"] == 3
+    assert all(step["candidates"] == 1 for name, step in steps.items() if name != "build")
+
+    cell = results["cells"][0]
+    assert cell["variant"] == variant and cell["outcome"] == "solved" and cell["attempts"] == 1
+    assert cell["candidates_built"] == 3 and cell["candidates_passed"] == 3
+
+    directory = bench_run_dir(home) / cell["dir"]
+    assert "hidden: PASS" in (directory / "hidden.log").read_text()
+    db = open_db(directory)
+    runs = db.runs("adder-t01")
+    assert [(run["role"], run["step"], run["candidate"]) for run in runs] == [
+        ("plan", "plan", None),
+        ("build", "build", 1), ("verify", "gates", 1),
+        ("build", "build", 2), ("verify", "gates", 2),
+        ("build", "build", 3), ("verify", "gates", 3),
+        ("select", "select", None),
+        ("review", "review", None),
+        ("verify", "verify", None),
+    ]
+    select = next(run for run in runs if run["role"] == "select")
+    assert "CHOICE: 2" in select["report"]
+    shas = {run["candidate"]: run["sha"] for run in runs if run["step"] == "gates"}
+    chosen = db.task("adder-t01")["candidate_sha"]
+    assert db.task("adder-t01")["attempts"] == 1
+    db.close()
+    assert len(set(shas.values())) == 3
+    assert chosen == shas[2]
+    calc = git(directory / "repo", "show", f"{chosen}:calc/__init__.py")
+    assert "# candidate 2" in calc and "# candidate 1" not in calc
+
+
+def test_compare_names_each_variant_whose_steps_changed(home, capsys):
+    before = _steps()
+    after = copy.deepcopy(before)
+    for steps in (before, after):
+        next(step for step in steps if step["name"] == "build")["model"] = (
+            "fake:old" if steps is before else "fake:new")
+    a, b = "20261122-130000", "20261122-130500"
+    variants = {"default": before, "lean": before}
+    changed = {"default": after, "lean": after}
+    _write_run(home, a, {"adder": "a" * 64}, variants, [])
+    _write_run(home, b, {"adder": "a" * 64}, changed, [])
+
+    assert main(["bench", "compare", a, b]) == 0
+    out = capsys.readouterr().out
+    assert "default · build: model fake:old → fake:new" in out
+    assert "lean · build: model fake:old → fake:new" in out
