@@ -564,13 +564,22 @@ class Pipeline:
                         out.text, out.verdict, self.sandbox, self.opts.config.denied_commands)
                     # A REPRO can write too; leave the candidate clean for the remaining steps and gates.
                     restore_candidate()
-                result.update(report=report, verdict=verdict, outcome=outcome)
+                if out.reasked:
+                    outcome = f"{outcome} (asked again)" if agents.has_verdict(out.text) else "CHANGES (no verdict)"
+                result.update(report=report, verdict=verdict, outcome=outcome,
+                              no_verdict=out.reasked and not agents.has_verdict(out.text))
                 return out, outcome, report, s["sha"]
 
             self.role("review", "reviewing", s["attempt"], run, step=step.name)
             report, verdict, outcome = result["report"], result["verdict"], result["outcome"]
             who = "Reviewer" if step.name == step.kind else f"Reviewer `{step.name}`"
-            fb = "" if verdict == "APPROVE" else f"{who} requested changes:\n\n{report}"
+            if verdict == "APPROVE":
+                fb = ""
+            elif result["no_verdict"]:
+                fb = (f"{who} gave no verdict, so the change counts as rejected.\n\n{report}\n\n"
+                      "Address any blocker or major finding it lists.")
+            else:
+                fb = f"{who} requested changes:\n\n{report}"
             return {"verdict": verdict, "reviews": {**s.get("reviews", {}), step.name: report},
                     "review_outcomes": {**s.get("review_outcomes", {}), step.name: outcome},
                     "feedback": fb}
