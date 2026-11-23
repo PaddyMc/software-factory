@@ -1,0 +1,404 @@
+02 Board and scheduling
+
+Baseline: 8bd7012, the factory shipped on main at that revision.
+Scope: the board's stored task states, derived readiness and liveness, contract
+synchronization, dependency-based stacking, plan scheduling, holds, failures,
+and reruns. This chapter describes observable behavior only and deliberately
+does not prescribe a database layout.
+
+1. Stored task state
+
+1.1 Status is persistent; running, ready, and waiting are classifications
+
+A task enters the board with a stored status. factory.db.STATUSES is the closed
+set of statuses accepted by DB.update. The active statuses are grouped by
+factory.db.ACTIVE, but there is no separate stored running status. Likewise,
+ready, waiting, and DEAD are observations, not stored statuses.
+
+The status vocabulary has these board meanings:
+
+    Stored status       Observable meaning
+    queued              Available for consideration; dependencies may still be unmet.
+    planning            A task run is in its planning phase.
+    building            A task run is building or reworking a candidate.
+    reviewing           Automated review is in progress.
+    verifying           Verification is in progress.
+    pr_open             A candidate has an open PR; it can satisfy a dependent when
+                        its candidate revision is present.
+    conflict            An existing PR needs conflict resolution; it is not a healthy
+                        open dependency for stacking.
+    ci_failed           The factory's candidate has failing CI and needs CI rework.
+    changes_requested   A human review requests changes on the candidate.
+    merged              The task's changes have reached their required destination;
+                        the dependency is satisfied.
+    failed              A run or rework failed, or an active process was found dead;
+                        its note supplies the operator-visible reason when available.
+    abandoned           An operator hold, or a PR closed without merge. Plan runs do
+                        not start it merely because its dependencies are ready.
+
+The four active values are planning, building, reviewing, and verifying. Board
+summaries classify any of them as running and use a running glyph. Other summary
+glyphs distinguish merged, PR open, conflict, CI failure, requested changes,
+failed, queued, and held. See factory/db.py::STATUSES and ACTIVE, and
+factory/observe.py::strip and counts.
+
+A stored status does not by itself answer whether a task can start now. For
+example, queued says nothing about its dependencies, and failed is eligible for
+a later plan run even though it is an unsuccessful outcome. Conversely, an open
+PR with changes_requested or ci_failed is not equivalent to pr_open for a
+dependent.
+
+2. Readiness and liveness are derived separately
+
+2.1 Dependency readiness
+
+DB.ready(task_id) evaluates the task's current contract and the current state of
+each dependency on every call. It does not store a ready flag. DB.readiness
+turns the same decision into operator text:
+
+    Dependency condition                 Readiness text
+    No dependencies, or all merged       ready
+    Every dependency satisfied and at    ready, stacks on <dependency IDs>
+    least one has a healthy open PR
+    Any dependency unsatisfied            waits for <ID (status)> entries
+
+A missing dependency record is shown as ID (not in factory). A dependency in
+queued, an active state, failed, abandoned, conflict, ci_failed, or
+changes_requested is unsatisfied. The exact eligibility rules are in section 4.
+
+Readiness is not whole-task scheduler eligibility. DB.ready deliberately looks
+at dependencies, not the dependent's own status. scheduler.startable separately
+requires an eligible own status, excludes manual and already-started tasks, and
+then calls DB.ready. This is why a merged task can have satisfied dependencies
+without being run again, and why an abandoned task with no dependencies is not a
+plan-run candidate.
+
+The status and top displays use this derivation to divide queued tasks into
+ready and waiting counts. For a queued or failed task, observe.detail appends
+the readiness text; for failed it can also append the last-run note. Evidence:
+factory/db.py::DB.deps, DB.ready, and DB.readiness;
+factory/observe.py::detail and counts; and
+tests/test_pipeline.py::test_sync_loads_backlog_with_readiness.
+
+2.2 Process liveness
+
+Liveness answers a different question: is the process associated with a task
+still present? factory.db.pid_alive uses operating-system signal zero, treats an
+existing but inaccessible process as alive, and returns false for a missing PID
+or process. factory.observe.liveness returns DEAD for an active task, or a
+queued task that still carries a PID, when that truthy PID is not alive. An
+active record without a PID does not produce that DEAD string. Those edge rules
+are source-only details in factory/db.py::pid_alive and
+factory/observe.py::liveness.
+
+Plain factory status substitutes DEAD for the displayed status when liveness
+fails; it does not thereby rewrite the stored status. The detail names the gone
+process and suggests factory clean TASK. factory status --refresh is the
+operation that changes an active task with a dead PID to failed, clears its
+progress, and records that the process exited mid-run. Evidence:
+tests/test_observe.py::test_dead_run_is_flagged_and_refresh_fails_it.
+
+Heartbeat age is a third observation, not another status or dependency rule.
+For an active task whose process is not dead, observe.detail reports quiet when
+its heartbeat is at least 120 seconds old. A quiet process is still alive; a
+fresh heartbeat does not make an unsatisfied dependency ready. The 120-second
+presentation threshold is an implementation note evidenced by source in
+factory/observe.py::detail, not by a dedicated behavioral test.
+
+3. Synchronization maps contracts onto the board
+
+3.1 What sync changes
+
+factory sync performs these steps in order:
+
+1. Discover and parse every configured plan and build the repository-wide task
+   mapping described in 01-spec.txt section 5.
+2. Validate all contracts and dependencies. On any error, print the diagnostics
+   and return 1 without synchronizing the invalid mapping.
+3. Add each new task as queued. For an existing task, refresh its plan and
+   serialized contract while preserving its status and runtime outcome.
+4. Report tasks present on the board but no longer in any plan as orphaned; do
+   not silently delete them. This orphan-reporting detail is evidenced by source.
+5. Print tasks that are both queued and dependency-ready.
+
+The preservation rule is central: editing a goal, acceptance criterion, or
+verification command and running sync does not reset building, failed, pr_open,
+or merged to queued. DB.upsert_task changes contract identity and content, not
+the lifecycle decision already reached. Evidence:
+factory/db.py::DB.upsert_task and DB.sync, and
+tests/test_db.py::test_upsert_keeps_status_and_refreshes_contract.
+
+For the two-task demonstration plan, the relevant lines from the first sync and
+a no-change repeat look like this (the follow-up command hint is omitted):
+
+    $ factory sync
+    synced 2 tasks from the plans: 2 added, 0 updated
+    ready to run: demo-t01
+
+    $ factory sync
+    synced 2 tasks from the plans: 0 added, 0 updated
+    ready to run: demo-t01
+
+demo-t02 is present after both commands but waits for demo-t01. Once demo-t01 is
+merged, DB.readiness("demo-t02") is ready without rewriting demo-t02's
+contract. tests/test_pipeline.py::test_sync_loads_backlog_with_readiness covers
+both idempotent sync and that derived transition.
+
+3.2 Sync is not remote refresh
+
+Sync reconciles local plans with the board. It does not perform the GitHub
+refresh that judges PR merges, CI, reviews, or dead processes. A plan run first
+synchronizes and then refreshes before constructing its scheduler, so the
+scheduler sees the latest local contract and the remote-derived status available
+at that point. Plain status without --refresh displays current stored states and
+derived observations without performing that refresh. The separation is
+implemented by factory/cli.py::cmd_sync, cmd_run_plan, cmd_status,
+and _refresh; detailed remote transitions belong to the PR-lifecycle chapter.
+
+4. Eligible dependencies and open-PR stacking
+
+4.1 The two dependency partitions
+
+DB.deps(task) walks depends_on in contract order and partitions dependencies as
+follows:
+
+    Dependency state                                  Partition and effect
+    merged                                            Satisfied; nothing to stack on.
+    pr_open with a candidate revision                 Satisfied and returned in the
+                                                      open/stacking partition.
+    pr_open without a candidate revision              Unmet, annotated pr_open.
+    conflict, ci_failed, changes_requested            Unmet with that exact status.
+    queued, active, failed, abandoned                 Unmet with that exact status.
+    No board record                                   Unmet, annotated not in factory.
+
+Only the healthy pr_open case permits stacking. An open URL alone is not enough:
+the implementation also requires the candidate revision. In particular, a red
+or review-blocked PR does not silently become a base for further work. Evidence:
+tests/test_scheduler.py::test_a_pr_whose_ci_fails_runs_again_to_fix_it_and_its_dependents_wait
+and tests/test_scheduler.py::test_dependents_wait_while_changes_are_requested.
+
+If every dependency is merged, readiness is ready and a new task starts from the
+ordinary base. If one or more dependencies have healthy open PRs and no
+dependency is unmet, readiness is ready, stacks on those IDs. If any dependency
+is unmet, readiness reports the waits rather than advertising a partial stack.
+A direct factory run TASK prints the unmet list and exits 1; --force is the
+explicit override of that dependency guard.
+
+4.2 Constructing a stack
+
+For a normal dependent run, cmd_run_one uses the first open dependency as the
+starting candidate and makes its factory/<dependency> branch the new PR's base.
+It merges every additional open dependency candidate into the worktree before
+the task builds. Thus multiple prerequisites are represented in the code, while
+the PR targets the first dependency's branch. The selected dependencies and
+their order come from depends_on, not from task ID sorting.
+
+For one dependency demo-t02 on demo-t01, the visible result is:
+
+    demo-t01: pr_open, PR targets the ordinary trunk
+    demo-t02: starts from demo-t01's candidate
+              its PR targets factory/demo-t01
+              readiness before launch: ready, stacks on demo-t01
+
+The worktree and PR lifecycle keep the candidate branch factory/demo-t02. See
+factory/cli.py::cmd_run_one and factory/pipeline.py::create_worktree.
+
+There is an unsuccessful stacking path. If additional open dependency
+candidates conflict with one another, create_worktree aborts the merge, removes
+the incomplete worktree, and raises an error asking the operator to merge one
+of their PRs first. Evidence:
+tests/test_stack.py::test_stacking_on_two_open_prs_merges_them_into_the_base and
+tests/test_stack.py::test_conflicting_open_prs_cannot_be_stacked.
+
+Open PRs are merged bottom-up. After each dependency merge, factory status
+--refresh moves or replays the remaining stack as appropriate; a resulting
+conflict changes that task's stored state to conflict, not to merged. The
+scheduler summary lists open PRs for review in plan order. See
+factory/scheduler.py::summary and
+tests/test_scheduler.py::test_one_run_gives_a_pr_per_task_with_dependents_stacked.
+
+5. Plan scheduling and parallel limits
+
+5.1 Startable tasks
+
+cmd_run_plan puts the selected plan's tasks in dependency order, retaining plan
+order for ties. scheduler.startable then requires all of the following:
+
+* the task exists on the board;
+* its own status is queued, failed, conflict, ci_failed, or changes_requested;
+* it has not already been started by this plan invocation;
+* it is not in the plan's manual set; and
+* DB.ready reports no unmet dependency.
+
+This produces the following scheduling map:
+
+    Current board outcome       Next plan-run action
+    queued + ready              Launch a child task run when a slot is available.
+    queued + unmet              Leave queued and report waiting.
+    failed from an earlier run  Retry when ready, at most once in this invocation.
+    conflict                    Run the conflict-resolution path when ready.
+    ci_failed                   Run the CI-fix path when ready.
+    changes_requested           Run the review-rework path when ready.
+    pr_open or merged           Keep the PR/outcome; do not launch a fresh build.
+    abandoned                   Keep the hold; do not launch.
+    Active in this or another   Do not launch a duplicate. A live run elsewhere also
+    run                         keeps the supervisor from declaring the plan finished.
+    Manual-only                 Do not launch; report the manual reason in summary.
+
+A failed or queued task with unmet dependencies is not made runnable merely by
+appearing in the eligible-status set. A pr_open task is kept even if its own
+readiness text would be ready. Evidence: factory/scheduler.py::startable,
+elsewhere, and run; tests/test_scheduler.py::test_rerun_keeps_prs_and_holds_and_retries_failures_once
+and tests/test_scheduler.py::test_dependents_wait_for_a_dependency_running_elsewhere.
+
+5.2 What --parallel limits
+
+A plan run launches each selected task as a separate factory run TASK --quiet
+child process. It keeps at most Plan.parallel of its own children in its running
+set at once. The CLI default is 3; --parallel N changes that per-invocation
+limit. Completed children free slots, and independent ready tasks can occupy
+slots concurrently. A dependent cannot occupy a slot until its dependency is
+merged or has a healthy open PR, even if slots are idle.
+
+The limit is per plan supervisor, not a global lock on all factory processes.
+The free-slot calculation subtracts only children owned by that supervisor;
+scheduler.elsewhere separately prevents premature termination while another run
+in the same plan is active. This scoping detail is evidenced by source in
+factory/scheduler.py::run and elsewhere. Parallel independent execution and
+dependent stacking are behaviorally covered by
+tests/test_scheduler.py::test_independent_tasks_run_in_parallel and
+tests/test_scheduler.py::test_one_run_gives_a_pr_per_task_with_dependents_stacked.
+
+The loop ends when this supervisor has no running children and no live task run
+elsewhere in the plan. That does not imply every task succeeded: unmet
+dependents, holds, and manual tasks can remain. scheduler.summary therefore
+reports every plan task, while run's return mapping contains only tasks this
+invocation started. cmd_run_plan returns success only when every result is
+pr_open or merged; a failed started task makes the plan command unsuccessful.
+
+6. Holds, failures, and reruns
+
+6.1 Holds
+
+factory abandon TASK stores abandoned and an optional note. The plan scheduler
+skips that status regardless of dependency readiness, and board counters label
+it held. This is a plan-run hold, not a statement that no explicit operator
+action can ever change it. factory requeue TASK changes abandoned back to
+queued and clears its note and progress. A subsequent plan run applies the
+normal own-status and dependency checks again.
+
+6.2 Failure containment
+
+A child failure is stored as failed with its note and does not rewrite unrelated
+tasks. It blocks exactly those tasks whose dependency closure still needs it;
+independent tasks can continue to pr_open. Other dependents of an already
+merged or healthy open dependency are unaffected by this failure. The scheduler
+does not convert blocked dependents to failed merely because a prerequisite
+failed: they remain queued with waits for ID (failed).
+
+A task that failed in an earlier plan invocation is startable on a later one.
+Once this invocation has started it, the started set prevents another launch in
+the same invocation even if it fails again. This once-per-plan-run rule is
+separate from the child pipeline's --max-attempts build retry limit. Evidence:
+tests/test_scheduler.py::test_rerun_keeps_prs_and_holds_and_retries_failures_once
+and tests/test_scheduler.py::test_a_failure_blocks_only_its_dependents.
+
+6.3 Rerun paths
+
+An ordinary rerun preserves work that already has the appropriate board
+outcome:
+
+* pr_open and merged tasks are not rebuilt by the plan scheduler.
+* failed tasks are tried again, once in that invocation.
+* conflict, ci_failed, and changes_requested select their specialized resolution
+  or rework paths rather than being treated as healthy open dependencies.
+* abandoned tasks stay held until requeued or otherwise explicitly changed.
+* manual-only tasks stay unlaunched and visible in the summary.
+
+factory requeue is an operator action for failed or abandoned tasks, not a
+required precursor to every retry: failed is already scheduler-eligible. It sets
+the selected status to queued and clears the old note/progress. It leaves live
+active tasks and pr_open, conflict, ci_failed, changes_requested, and merged
+tasks alone, returns nonzero for refused targets, and reports an unknown task as
+not on the board. An already queued task is an idempotent no-op. Evidence:
+factory/cli.py::cmd_requeue and cmd_abandon,
+tests/test_requeue.py::test_requeue_moves_only_failed_and_abandoned_tasks, and
+tests/test_requeue.py::test_requeue_leaves_a_pr_with_requested_changes_alone.
+
+For a direct run, active, pr_open, and merged statuses normally make
+factory run TASK refuse a duplicate. On conflict, ci_failed, or
+changes_requested, the default is to preserve the PR and perform the matching
+resolution/rework. --force bypasses the ordinary dependency guard and selects a
+fresh rebuild for those rework states instead; it is not required for the normal
+plan retry of failed.
+
+7. Worked trace: failed prerequisite and independent task
+
+Consider the three tasks used by the scheduler tests:
+
+    demo-t01  depends_on: []
+    demo-t02  depends_on: [demo-t01]
+    demo-t03  depends_on: []
+
+All begin queued. Run the plan with two child slots, and suppose demo-t01 fails
+while demo-t03 publishes a PR:
+
+    $ factory run demo --parallel 2
+    ... start  demo-t01 ... (1/2 running)
+    ... start  demo-t03 ... (2/2 running)
+    ... done   demo-t01 ... failed
+    ... done   demo-t03 ... pr_open ... https://github.test/demo-t03
+
+The launch order is demo-t01 then demo-t03 because demo-t02 is not ready. After
+both children finish, the board is:
+
+    Task       Stored status  Derived readiness / outcome
+    demo-t01   failed         Its dependencies are ready; its own run failed.
+    demo-t02   queued         waits for demo-t01 (failed); never launched.
+    demo-t03   pr_open        Independent PR retained; demo-t01 did not block it.
+
+The run result mapping has demo-t01: failed and demo-t03: pr_open only. The
+summary still includes demo-t02 and prints waits for demo-t01 (failed). The plan
+command is unsuccessful because one started result is failed, but the
+independent PR remains available for review. This trace is exactly the behavior
+asserted by tests/test_scheduler.py::test_a_failure_blocks_only_its_dependents.
+
+Now invoke the plan again. Initially demo-t01 is eligible for its one retry in
+this invocation, demo-t02 still waits, and demo-t03 is kept because it is
+pr_open. If the retry leaves demo-t01 pr_open with a candidate revision, the
+next readiness calculation gives:
+
+    demo-t02: ready, stacks on demo-t01
+
+The scheduler can then launch demo-t02 on demo-t01's candidate while retaining
+both existing PRs. If the retry instead fails, demo-t01 is not launched a second
+time in that same invocation and demo-t02 remains queued; a later plan
+invocation may try demo-t01 again. No transition in this trace is inferred from
+a stored ready flag: each one follows from current stored statuses plus a fresh
+dependency calculation.
+
+8. Source and behavioral evidence index
+
+The state and derivation rules are anchored in factory/db.py::DB.upsert_task,
+DB.sync, DB.deps, DB.ready, DB.readiness, and pid_alive;
+factory/observe.py::liveness, detail, strip, and counts;
+factory/scheduler.py::startable, elsewhere, run, and summary; and
+factory/cli.py::cmd_sync, cmd_run_plan, cmd_run_one, cmd_requeue, and
+cmd_abandon. Stack construction is anchored in
+factory/pipeline.py::create_worktree.
+
+The central executable specifications are
+tests/test_db.py::test_upsert_keeps_status_and_refreshes_contract,
+tests/test_db.py::test_dependencies_are_stacked_on_open_prs_or_merged,
+tests/test_pipeline.py::test_sync_loads_backlog_with_readiness,
+tests/test_observe.py::test_dead_run_is_flagged_and_refresh_fails_it,
+tests/test_stack.py::test_conflicting_open_prs_cannot_be_stacked,
+tests/test_scheduler.py::test_one_run_gives_a_pr_per_task_with_dependents_stacked,
+tests/test_scheduler.py::test_independent_tasks_run_in_parallel,
+tests/test_scheduler.py::test_a_failure_blocks_only_its_dependents,
+tests/test_scheduler.py::test_rerun_keeps_prs_and_holds_and_retries_failures_once,
+tests/test_scheduler.py::test_a_pr_whose_ci_fails_runs_again_to_fix_it_and_its_dependents_wait,
+tests/test_scheduler.py::test_dependents_wait_while_changes_are_requested, and
+tests/test_requeue.py::test_requeue_moves_only_failed_and_abandoned_tasks.
+Statements explicitly labelled source-only are implementation evidence, not
+claims of separate test coverage.
