@@ -1,0 +1,349 @@
+SOFTWARE FACTORY SPECIFICATION
+Chapter 03 — Flows and attempts
+
+Edition: 8bd7012
+Status: normative for the factory at that revision.
+
+Scope
+=====
+
+A flow is the ordered arrangement of planner, builder, reviewer, gate, and
+verifier work for one task. An attempt is one pass through the flow's build
+steps and whatever post-build steps the routing rules allow it to reach. This
+chapter specifies the flow and attempt mechanisms at the stated edition; it
+does not make any later flow option normative.
+
+1. The built-in order
+=====================
+
+The built-in `default` flow is exactly:
+
+    plan -> build -> review -> gates -> verify
+
+It is equivalent to these validated steps:
+
+    [Step(plan), Step(build), Step(review), Step(gates), Step(verify)]
+
+`plan` runs once, at attempt 0. Each numbered attempt starts with `build`.
+With the default order, the reviewer must approve before the gates run, all
+gates must pass before the verifier runs, and the PR step follows the
+verifier. The PR step is the only step that pushes the candidate and opens or
+updates GitHub. The scripted review sequence `CHANGES`, then `APPROVE`, in
+`tests/test_pipeline.py::test_run_ends_in_a_working_pr` exercises this order
+and its review retry.
+[Source: `factory/flows.py::DEFAULT`;
+`factory/pipeline.py::Pipeline.graph`, `Pipeline.pr`.]
+
+The configurable kinds are `plan`, `build`, `review`, `gates`, and `verify`.
+`gates` is a pipeline operation, not a fifth model-driven agent role: it runs
+the configured deterministic commands and produces their pass/fail result.
+The four agent kinds and their tools are enumerated by
+`tests/test_flows.py::test_each_kind_gets_its_tools`.
+[Source: `factory/flows.py::KINDS`, `Flow`;
+`factory/pipeline.py::Pipeline.gates`.]
+
+2. Selecting and configuring a flow
+===================================
+
+`.factory/config.yaml` selects a flow with `flow: NAME` and defines additional
+flows under `flows`. `factory run TASK --flow NAME` overrides that selection;
+a plan-level `--flow` is passed to each selected task. The selected name must
+be `default` or a key of `flows`. A flow name starts with a lowercase ASCII
+letter, followed by zero or more lowercase ASCII letters, digits, or hyphens.
+The built-in `default` cannot be redefined.
+[Source: `factory/flows.py::parse_flows`, `parse_flow`;
+`factory/cli.py::cmd_run_one`, `_child_args`;
+tests: `tests/test_flows.py::test_default_cannot_be_redefined_and_flow_must_name_a_flow`,
+`tests/test_pipeline.py::test_the_flow_flag_overrides_the_configured_flow`,
+`tests/test_scheduler.py::test_a_plan_run_passes_its_flow_to_each_task`.]
+
+A step is either a bare kind string or a mapping. The mapping requires `kind`
+and accepts only these overrides:
+
+    key         meaning
+    kind        plan, build, review, or verify; gates must be a bare string
+    name        stable identity used for prompts, run records, and review feedback
+    model       model spec for this step
+    max_steps   positive model-call limit for this step
+
+A step name follows the same lowercase-name grammar as a flow name and must
+be unique within the flow. The reserved names are `resolve`, `ci`, `pr`,
+`human_review`, `planner`, `builder`, `reviewer`, and `verifier`. A name that
+is itself a kind name is valid only when it matches the step's own kind.
+Unknown step keys and unknown kinds are rejected.
+[Source: `factory/flows.py::parse_step`, `validate`, `RESERVED`;
+tests: `tests/test_flows.py::test_a_flow_is_a_list_of_steps_with_kinds_models_and_step_limits`,
+`tests/test_flows.py::test_step_names_are_unique_and_not_reserved`.]
+
+The structural order rule is:
+
+    [plan]? build+ (review | gates)* [verify]?
+
+There is at most one `plan`, and it must be first; at most one `verify`, and
+it must be last; and at most one `gates`. At least one build is required, and
+all build steps must be contiguous immediately after the optional planner.
+Multiple reviews are allowed. A flow without an explicit gates step is still
+valid because insertion, described below, supplies it.
+[Source: `factory/flows.py::_order`, `parse_flow`;
+tests: `tests/test_flows.py::test_flow_order_rules_are_enforced`,
+`tests/test_flows.py::test_default_cannot_be_redefined_and_flow_must_name_a_flow`.]
+
+For agent steps, the resolved model precedence is:
+
+    CLI --model
+      > step.model
+      > config models[step.kind]
+      > the selected prompt's frontmatter model
+      > the factory default model
+
+The resolved model-call limit precedence is:
+
+    step.max_steps
+      > config max_steps[step.kind]
+      > the selected prompt's frontmatter max_steps
+      > 60
+
+A step named differently from its kind first looks for
+`.factory/agents/<step-name>.md` in the main checkout and otherwise uses its
+kind's prompt. These are per-step overrides, not additional attempts.
+[Source: `factory/agents.py::step_prompt_source`, `step_model`, `step_limit`,
+`LangChainRoles.step`;
+tests: `tests/test_flows.py::test_step_model_and_step_limit_precedence`,
+`tests/test_flows.py::test_a_flow_is_a_list_of_steps_with_kinds_models_and_step_limits`.]
+
+3. Gate insertion and an explicit early gate
+============================================
+
+Insertion is deterministic. If the configured steps contain no `gates`, put
+it immediately after the last review. If there is no review, put it
+immediately after the last build. An already explicit `gates` step is never
+moved. Since every valid flow has builds and at most one gates step, every
+resulting flow has exactly one gate position.
+[Source: `factory/flows.py::parse_flow`;
+test: `tests/test_flows.py::test_gates_go_after_the_last_review_unless_placed`.]
+
+For example, this is a valid configuration with gates deliberately before
+review:
+
+    flow: gates-first
+    flows:
+      gates-first:
+        - plan
+        - build
+        - gates
+        - kind: review
+          name: design-review
+          max_steps: 12
+        - verify
+
+The contrast is behavioral, not merely textual:
+
+    default:      plan -> build -> review -> gates -> verify
+    gates-first:  plan -> build -> gates -> design-review -> verify
+
+In `gates-first`, a gate failure ends the attempt before
+`design-review`, so no reviewer runs on that attempt. A gate pass does not
+skip the reviewer: approval is still required before `verify`. If that review
+requests changes, the next attempt runs both build and gates again. The same
+insertion rule on a flow with several builders and several reviewers places
+an implicit gate after the final reviewer, never between builders.
+[Source: `factory/pipeline.py::Pipeline.graph`;
+tests: `tests/test_pipeline.py::test_gates_first_flow_reviews_on_a_passing_build`,
+`tests/test_pipeline.py::test_gates_before_review_skip_the_reviewers_when_gates_fail`,
+`tests/test_flows.py::test_gates_go_after_the_last_review_unless_placed`.]
+
+4. Step inputs and outputs
+==========================
+
+The following outputs are the interface between steps. An agent's text output
+is its last non-empty assistant text, not an implicit concatenation of all
+reasoning and tool messages. Tool activity is also recorded in the transcript;
+a build additionally returns its write/command log.
+
+    step       input and retained output
+    ----       ------------------------
+    plan       Reads the task and repository. Its text is stored as the plan
+               and supplied to every build attempt. It creates no candidate.
+
+    build      Receives the plan (or the no-planner placeholder), any retry
+               feedback, and earlier build outputs from this attempt. Its file
+               and shell changes become the candidate; its final text is the
+               build report. The factory commits after every build step.
+
+    review     Reads the candidate and base..HEAD diff. Its full text is kept
+               under the step name, and its parsed verdict routes the attempt.
+               CHANGES feedback includes that text and the review step's name.
+
+    gates      Runs without a model on the current candidate. It retains gate
+               rows and pass/fail; failure details become builder feedback and
+               the no-progress comparison signature.
+
+    verify     Reads the candidate, gate table, and review reports. Its text
+               is parsed into the PR title and summary. An unparseable report
+               uses the deterministic fallback and records a fallback outcome.
+
+    pr         Composes the body, pushes the accepted head, and creates or
+               edits the PR. It has no model output of its own.
+
+[Source: `factory/agents.py::LangChainRoles._observe`,
+`LangChainRoles._kit`; `factory/pipeline.py::Pipeline.plan`,
+`Pipeline.attempt`, `Pipeline.review_step`, `Pipeline.gates`,
+`Pipeline.verify`, `Pipeline.pr`; `factory/prbody.py::parse_summary`;
+tests: `tests/test_pipeline.py::test_run_ends_in_a_working_pr`,
+`tests/test_pipeline.py::test_an_unparseable_summary_falls_back`.]
+
+Every configured build step runs on every attempt, including a retry, and the
+factory records `committed` or `no-changes` for each one. A named review's
+output is similarly named in run records and feedback, so two reviews do not
+overwrite one another. If there is no planner, builds receive “plan from the
+contract” rather than an empty plan. If there is no verifier, the PR body uses
+the fallback summary; omitting either optional role does not omit build,
+review, or gates.
+[Source: `factory/pipeline.py::Pipeline.attempt`, `Pipeline.pr_body`;
+tests: `tests/test_pipeline.py::test_a_second_reviewer_requesting_changes_sends_the_build_back`,
+`tests/test_pipeline.py::test_a_flow_without_planner_or_report_opens_a_pr_on_passing_gates`.]
+
+4.1 Review verdict parsing
+--------------------------
+
+A valid verdict is a case-sensitive whole line containing
+`VERDICT: APPROVE` or `VERDICT: CHANGES`, with optional surrounding whitespace.
+The last valid matching line wins. If there is no valid line—because the text
+is empty, missing a verdict, or contains only malformed verdict syntax—the
+result is `CHANGES`. This is a routing value, not a count of positive or
+negative prose elsewhere in the report.
+[Source: `factory/agents.py::_VERDICT`, `parse_verdict`,
+`LangChainRoles.step`; test:
+`tests/test_templates.py::test_reviewer_prompt_matches_verdict_parser`.]
+
+The first `CHANGES` verdict ends the current attempt immediately. Later
+reviewers, gates, verify, and PR are not reached on that attempt. An `APPROVE`
+only advances to the next configured post step; it does not approve the whole
+task while another reviewer remains. Gates likewise stop on the first failed
+attempt route rather than converting failure into a PR.
+[Source: `factory/pipeline.py::Pipeline.review_step`, `Pipeline.graph`;
+tests: `tests/test_pipeline.py::test_run_ends_in_a_working_pr`,
+`tests/test_pipeline.py::test_gate_failures_never_open_a_pr`.]
+
+5. Attempt routing, retry, and stop conditions
+==============================================
+
+A fresh run records the starting SHA before its first build. After the build
+steps, the pipeline compares HEAD with that SHA and then follows these rules:
+
+1. A genuinely unchanged fresh candidate produces `CHANGES` feedback and goes
+   directly to retry/fail; it does not run reviews or gates. A no-new-commit
+   result on a later attempt does not erase earlier candidate commits: if HEAD
+   still differs from the original starting SHA, reviews proceed normally.
+2. `CHANGES` from any review goes directly to retry/fail with that report as
+   feedback.
+3. Any failed gate goes directly to retry/fail with gate details as feedback.
+   Passing gates advances only to the next configured post step.
+4. Retry is available only while `attempt < max_attempts` and the attempt is
+   not marked stuck. The default maximum is three build attempts.
+5. Two consecutive gate-failing attempts with the same failed-gate signature
+   set `stuck`; routing stops with “no progress” even when more attempts would
+   otherwise be allowed. A different failure signature does not set this flag.
+6. Exhausting attempts, or reaching fail after the no-progress stop, records a
+   failed task and does not push or open a PR. External stops and uncaught
+   errors also fail the run rather than opening one.
+
+[Source: `factory/pipeline.py::Pipeline.attempt`, `Pipeline.gates`,
+`Pipeline.graph`, `Pipeline.fail`, `Pipeline.run`;
+tests: `tests/test_pipeline.py::test_no_progress_stops_before_max_attempts`,
+`tests/test_pipeline.py::test_run_ends_in_a_working_pr`.]
+
+5.1 Trace: a rejected default-flow attempt
+------------------------------------------
+
+Start at base `B`, with the default three attempts. The following is the exact
+shape exercised by `test_run_ends_in_a_working_pr`:
+
+    attempt 0 (planning)
+      plan -> text P
+      state.plan = P
+
+    attempt 1
+      build#1  -> edits and commit C1; HEAD=C1, different from B
+      review#1 -> report R1; VERDICT: CHANGES
+      feedback = "Reviewer requested changes:\n\n" + R1
+      gates, verify, and pr are skipped
+
+    attempt 2
+      build#2  -> no new commit, recorded as no-changes; HEAD is still C1
+      review#2 -> verdict APPROVE, because C1 still differs from B
+      gates#2  -> all pass
+      verify#2 -> PR report
+      pr#2     -> push C1 and open the PR
+
+The rejection consumed attempt 1 but did not create a second plan. The second
+builder received both P and R1 as feedback. “No-changes” on build#2 means no
+new commit in that attempt, not that the candidate equals B. Had the builders
+returned HEAD all the way to B, rule 1 would have bypassed review and consumed
+attempts without running gates.
+[Source: `factory/pipeline.py::Pipeline.attempt`, `Pipeline.review_step`,
+`Pipeline.graph`; test: `tests/test_pipeline.py::test_run_ends_in_a_working_pr`.]
+
+For comparison, if attempt 1 instead reaches gates and fails with signature F,
+attempt 2 rebuilds and reruns the required reviews before gates. If attempt 2
+fails gates with the identical F, it stops at two attempts for lack of
+progress, even with a configured maximum of five. In the explicit gates-first
+example, the same gate failure on attempt 1 would have skipped its reviewer.
+[Source: `factory/pipeline.py::Pipeline.gates`, `Pipeline.graph`;
+tests: `tests/test_pipeline.py::test_no_progress_stops_before_max_attempts`,
+`tests/test_pipeline.py::test_gates_before_review_skip_the_reviewers_when_gates_fail`.]
+
+5.2 Agent-loop bounds are not extra attempts
+--------------------------------------------
+
+Within one agent step, `max_steps` bounds model calls and a graph recursion
+limit of `4 * max_steps + 25` is a backstop. A recoverable tool exception is
+returned to the model as an error result. Reaching the model-call limit marks
+the output stopped at the step limit; it does not create another build
+attempt. In particular, a stopped or otherwise empty review still fails safe
+through verdict parsing when it has no valid verdict.
+[Source: `factory/agents.py::recursion_limit`, `tool_errors`,
+`LangChainRoles.step`;
+tests: `tests/test_agent_loop.py::test_finishing_on_the_last_allowed_step_is_not_killed`,
+`tests/test_agent_loop.py::test_hitting_the_step_limit_is_reported_not_raised`,
+`tests/test_agent_loop.py::test_a_failing_tool_call_goes_back_to_the_model`.]
+
+Provider credentials for recognized providers are checked before the
+worktree is created. Provider failures are retried by middleware with four
+retries and exponential delays of 2, 4, 8, and 16 seconds; if the error still
+fails, the exception ends the run. These transport retries are distinct from
+review/gate build attempts and do not run the builder again.
+[Source: `factory/agents.py::MODEL_RETRY`, `missing_keys`,
+`LangChainRoles.step`; `factory/cli.py::cmd_run_one`;
+tests: `tests/test_templates.py::test_missing_provider_key_is_reported_before_work`,
+`tests/test_pipeline.py::test_run_refuses_without_provider_key`,
+`tests/test_agent_loop.py::test_a_model_that_keeps_failing_ends_the_run_with_its_error`.]
+
+6. Existing-PR entries
+======================
+
+Conflict resolution and CI/human-review rework reuse the same build-attempt
+and post-step routing but enter it differently. A clean conflict replay needs
+no builder and goes straight to gates. A conflicted replay uses the first
+build step, then every configured reviewer, then the remaining post steps.
+CI and human-review rework start from the existing candidate with the rework
+brief, rather than running a fresh planner. A failed resolution or rework
+leaves the old PR candidate in place because no push occurs before success.
+[Source: `factory/pipeline.py::Pipeline.graph`, `Pipeline.resolve`,
+`Pipeline.rework`;
+tests: `tests/test_pipeline.py::test_conflict_that_now_replays_cleanly_goes_straight_to_the_gates`,
+`tests/test_pipeline.py::test_conflicting_pr_is_resolved_by_the_builder_then_reviewed_and_gated`,
+`tests/test_pipeline.py::test_a_conflict_resolution_is_reviewed_by_every_review_step`,
+`tests/test_pipeline.py::test_failed_resolution_leaves_the_pr_alone`,
+`tests/test_pipeline.py::test_failed_review_rework_leaves_the_pr_alone`.]
+
+On a human-review rework only, a first build attempt that makes no commit can
+produce a PR comment answering the review instead of a retry. Later no-change
+attempts, and no-change attempts for CI rework, follow the retry/fail rules.
+Successful fresh runs push the new branch; successful rework and conflict
+resolution update the existing branch with lease protection for the expected
+old candidate.
+[Source: `factory/pipeline.py::Pipeline.attempt`, `Pipeline.answer`,
+`Pipeline.pr`;
+tests: `tests/test_pipeline.py::test_a_review_that_needs_no_change_is_answered_and_the_pr_left_as_is`,
+`tests/test_pipeline.py::test_failing_ci_is_fixed_on_the_pr_branch_then_reviewed_and_gated`.]
