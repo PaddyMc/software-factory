@@ -1,4 +1,7 @@
-"""`factory init` sets a repository up; the role prompts and skills ship with the factory and stay generic."""
+"""`factory init` sets a repository up; the role prompts and skills ship with the factory and stay generic.
+
+The factory's own docs describe what it ships: the tests at the end pin build candidates and the selector
+in docs/architecture.md, docs/reference.md, NEXT.md, the config template and the factory-ops skill."""
 
 import re
 import subprocess
@@ -313,3 +316,142 @@ def test_the_select_role_can_be_configured_overridden_and_printed(repo, monkeypa
     override.write_text("---\nmodel: fake:select\nmax_steps: 5\n---\nYou are our SELECTOR.\n")
     assert prompt_source(repo, "select") == override
     assert load_role(repo, "select") == ({"model": "fake:select", "max_steps": 5}, "You are our SELECTOR.\n")
+
+
+# What the factory ships, it documents (flow-tuning-t05): build candidates and the selector, in its own
+# docs, in the config template it scaffolds, and in the factory-ops skill.
+
+
+def _doc(name: str) -> str:
+    """One of the factory's own docs: they describe what the factory does."""
+    return (PACKAGE.parent / "docs" / name).read_text()
+
+
+def _section(text: str, heading: str) -> str:
+    """A markdown section: the text under `heading`, up to the next heading of the same or higher level."""
+    level = len(heading) - len(heading.lstrip("#"))
+    _, found, rest = text.partition("\n" + heading + "\n")
+    assert found, f"no {heading!r} heading"
+    lines = []
+    for line in rest.splitlines():
+        if line.strip() == "---" or re.match(rf"^#{{1,{level}}} ", line):
+            break
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _table(text: str) -> list[str]:
+    """The first markdown table in `text`, its header row included."""
+    rows = []
+    for line in text.splitlines():
+        if line.startswith("|"):
+            rows.append(line)
+        elif rows:
+            break
+    assert rows, "no markdown table"
+    return rows
+
+
+def _row(table: list[str], key: str) -> str:
+    """The table row of the config key `key` (its first cell)."""
+    (row,) = [r for r in table if r.startswith(f"| `{key}` |")]
+    return row
+
+
+def test_the_agent_flows_document_build_candidates():
+    """`### Build candidates` shows one first attempt with three candidates and says how the choice is
+    made, what carries on when none pass, that later attempts and reworks build one change, and the cost."""
+    agent_flows = _section(_doc("architecture.md"), "## Agent flows")
+    assert "\n### Build candidates\n" in agent_flows, \
+        "the Agent flows section has no `### Build candidates` subsection"
+    body = _section(agent_flows, "### Build candidates")
+    diagram = next((d for _, d in re.findall(r"```(\w*)\n(.*?)```", body, re.S) if "build#1.1" in d), None)
+    assert diagram is not None, "no diagram of one first attempt with three candidates"
+    for tag in ("build#1.1", "build#1.2", "build#1.3", "gates#1.1", "gates#1.2", "gates#1.3"):
+        assert tag in diagram, f"the diagram shows no {tag}: three candidates, each judged by the gates"
+    assert any(word in diagram for word in ("choose", "choice")), "the diagram shows no choice"
+    assert "review" in diagram and "verify" in diagram, "the diagram doesn't show the flow's later steps"
+    assert "selector" in body, "the section doesn't say the selector picks among the candidates that pass"
+    assert "smallest" in body, "the section doesn't say the fallback: the smallest passing diff"
+    assert "fewest failing gates" in body and "carries on" in body, \
+        "the section doesn't say what carries on when no candidate passes"
+    assert "rework" in body and re.search(r"(later attempts?|attempt 2)", body, re.I) \
+           and re.search(r"one (change|build)", body), \
+        "the section doesn't say that later attempts and reworks build one change"
+    assert "--max-cost" in body and re.search(r"three (first )?builds", body), \
+        "the section doesn't say what candidates cost"
+
+
+def test_the_roles_table_has_the_selector():
+    """The Roles table lists every role the factory runs: the selector has its row."""
+    rows = _table(_section(_doc("architecture.md"), "### Roles"))
+    assert any(re.match(r"\| (selector|select) \|", row) for row in rows), \
+        "the Roles table has no row for the selector"
+
+
+def test_the_reference_documents_candidates_and_the_select_role():
+    """The flows documentation covers the `candidates` build step key with its rules and an example flow
+    that parses; the configuration table lists the `select` role under models and max_steps."""
+    config = _section(_doc("reference.md"), "## Configure a project")
+    assert "candidates" in config, "the flows documentation doesn't cover the `candidates` build step key"
+    assert "2 to 5" in config, "the flows documentation doesn't give the candidates range, 2 to 5"
+    assert re.search(r"(followed by the gates|directly (after|followed))", config), \
+        "the flows documentation doesn't give the placement rule: the gates step directly after the build"
+    rows = _table(config)
+    assert "candidates" in _row(rows, "flows"), "the `flows` row doesn't list the `candidates` step key"
+    assert "select" in _row(rows, "models"), "the `models` row doesn't list the `select` role"
+    assert "select" in _row(rows, "max_steps"), "the `max_steps` row doesn't list the `select` role"
+    examples = []
+    for block in re.findall(r"```yaml\n(.*?)```", config, re.S):
+        parsed = yaml.safe_load(block)
+        for name, steps in (parsed.get("flows", {}) if isinstance(parsed, dict) else {}).items():
+            if isinstance(steps, list):                     # a documented example must be a valid flow
+                flow = flows.parse_flow(str(name), steps)
+                if any(s.candidates > 1 for s in flow.steps):
+                    examples.append(flow)
+    assert examples, "no example flow in the flows documentation uses a build step with `candidates`"
+
+
+def test_the_reference_troubleshooting_covers_candidates_and_the_selector():
+    """Troubleshooting has a row for the candidates flow-shape error and one for a selector run recorded
+    as `fallback`."""
+    rows = _table(_section(_doc("reference.md"), "## Troubleshooting"))
+    assert any(re.search(r"candidates'? needs one build step followed by the gates", row) for row in rows), \
+        "no row for `candidates needs one build step followed by the gates`"
+    assert any("selector" in row and "fallback" in row for row in rows), \
+        "no row for a selector run recorded as `fallback`"
+
+
+def test_next_marks_item_14_done():
+    """NEXT.md's table marks the one-build-per-attempt item done, linking the Build candidates section."""
+    rows = [line for line in (PACKAGE.parent / "NEXT.md").read_text().splitlines()
+            if line.startswith("|") and "one build per attempt" in line]
+    assert rows, "NEXT.md's table has no item 14 row (the one-build-per-attempt gap)"
+    assert rows[0].startswith("| ✓ |"), "item 14 isn't marked done in its table"
+    assert "architecture.md#build-candidates" in rows[0], \
+        "the done item doesn't link docs/architecture.md#build-candidates"
+
+
+def test_the_config_template_documents_candidates():
+    """The shipped config template carries a commented example of a build step with candidates, with a
+    one-line explanation."""
+    template = (PACKAGE / "templates/config.yaml").read_text()
+    mentions = [line for line in template.splitlines() if "candidates" in line]
+    assert mentions, "the config template doesn't mention `candidates`"
+    assert all(line.lstrip().startswith("#") for line in mentions), \
+        "the `candidates` example must be commented out, not active, in the shipped template"
+    assert any("candidates" in line and "build" in line for line in mentions), \
+        "no commented example of a build step with candidates"
+    assert any(re.match(r"# [A-Z].*candidate", line) for line in template.splitlines()), \
+        "no one-line comment explaining the `candidates` example"
+
+
+def test_the_factory_ops_skill_covers_candidates():
+    """The factory-ops skill covers choosing a flow with candidates and reading a task's candidate runs."""
+    skill = (PACKAGE / "templates/skills/factory-ops/SKILL.md").read_text()
+    assert "candidates" in skill, "the factory-ops skill doesn't mention `candidates`"
+    assert any("candidates" in line and ("--flow" in line or "flow:" in line or "flows:" in line)
+               for line in skill.splitlines()), \
+        "the skill doesn't cover choosing a flow with candidates"
+    assert any("candidate" in line and "factory show" in line for line in skill.splitlines()), \
+        "the skill doesn't cover reading a task's candidate runs"
