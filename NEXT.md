@@ -24,6 +24,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 17 | Plans can't be read on the web page, and a task doesn't link to the plan that explains it. Planned: [plan-pages](docs/plans/plan-pages.md) | small | 10 |
 | 18 | The backlog moves only while someone is at the terminal. Planned: [devbox](docs/plans/devbox.md) | medium | — |
 | 20 | Follow a task’s agent thoughts across runs and retries in the terminal and web UI. [Thought timeline](docs/plans/thought-timeline.md) | small | 10, 12 (shipped) |
+| 22 | Measure whether configured agents still solve representative tasks within their usual time. [Live agent-loop evaluation](docs/plans/agent-loop-perf.md) | medium | bench, strict-flow (shipped) |
 
 ## 1. Act on human PR review comments
 
@@ -254,3 +255,7 @@ The [factory-spec plan](docs/plans/factory-spec.md) covers the behavior shipped 
 ## 20. Follow a task's agent thoughts
 
 Today an operator opens a separate transcript for each agent run. The [thought timeline](docs/plans/thought-timeline.md) brings every recorded thought for one task into `factory thoughts TASK` and a **Thoughts** link on the task page. Each entry identifies the agent, attempt and turn, shows the tool names or a short reply excerpt, and points to its full transcript. The CLI can follow and the web page refreshes as replies arrive. No current workstream waits on this one.
+
+## 22. Measure live agent-loop performance
+
+A real PR-description task took 17.1 minutes under `default` and 46.5 under `strict` on one replay. Their builders took about the same time. The [agent-loop performance plan](docs/plans/agent-loop-perf.md) runs both flows with their configured role models on three historical workloads. Maintainers can compare two revisions on demand or from a timer. The verdict checks held-out correctness first, then repeated changes in task time. Role-level timings and spend explain the result. This uses the shipped bench and strict flow. No current plan depends on it.
