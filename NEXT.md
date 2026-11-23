@@ -24,6 +24,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 17 | Plans can't be read on the web page, and a task doesn't link to the plan that explains it. Planned: [plan-pages](docs/plans/plan-pages.md) | small | 10 |
 | 18 | The backlog moves only while someone is at the terminal. Planned: [devbox](docs/plans/devbox.md) | medium | — |
 | 20 | Follow a task’s agent thoughts across runs and retries in the terminal and web UI. [Thought timeline](docs/plans/thought-timeline.md) | small | 10, 12 (shipped) |
+| 21 | Nothing measures the factory against outside benchmarks or on security work, and the SWE-bench Verified target is retired. Planned: [external-evals](docs/plans/external-evals.md) | large | evals, 16 |
 
 ## 1. Act on human PR review comments
 
@@ -254,3 +255,20 @@ The [factory-spec plan](docs/plans/factory-spec.md) covers the behavior shipped 
 ## 20. Follow a task's agent thoughts
 
 Today an operator opens a separate transcript for each agent run. The [thought timeline](docs/plans/thought-timeline.md) brings every recorded thought for one task into `factory thoughts TASK` and a **Thoughts** link on the task page. Each entry identifies the agent, attempt and turn, shows the tool names or a short reply excerpt, and points to its full transcript. The CLI can follow and the web page refreshes as replies arrive. No current workstream waits on this one.
+
+## 21. Nothing measures the factory against outside benchmarks
+
+**Gap.** Every number the factory has comes from its own cases:
+- The shipped bench suite is saturated (60 of 60 cells solved), and the planned [evals](docs/plans/evals.md) suite mines this repository's own merged tasks. It locked "no external benchmark is imported".
+- The by-hand `experiment/swe-bench` plan targets SWE-bench Verified, which OpenAI stopped reporting in February 2026 as contaminated. SWE-bench Pro is its replacement.
+- Nothing says whether the factory can fix a vulnerability, or whether [security-review](docs/plans/security-review.md)'s `secure` flow helps it.
+- The sandbox is bubblewrap only, so a repository that needs its own image can't run, and Go and JavaScript test runs don't count as tests.
+
+**Seen in.** SWE-bench Pro scores agents by re-grading each diff on a pristine image with [Harbor](https://github.com/harbor-framework/harbor). [PatchEval](https://github.com/bytedance/PatchEval) scores CVE patches with each image's PoC validation.
+
+**Plan.** [docs/plans/external-evals.md](docs/plans/external-evals.md) (planned 2026-11-22, tasks `external-evals-t01`…`t10`, after evals' code tasks). It supersedes the `experiment/swe-bench` plan:
+- A Docker sandbox runs every agent command and gate in a case's own image, offline, as the host user, with the image's copies of the fix hidden.
+- `go test`, jest, mocha and vitest count as tests.
+- `factory bench prepare swebench-pro` and `factory bench prepare patcheval` turn a seeded, stratified sample (50 Pro instances, 40 CVEs) into bench cases. Each benchmark's official scorer decides `solved`.
+- `factory bench check` proves each case first: the test template runs, no copy of the fix is readable, the gold patch resolves and an empty one doesn't. `report` gives resolved out of every sampled instance with an interval, and `export` writes each benchmark's submission format.
+- By hand: strict on both suites, then secure against strict.
