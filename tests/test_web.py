@@ -445,7 +445,7 @@ def test_task_page_shows_the_contract_with_what_it_waits_for_and_what_needs_it(h
     assert status_code == 200
     assert "<title>Show the whole contract · demo</title>" in body
     assert '<li><a href="/">Board</a></li>' in body
-    assert '<li><a href="/#plan-demo">demo</a></li>' in body
+    assert '<li><a href="/plans/demo#task-page-t02">demo</a></li>' in body
     assert "<li>page-t02</li>" in body
     assert '<div class="task-id"><span>page-t02</span><span class="status s-failed">' in body
     assert '<h1 class="task-goal">Show the whole contract</h1>' in body
@@ -572,7 +572,7 @@ def test_transcript_page_shows_each_step_with_its_calls_and_results(home, repo):
     assert status == 200
     assert "<title>trace-t01, build 3 · demo</title>" in body
     assert '<li><a href="/">Board</a></li>' in body
-    assert '<li><a href="/#plan-demo">demo</a></li>' in body
+    assert '<li><a href="/plans/demo#task-trace-t01">demo</a></li>' in body
     assert '<li><a href="/tasks/trace-t01">trace-t01</a></li>' in body
     assert "<li>build 3</li>" in body
     assert '<div class="task-id"><span>build 3</span><span class="outcome o-good">committed</span></div>' in body
@@ -1448,6 +1448,7 @@ def test_run_form_lists_what_will_run_and_previews_the_command(home, repo, monke
     db.update("empty-t01", status="merged")
     db.update("empty-t02", status="pr_open")
     db.close()
+    _write_plan(repo, "# Plan: Form\n\nThe form plan.\n", "docs/plans/form/form.md")
     app = App(home, repo)
 
     status, _, body = _get(app, "/run?plan=form")
@@ -1455,7 +1456,7 @@ def test_run_form_lists_what_will_run_and_previews_the_command(home, repo, monke
     assert "<title>Run form · demo</title>" in body
     assert '<h1 class="lede">Run the form plan.</h1>' in body
     assert '<li><a href="/">Board</a></li>' in body
-    assert '<li><a href="/#plan-form">form</a></li>' in body
+    assert '<li><a href="/plans/form">form</a></li>' in body
     assert '<h2 id="h-what">What will run <span class="count">4 now, 2 later</span></h2>' in body
     what = re.search(r'<section class="block" aria-labelledby="h-what">(.*?)</section>', body, re.S).group(1)
     rows = re.findall(r'<li class="row">(.*?)</li>', what, re.S)
@@ -2330,3 +2331,90 @@ def test_a_plan_deleted_during_discovery_is_skipped(home, repo, monkeypatch):
     status, _, body = _get(App(home, repo), "/plans")
     assert status == 200
     assert '<h1 class="lede">No plans yet.</h1>' in body
+
+
+# --------------------------------- links between plans and tasks (plan-pages-t03)
+
+def test_board_plan_cards_link_to_their_plan_pages(home, repo):
+    db = _board(home, [_contract("card-t01")])
+    _add(db, [_contract("leaf-t01")], "docs/plans/leaf/leaf.md")
+    _add(db, [_contract("gone-t01")], "docs/plans/gone/gone.md")
+    db.close()
+    (repo / "docs/plans/leaf").mkdir(parents=True)
+    (repo / "docs/plans/leaf/leaf.md").write_text(plan_text(_contract("leaf-t01")))
+
+    status, _, body = _get(App(home, repo))
+    assert status == 200
+    # a card whose plan file is among the plan docs starts its .plan-end with the link
+    for name in ("demo", "leaf"):
+        assert (f'<span class="plan-end"><a class="btn btn-quiet" href="/plans/{name}">'
+                'Read the plan</a>') in body
+    # a card whose plan file no longer exists has no such link
+    gone = re.search(r'<details class="plan" id="plan-gone"[^>]*>(.*?)</details>', body, re.S).group(1)
+    assert "Read the plan" not in gone
+    assert body.count("Read the plan") == 2
+
+
+def test_breadcrumbs_go_to_the_tasks_row_on_its_plan_page(home, repo):
+    db = _board(home, [_contract("crumb-t01")])
+    run = db.start_run("crumb-t01", "build", 1)
+    _write_transcript(db, home, "crumb-t01", run, [_system(0, "prompt"), _ai(1, 1, "done")])
+    db.finish_run(run, "committed")
+    _add(db, [_contract("lost-t01")], "docs/plans/lost/lost.md")
+    lost = db.start_run("lost-t01", "build", 1)
+    _write_transcript(db, home, "lost-t01", lost, [_system(0, "prompt"), _ai(1, 1, "done")])
+    db.finish_run(lost, "committed")
+    _add(db, [_contract("done-t01")], "docs/plans/done/done.md")
+    db.update("done-t01", status="merged")
+    db.close()
+    app = App(home, repo)
+
+    # the plan crumb goes to the task's row on its plan page
+    crumb = '<li><a href="/plans/demo#task-crumb-t01">demo</a></li>'
+    for path in ("/tasks/crumb-t01", f"/tasks/crumb-t01/runs/{run}", "/run?task=crumb-t01"):
+        status, _, body = _get(app, path)
+        assert status == 200
+        assert crumb in body
+    # a plan's run form points at the plan page itself, not a task row
+    status, _, body = _get(app, "/run?plan=demo")
+    assert status == 200
+    assert '<li><a href="/plans/demo">demo</a></li>' in body
+
+    # a plan file that no longer exists falls back to the board's plan card
+    fallback = '<li><a href="/#plan-lost">lost</a></li>'
+    for path in ("/tasks/lost-t01", f"/tasks/lost-t01/runs/{lost}",
+                 "/run?task=lost-t01", "/run?plan=lost"):
+        status, _, body = _get(app, path)
+        assert status == 200
+        assert fallback in body
+
+    # the Back to PLAN link on an error page is unchanged
+    status, _, body = _post(app, "run", {"target": "done", "max_cost": "5.00"})
+    assert status == 409
+    assert '<a href="/#plan-done">Back to done</a>' in body
+
+
+def test_task_page_links_spec_refs_into_plan_pages(home, repo):
+    contract = """- id: reads-t01
+  goal: "Read the plan sections this task names"
+  spec_refs: ["docs/plans/demo/demo.md", "docs/plans/demo/demo.md#links-between-plans-and-tasks",
+              "docs/spec/greeting.md#hello", "docs/plans/webui.md#task-page"]
+  depends_on: []
+  non_goals: []
+  acceptance: ["Done"]
+  verification: ["true"]
+  risk: low
+"""
+    _board(home, [contract]).close()
+
+    status, _, body = _get(App(home, repo), "/tasks/reads-t01")
+    assert status == 200
+    reads = re.search(r"<h3>Reads</h3>(.*?)</ul>", body, re.S).group(1)
+    # a spec ref naming a plan doc becomes a link into its plan page, keeping any fragment
+    assert ('<li class="mono"><a href="/plans/demo">docs/plans/demo/demo.md</a></li>' in reads)
+    assert ('<li class="mono"><a href="/plans/demo#links-between-plans-and-tasks">'
+            'docs/plans/demo/demo.md#links-between-plans-and-tasks</a></li>' in reads)
+    # every other spec ref stays text
+    assert '<li class="mono">docs/spec/greeting.md#hello</li>' in reads
+    assert '<li class="mono">docs/plans/webui.md#task-page</li>' in reads
+    assert reads.count("<li") == 4 and reads.count("<a ") == 2
