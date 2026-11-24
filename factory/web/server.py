@@ -6,6 +6,7 @@ import importlib.resources
 import re
 import secrets
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -14,7 +15,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 from .. import config, observe
 from ..db import ACTIVE, open_db, pid_alive
 from ..scheduler import plan_pid_file
-from . import jobs, views
+from . import jobs, plans, views
 
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; "
        "connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
@@ -42,6 +43,8 @@ class App:
         self.port: int | None = None
         self.token = secrets.token_urlsafe(32)
         self.launch = launch or jobs.default_launch
+        self._plan_cache = {}
+        self._plans_lock = threading.Lock()
         static = importlib.resources.files("factory.web") / "static"
         self.static = {name: (static / name).read_bytes() for name in STATIC_TYPES}
 
@@ -322,6 +325,29 @@ class App:
             try:
                 page = views.board(db, self.config, self.home, self.port, self.token,
                                    self._notice_job(request_path)).encode()
+            finally:
+                db.close()
+            return self._response(200, "text/html; charset=utf-8", page)
+        if path == "/plans" or (path.startswith("/plans/") and "/" not in path[len("/plans/"):]):
+            with self._plans_lock:
+                docs = plans.load_docs(self.root, self.config, self._plan_cache)
+            if path == "/plans":
+                db = open_db(self.home, readonly=True)
+                try:
+                    page = plans.plans_page(db, docs, self.config, self.home, self.port,
+                                            self.token).encode()
+                finally:
+                    db.close()
+                return self._response(200, "text/html; charset=utf-8", page)
+            name = path[len("/plans/"):]
+            matches = [doc for doc in docs if doc.name == name]
+            if len(matches) != 1:
+                page = plans.plan_error(name, matches, self.config, self.home, self.port).encode()
+                return self._response(404, "text/html; charset=utf-8", page)
+            db = open_db(self.home, readonly=True)
+            try:
+                page = plans.plan_page(db, matches[0], docs, self.config, self.home, self.port,
+                                       self.token).encode()
             finally:
                 db.close()
             return self._response(200, "text/html; charset=utf-8", page)

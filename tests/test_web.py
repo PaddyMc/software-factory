@@ -17,13 +17,14 @@ import urllib.request
 import webbrowser
 from collections import Counter
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 from urllib.parse import quote, urlencode
 from html.parser import HTMLParser
 
 import pytest
 
-from factory import observe
+from factory import contracts, observe
 from factory.cli import main
 from factory.contracts import Task, parse_text
 from factory.db import open_db
@@ -1405,7 +1406,8 @@ def test_activity_lists_jobs_newest_first_with_their_output(home, repo):
     assert body.count("Stop this run") == 1
     assert 'title="factory stop demo" href="/confirm?action=stop&amp;target=demo"' in body
     assert '<main class="wrap" data-refresh="2">' in body
-    assert '<a href="/">Board</a><a href="/activity" aria-current="page">Activity</a>' in body
+    assert ('<a href="/">Board</a><a href="/plans">Plans</a>'
+            '<a href="/activity" aria-current="page">Activity</a>') in body
     for text in (
             '<span class="t">12:00:00</span> <span class="tag">alpha</span> [build] alpha zero',
             '<span class="t">12:00:01</span> <span class="tag">beta</span> [review] beta one',
@@ -1739,3 +1741,592 @@ def test_run_buttons_appear_where_a_run_would_do_something(home, repo):
     assert "Run again" not in pr_open
     _, _, running = _get(app, "/tasks/onlyrun-t01")
     assert "Run again" not in running
+
+
+# --------------------------------------------------------- plan pages (plan-pages-t02)
+
+def _write_plan(repo, text, plan=PLAN):
+    """Overwrite a plan doc in the checkout; the page reads the checkout, not the board."""
+    (repo / plan).write_text(text)
+    return repo / plan
+
+
+def _task_row(body, task_id):
+    match = re.search(rf'<li class="row" id="task-{task_id}">(.*?)</li>', body, re.S)
+    assert match, f"the plan page has no row for {task_id}"
+    return match.group(1)
+
+
+def test_plan_page_renders_the_plan_from_the_checkout_with_its_contents(home, repo):
+    db = _board(home, [_contract("demo-t01"), _contract("demo-t02", depends=["demo-t01"])])
+    db.update("demo-t01", cost_usd=0.5)
+    db.close()
+    _write_plan(repo, f"""# Plan: Demo workstream
+
+Intro prose.
+
+## Execution Plan
+
+Plan body.
+
+### Locked Decisions
+
+Decision detail.
+
+## Problem
+
+The problem.
+
+```yaml
+{_contract("demo-t01")}{_contract("demo-t02", depends=["demo-t01"])}```
+
+After the contracts.
+""")
+    app = App(home, repo)
+    status, _, body = _get(app, "/plans/demo")
+    assert status == 200
+    assert "<title>demo · demo</title>" in body
+    crumbs = re.search(r'<ol class="crumbs">(.*?)</ol>', body, re.S).group(1)
+    assert re.search(r'<li><a href="/">Board</a></li>\s*<li><a href="/plans">Plans</a></li>\s*<li>demo</li>',
+                     crumbs)
+    assert '<h1 class="lede">Demo workstream</h1>' in body
+    facts = re.search(r'<dl class="facts">(.*?)</dl>', body, re.S).group(1)
+    assert "<dt>tasks</dt>" in facts and "<dt>status</dt>" in facts
+    assert "<dt>spent</dt>" in facts and "<dt>file</dt>" in facts
+    assert ('<span class="strip" role="img" aria-label="1 ready, 1 waiting">'
+            '<i class="s-ready"></i><i class="s-waiting"></i></span>') in facts
+    assert "0 of 2 merged, 1 ready, 1 waiting" in facts
+    assert "$0.50" in facts and "docs/plans/demo/demo.md" in facts
+    acts = re.search(r'<div class="page-acts">(.*?)</div>', body, re.S).group(1)
+    assert '<a class="btn" href="/run?plan=demo">Run plan</a>' in acts
+    assert '<a class="btn btn-quiet" href="/#plan-demo">Show on the board</a>' in acts
+    toc = re.search(r'<nav class="toc"(.*?)</nav>', body, re.S).group(1)
+    assert '<a href="#execution-plan">Execution Plan</a>' in toc
+    assert '<a href="#locked-decisions">Locked Decisions</a>' in toc
+    assert '<a href="#problem">Problem</a>' in toc
+    assert re.search(r'<li><a href="#execution-plan">Execution Plan</a>\s*<ol>\s*'
+                     r'<li><a href="#locked-decisions">Locked Decisions</a></li>\s*</ol>\s*</li>', toc)
+    assert re.search(r'<li><a href="#problem">Problem</a></li>', toc)
+    assert '<h2 id="h-toc">Contents</h2>' in body
+    assert '<div class="prose">' in body
+    assert "<p>Intro prose.</p>" in body and "<p>After the contracts.</p>" in body
+    assert '<h2 id="execution-plan">Execution Plan</h2>' in body
+    assert '<h3 id="locked-decisions">Locked Decisions</h3>' in body
+    assert "<main class=\"wrap\">" in body and "data-refresh" not in body
+    assert "notice-you" not in body and "notice-bad" not in body
+
+    # a plan without level-2 headings leaves the contents out, and a plan with no
+    # task on the board offers neither Run plan nor Show on the board
+    (repo / "docs/plans/flat").mkdir(parents=True)
+    _write_plan(repo, "# Flat plan\n\nOnly prose, no headings.\n", "docs/plans/flat/flat.md")
+    status, _, flat = _get(app, "/plans/flat")
+    assert status == 200
+    assert '<h1 class="lede">Flat plan</h1>' in flat
+    assert "docs/plans/flat/flat.md" in flat
+    assert 'class="toc"' not in flat
+    assert "Run plan" not in flat and "Show on the board" not in flat
+    assert "notice-you" not in flat and "notice-bad" not in flat
+
+
+def test_plan_page_shows_each_contract_as_a_task_row_with_its_board_status(home, repo):
+    on_board = [_contract("demo-t01", goal="Old goal"), _contract("demo-t02", depends=["demo-t01"]),
+                _contract("demo-t04")]
+    db = _board(home, on_board)
+    db.update("demo-t04", status="pr_open", pr_url="https://github.test/pr/7",
+              attempts=2, cost_usd=1.25)
+    db.close()
+    block_one = (_contract("demo-t01", goal="Goal from the file")
+                 + _contract("demo-t02", depends=["demo-t01"]))
+    block_two = _contract("demo-t03", depends=["demo-t01"]) + _contract("demo-t04")
+    _write_plan(repo, f"""# Plan: Demo
+
+Prose.
+
+```yaml
+{block_one}```
+
+```python
+print("demo")
+```
+
+```yaml
+{block_two}```
+
+```yaml
+- name: not a contract
+  value: no id key
+```
+
+After.
+""")
+    app = App(home, repo)
+    status, _, body = _get(app, "/plans/demo")
+    assert status == 200
+    assert body.count('<ul class="rows task-cards">') == 2
+    assert re.findall(r'<li class="row" id="task-([^"]+)">', body) == [
+        "demo-t01", "demo-t02", "demo-t03", "demo-t04"]
+
+    # on the board: the board's word, class and mark, the id linked, the goal from the file
+    row = _task_row(body, "demo-t01")
+    assert '<span class="status s-ready"><i class="mark"></i>Ready</span>' in row
+    assert '<a class="id" href="/tasks/demo-t01">demo-t01</a>' in row
+    assert "Goal from the file" in row and "Old goal" not in body
+    assert 'class="why"' not in row
+    assert '<span class="num quiet">low</span>' in row
+
+    # a waiting task says what it waits for, as the board's readiness does, with links
+    row = _task_row(body, "demo-t02")
+    assert '<span class="status s-waiting"><i class="mark"></i>Waiting</span>' in row
+    assert '<a class="id" href="/tasks/demo-t02">demo-t02</a>' in row
+    assert 'waits for <a href="/tasks/demo-t01">demo-t01' in row
+    assert "Goal for demo-t02" in row
+
+    # not on the board: Not loaded, a plain id span, the file's goal and depends_on
+    row = _task_row(body, "demo-t03")
+    assert '<span class="status s-new"><i class="mark"></i>Not loaded</span>' in row
+    assert '<span class="id">demo-t03</span>' in row and 'href="/tasks/demo-t03"' not in row
+    assert "Goal for demo-t03" in row
+    assert 'waits for <a href="/tasks/demo-t01">demo-t01' in row
+    assert '<span class="num quiet">low</span>' in row
+    assert not re.search(r">[^<]*build", row) and "$" not in row
+
+    # a task with a pull request: the PR number links to the PR; the end shows builds and cost
+    row = _task_row(body, "demo-t04")
+    assert '<span class="status s-pr"><i class="mark"></i>PR open</span>' in row
+    assert '<a href="https://github.test/pr/7">pull request #7</a>' in row
+    assert ('<span class="num quiet">low</span><span class="num quiet builds">2 builds</span>'
+            '<span class="num cost">$1.25</span>') in row
+
+    # the board shows the same status spans for these tasks
+    _, _, board = _get(app)
+    for span in ('<span class="status s-ready"><i class="mark"></i>Ready</span>',
+                 '<span class="status s-waiting"><i class="mark"></i>Waiting</span>',
+                 '<span class="status s-pr"><i class="mark"></i>PR open</span>'):
+        assert span in board
+
+    # the YAML as written follows the rows under a fold, escaped
+    folds = re.findall(r'<details class="fold" id="contracts-\d+">(.*?)</details>', body, re.S)
+    assert re.findall(r'<details class="fold" id="contracts-(\d+)"', body) == ["1", "2"]
+    assert body.count("<summary>The contracts as written, 2 tasks</summary>") == 2
+    assert "- id: demo-t01" in folds[0] and "- id: demo-t02" in folds[0]
+    assert "&quot;Goal from the file&quot;" in folds[0]
+    assert "- id: demo-t03" in folds[1] and "&quot;Goal for demo-t03&quot;" in folds[1]
+
+    # every other fenced block stays code
+    assert '<pre class="code"><code>print(&quot;demo&quot;)</code></pre>' in body
+    assert '<pre class="code"><code>- name: not a contract' in body
+
+
+def test_plan_page_links_task_ids_and_other_plans(home, repo):
+    db = _board(home, [_contract("demo-t01"), _contract("demo-t02")])
+    db.update("demo-t01", status="merged")
+    db.close()
+    (repo / "docs/plans/demo/other.md").write_text("# Plan: Other\n\nText.\n")
+    (repo / "docs/plans/second.md").write_text("# Plan: Second workstream\n\nText.\n")
+    _write_plan(repo, f"""# Plan: Demo
+
+See demo-t01 and `demo-t02` in code, not demo-t09.
+
+[other](other.md#part), [second](../second.md), [self](demo.md#problem),
+[site](https://github.test/x), [plain](http://github.test/y), [anchor](#problem),
+[next](../../NEXT.md#three), [db](factory/db.py).
+
+## Problem
+
+Text.
+
+```yaml
+{_contract("demo-t01")}{_contract("demo-t02")}```
+""")
+    status, _, body = _get(App(home, repo), "/plans/demo")
+    assert status == 200
+    # a task id on the board, as a word and as a whole code span, with its status class
+    assert '<a class="task-ref" href="/tasks/demo-t01"><i class="s-merged"></i>demo-t01</a>' in body
+    assert '<a class="task-ref" href="/tasks/demo-t02"><i class="s-ready"></i><code>demo-t02</code></a>' in body
+    # an id that isn't on the board stays text
+    assert "demo-t09" in body and 'href="/tasks/demo-t09"' not in body
+    # a relative target that resolves to a plan doc goes to its plan page, keeping the fragment
+    assert '<a href="/plans/other#part">other</a>' in body
+    assert '<a href="/plans/second">second</a>' in body
+    assert '<a href="/plans/demo#problem">self</a>' in body
+    # https, http and fragment targets are kept
+    assert '<a href="https://github.test/x">site</a>' in body
+    assert '<a href="http://github.test/y">plain</a>' in body
+    assert '<a href="#problem">anchor</a>' in body
+    # every other target loses its link, with the target in the title
+    assert '<span class="ref" title="../../NEXT.md#three">next</span>' in body
+    assert '<span class="ref" title="factory/db.py">db</span>' in body
+    assert 'href="../../NEXT.md' not in body and 'href="factory/db.py"' not in body
+
+
+def test_plan_page_says_when_the_plan_and_the_board_disagree(home, repo):
+    def drift(board, file_yaml):
+        db = _board(home)
+        db.conn.execute("DELETE FROM tasks")
+        db.conn.commit()
+        for contracts, plan in board:
+            _add(db, contracts, plan)
+        db.close()
+        _write_plan(repo, f"# Plan: Demo\n\nText.\n\n```yaml\n{file_yaml}```\n")
+        app = App(home, repo)
+        return _get(app, "/plans/demo")[2]
+
+    same = [_contract("demo-t01"), _contract("demo-t02", depends=["demo-t01"])]
+    body = drift([(same, PLAN)], "".join(same))
+    assert "This plan has changed" not in body and '<div class="notice' not in body
+    assert 'action="/actions/sync"' not in body
+
+    # two new, one changed, one removed: every non-zero part, in order
+    body = drift([([_contract("demo-t01", goal="Old goal"), _contract("demo-t02")], PLAN)],
+                 _contract("demo-t01", goal="New goal") + _contract("demo-t03")
+                 + _contract("demo-t04"))
+    assert ('This plan has changed since the board loaded it: '
+            '2 new tasks, 1 changed, 1 removed. Load plans to bring the board up to date.') in body
+    notice = re.search(r'<div class="notice notice-you".*?</div>', body, re.S).group(0)
+    assert 'action="/actions/sync"' in notice and 'name="token"' in notice
+    assert '<input type="hidden" name="next" value="/plans/demo">' in notice
+    assert 'title="factory sync"' in notice and ">Load plans</button>" in notice
+
+    # one new task, singular
+    body = drift([([_contract("demo-t01")], PLAN)],
+                 _contract("demo-t01") + _contract("demo-t03"))
+    assert ('This plan has changed since the board loaded it: '
+            '1 new task. Load plans to bring the board up to date.') in body
+
+    # only a changed contract
+    body = drift([([_contract("demo-t01", goal="Old goal")], PLAN)],
+                 _contract("demo-t01", goal="New goal"))
+    assert ('This plan has changed since the board loaded it: '
+            '1 changed. Load plans to bring the board up to date.') in body
+
+    # only a task the board still holds that the file no longer has
+    body = drift([([_contract("demo-t01"), _contract("demo-t02")], PLAN)],
+                 _contract("demo-t01"))
+    assert ('This plan has changed since the board loaded it: '
+            '1 removed. Load plans to bring the board up to date.') in body
+
+    # a board row of another plan's file isn't this plan's removal
+    body = drift([([_contract("demo-t01"), _contract("demo-t02")], PLAN),
+                  ([_contract("elsewhere-t01")], "docs/plans/elsewhere/elsewhere.md")],
+                 _contract("demo-t01"))
+    assert ('This plan has changed since the board loaded it: '
+            '1 removed. Load plans to bring the board up to date.') in body
+
+
+def test_plan_page_with_contracts_the_board_cant_load(home, repo):
+    broken = """- id: demo-t01
+  goal: "Broken contract"
+  spec_refs: []
+  depends_on: []
+  acceptance: ["Done"]
+  verification: ["true"]
+  risk: low
+"""
+    db = _board(home)
+    db.conn.execute("DELETE FROM tasks")
+    db.conn.commit()
+    db.close()
+    _write_plan(repo, f"""# Plan: Demo
+
+Intro.
+
+```yaml
+{broken}```
+
+```python
+print("demo")
+```
+
+More prose.
+""")
+    status, _, body = _get(App(home, repo), "/plans/demo")
+    assert status == 200
+    assert '<div class="notice notice-bad"' in body
+    assert html.escape("The board can't load this plan's contracts:", quote=True) in body
+    assert html.escape("task 'demo-t01' missing=", quote=True) in body
+    assert "notice-you" not in body
+    # the file's contracts can't be loaded, so every block stays code
+    assert '<ul class="rows task-cards">' not in body
+    assert '<details class="fold"' not in body
+    assert '<pre class="code"><code>- id: demo-t01' in body
+    assert "&quot;Broken contract&quot;" in body
+    assert '<pre class="code"><code>print(&quot;demo&quot;)</code></pre>' in body
+
+
+def test_unknown_and_ambiguous_plan_names_are_404s(home, repo):
+    _board(home).close()
+    (repo / "docs/plans/a").mkdir(parents=True)
+    (repo / "docs/plans/b").mkdir(parents=True)
+    (repo / "docs/plans/a/dup.md").write_text("# Plan: Dup a\n")
+    (repo / "docs/plans/b/dup.md").write_text("# Plan: Dup b\n")
+    app = App(home, repo)
+    assert _get(app, "/plans/demo")[0] == 200
+
+    status, _, body = _get(app, "/plans/nope")
+    assert status == 404
+    assert html.escape("nope isn't a plan in this repository", quote=True) in body
+    assert 'href="/plans"' in body
+
+    status, _, body = _get(app, "/plans/dup")
+    assert status == 404
+    assert "docs/plans/a/dup.md" in body and "docs/plans/b/dup.md" in body
+
+    # the name is looked up among plan stems, never read as a path
+    for name in ("demo.md", "docs%2Fplans%2Fdemo%2Fdemo.md", "..%2FAGENTS.md", "AGENTS.md"):
+        status, _, body = _get(app, f"/plans/{name}")
+        assert status == 404
+        assert '<div class="prose">' not in body
+        assert '<h1 class="lede">Demo' not in body
+
+    # the file is read as UTF-8 with invalid bytes replaced
+    odd = repo / "docs/plans/odd"
+    odd.mkdir(parents=True)
+    (odd / "odd.md").write_bytes(b"# Plan: Odd\n\nBad \xff byte here.\n\n```yaml\n"
+                                 + _contract("odd-t01").encode() + b"```\n")
+    status, _, body = _get(app, "/plans/odd")
+    assert status == 200
+    assert '<h1 class="lede">Odd</h1>' in body
+    assert "Bad \ufffd byte here." in body
+
+
+class _Carried(HTMLParser):
+    """Every tag and attribute the page itself carries, to prove plan text adds none."""
+
+    def __init__(self):
+        super().__init__()
+        self.scripts, self.dangerous = [], []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "script":
+            self.scripts.append(dict(attrs).get("src"))
+        self.dangerous += [name for name, _ in attrs if name.startswith("on") or name == "style"]
+
+
+def test_plan_pages_escape_the_plan_text(home, repo):
+    db = _board(home, [_contract("demo-t01", goal="Goal with <script>alert(1)</script> markup")])
+    db.close()
+    _write_plan(repo, f"""# Plan: <script>alert(1)</script> Demo
+
+<script>alert(1)</script>
+
+<div onmouseover="x()">hi</div>
+
+Raw <img src=x onerror=alert(1)> image, a [bad](javascript:alert(1)) link and a [good](https://ok.test) one.
+
+```yaml
+{_contract("demo-t01", goal="Goal with <script>alert(1)</script> markup")}```
+
+After.
+""")
+    app = App(home, repo)
+    status, _, body = _get(app, "/plans/demo")
+    assert status == 200
+    assert "<script>alert" not in body
+    assert html.escape("<script>alert(1)</script>", quote=True) in body
+    assert html.escape('<div onmouseover="x()">hi</div>', quote=True) in body
+    assert html.escape("<img src=x onerror=alert(1)>", quote=True) in body
+    assert html.escape("Goal with <script>alert(1)</script> markup", quote=True) in body
+    assert 'href="javascript:' not in body
+    assert '<span class="ref" title="javascript:alert(1)">bad</span>' in body
+    assert '<a href="https://ok.test">good</a>' in body
+
+    for page in (body, _get(app, "/plans")[2]):
+        carried = _Carried()
+        carried.feed(page)
+        assert carried.scripts == ["/static/app.js"]
+        assert carried.dangerous == []
+
+
+def test_plans_page_lists_every_plan_doc_with_its_status(home, repo):
+    db = _board(home, [_contract("demo-t01"), _contract("demo-t02", depends=["demo-t01"])])
+    db.update("demo-t01", status="merged", cost_usd=1.5)
+    waiting = db.contract("demo-t02")
+    db.upsert_task(replace(waiting, depends_on=(*waiting.depends_on, "demo-t99")))
+    db.close()
+    (repo / "docs/plans/alpha.md").write_text(f"# Plan: Alpha workstream\n\nText.\n")
+    (repo / "docs/plans/alpha.md").write_text(
+        (repo / "docs/plans/alpha.md").read_text() + "\n```yaml\n" + _contract("alpha-t01") + "```\n")
+    (repo / "docs/plans/second").mkdir(parents=True)
+    (repo / "docs/plans/second/second.md").write_text(f"# Plan: Second workstream\n\nText.\n")
+    (repo / "docs/plans/second/second.md").write_text(
+        (repo / "docs/plans/second/second.md").read_text() + "\n```yaml\n" + _contract("second-t01") + "```\n")
+    (repo / "docs/plans/notes").mkdir(parents=True)
+    (repo / "docs/plans/notes/empty.md").write_text("# Empty plan\n\nJust prose, no contracts.\n")
+    status, _, body = _get(App(home, repo), "/plans")
+    assert status == 200
+    assert "<title>Plans · demo</title>" in body
+    assert '<main class="wrap" data-refresh="2">' in body
+    # demo has a waiting task, alpha and second have contracts but no board task, empty has none
+    assert ('<h1 class="lede">' + html.escape("4 plans, 1 with work left. 2 aren't on the board yet.",
+                                              quote=True) + "</h1>") in body
+    heading = re.search(r'<h2 id="h-plans">(.*?)</h2>', body, re.S).group(1)
+    assert 'Plans <span class="count">4</span>' in heading
+    assert "docs/plans/**/*.md" in heading
+
+    rows = dict(re.findall(r'<li id="plan-([^"]+)">(.*?)</li>', body, re.S))
+    assert list(rows) == ["alpha", "demo", "empty", "second"]
+    assert '<a class="plan-name" href="/plans/demo">demo</a>' in rows["demo"]
+    assert ('<span class="strip" role="img" aria-label="1 merged, 1 waiting">'
+            '<i class="s-merged"></i><i class="s-waiting"></i></span>') in rows["demo"]
+    assert ('<span class="plan-about"><span class="plan-title">Demo</span>'
+            '<span class="plan-path">docs/plans/demo/demo.md</span></span>') in rows["demo"]
+    assert ('<span class="plan-end"><span class="plan-counts">1 of 2 merged, 1 waiting</span>'
+            '<span class="num">$1.50</span></span>') in rows["demo"]
+    for name, path, title, counts, label in (
+            ("alpha", "docs/plans/alpha.md", "Alpha workstream", "Not on the board yet",
+             "not on the board"),
+            ("empty", "docs/plans/notes/empty.md", "Empty plan", "No task contracts",
+             "no task contracts"),
+            ("second", "docs/plans/second/second.md", "Second workstream", "Not on the board yet",
+             "not on the board")):
+        row = rows[name]
+        assert f'<a class="plan-name" href="/plans/{name}">{name}</a>' in row
+        assert f'<span class="strip" role="img" aria-label="{label}"></span>' in row
+        assert f'<span class="plan-title">{title}</span><span class="plan-path">{path}</span>' in row
+        assert f'<span class="plan-counts">{counts}</span>' in row
+
+    # the top bar runs Load plans, returning to /plans
+    form = re.search(r'<form class="inline" method="post" action="/actions/sync">.*?</form>', body,
+                     re.S).group(0)
+    assert '<input type="hidden" name="next" value="/plans">' in form
+    assert 'title="factory sync"' in form and ">Load plans</button>" in form
+
+    # no plan docs: the lede says so, and the config's plans globs are named
+    for path in sorted((repo / "docs/plans").rglob("*.md"), reverse=True):
+        path.unlink()
+    status, _, body = _get(App(home, repo), "/plans")
+    assert status == 200
+    assert '<h1 class="lede">No plans yet.</h1>' in body
+    assert "docs/plans/**/*.md" in body
+
+
+def test_plan_docs_are_parsed_again_only_when_they_change(home, repo, monkeypatch):
+    (repo / "docs/plans/second").mkdir(parents=True)
+    (repo / "docs/plans/second/second.md").write_text(plan_text(_contract("second-t01")))
+    db = _board(home, [_contract("demo-t01")])
+    db.close()
+
+    parsed = []
+    real = contracts.parse_text
+
+    def counting(text, plan=""):
+        parsed.append(text)
+        return real(text, plan)
+
+    def doc_parses():
+        # a plan doc's text starts with its level-1 heading; a single fenced block doesn't
+        return [text for text in parsed if text.startswith("# ")]
+
+    monkeypatch.setattr(contracts, "parse_text", counting)
+    app = App(home, repo)
+    assert _get(app, "/plans")[0] == 200
+    assert len(doc_parses()) == 2                 # each plan doc, once
+    assert _get(app, "/plans")[0] == 200
+    assert len(doc_parses()) == 2                 # nothing changed: nothing parsed again
+    assert _get(app, "/plans/demo")[0] == 200
+    assert _get(app, "/plans/second")[0] == 200
+    assert len(doc_parses()) == 2                 # a plan page uses the cache too
+
+    path = _write_plan(repo, plan_text(_contract("demo-t01") + _contract("demo-t02", goal="A fresh goal")))
+    assert _get(app, "/plans")[0] == 200
+    assert len(doc_parses()) == 3                 # only the changed file
+    assert [text for text in doc_parses() if "A fresh goal" in text]
+
+    path.write_text(path.read_text())
+    os.utime(path, (0, 0))                        # same size, new modification time
+    assert _get(app, "/plans")[0] == 200
+    assert len(doc_parses()) == 4
+
+
+def test_every_page_has_plans_in_its_navigation(home, repo):
+    db = _board(home, [_contract("demo-t01")])
+    run_id = db.start_run("demo-t01", "build", 1)
+    _write_transcript(db, home, "demo-t01", run_id, [_system(0, "go"), _ai(1, 1, "thinking")])
+    db.close()
+    app = App(home, repo)
+
+    plain = '<a href="/">Board</a><a href="/plans">Plans</a><a href="/activity">Activity</a>'
+    board = ('<a href="/" aria-current="page">Board</a><a href="/plans">Plans</a>'
+             '<a href="/activity">Activity</a>')
+    plans = ('<a href="/">Board</a><a href="/plans" aria-current="page">Plans</a>'
+             '<a href="/activity">Activity</a>')
+    activity = ('<a href="/">Board</a><a href="/plans">Plans</a>'
+                '<a href="/activity" aria-current="page">Activity</a>')
+
+    assert board in _get(app)[2]
+    assert activity in _get(app, "/activity")[2]
+    assert plans in _get(app, "/plans")[2]
+    assert plans in _get(app, "/plans/demo")[2]
+    for path in ("/tasks/demo-t01", f"/tasks/demo-t01/runs/{run_id:05d}",
+                 "/run?task=demo-t01", "/confirm?action=stop&target=demo-t01", "/nope"):
+        assert plain in _get(app, path)[2]
+
+
+def test_plan_pages_show_invalid_yaml_instead_of_failing(home, repo):
+    _write_plan(repo, '# Plan: Demo\n\n```yaml\n- id: demo-t01\n  goal: "unterminated\n```\n')
+    _board(home).close()
+    app = App(home, repo)
+
+    status, _, body = _get(app, "/plans/demo")
+    assert status == 200
+    assert '<div class="notice notice-bad" role="status">' in body
+    assert "The board can&#x27;t load this plan&#x27;s contracts:" in body
+    assert '<ul class="rows task-cards">' not in body
+    assert '<pre class="code"><code>' in body
+    assert _get(app, "/plans")[0] == 200
+
+
+def test_plans_page_uses_board_readiness_and_the_mockup_structure(home, repo):
+    db = _board(home, [_contract("demo-t01"), _contract("demo-t02", depends=["demo-t01"])])
+    db.update("demo-t01", status="merged")
+    db.close()
+    app = App(home, repo)
+
+    assert "1 of 2 merged, 1 ready" in _get(app)[2]
+    status, _, body = _get(app, "/plans")
+    assert status == 200
+    row = re.search(r'<li id="plan-demo">(.*?)</li>', body, re.S).group(1)
+    assert 'aria-label="1 merged, 1 ready"' in row
+    assert '<i class="s-merged"></i><i class="s-ready"></i>' in row
+    assert '<span class="plan-counts">1 of 2 merged, 1 ready</span>' in row
+    assert '<section class="block" aria-labelledby="h-plans">' in body
+    assert '<span class="aside mono">docs/plans/**/*.md</span>' in body
+    assert body.count('class="live-dot"') == 1
+
+
+def test_a_plan_heading_without_contracts_is_not_unloaded(home, repo):
+    _write_plan(repo, "# Plan: Empty workstream\n\nJust prose.\n")
+    _board(home).close()
+    status, _, body = _get(App(home, repo), "/plans")
+
+    assert status == 200
+    assert '<h1 class="lede">1 plan, 0 with work left.</h1>' in body
+    row = re.search(r'<li id="plan-demo">(.*?)</li>', body, re.S).group(1)
+    assert '<span class="plan-counts">No task contracts</span>' in row
+    assert 'aria-label="no task contracts"' in row
+
+
+def test_plan_page_actions_are_inside_the_page_head(home, repo):
+    db = _board(home, [_contract("demo-t01"), _contract("demo-t02", depends=["demo-t01"])])
+    db.close()
+    body = _get(App(home, repo), "/plans/demo")[2]
+
+    before_actions = (body.split('<div class="page-head">', 1)[1]
+                      .split('<div class="page-acts">', 1)[0])
+    assert before_actions.count("<div") == before_actions.count("</div>")
+    assert '</dl><div class="page-acts">' in body
+
+
+def test_a_plan_deleted_during_discovery_is_skipped(home, repo, monkeypatch):
+    _board(home).close()
+    discover = contracts.discover_plans
+
+    def discover_then_delete(root, config):
+        paths = discover(root, config)
+        paths[0].unlink()
+        return paths
+
+    monkeypatch.setattr(contracts, "discover_plans", discover_then_delete)
+    status, _, body = _get(App(home, repo), "/plans")
+    assert status == 200
+    assert '<h1 class="lede">No plans yet.</h1>' in body
