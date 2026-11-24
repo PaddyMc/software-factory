@@ -1,13 +1,19 @@
+import copy
 import re
 import shutil
 from pathlib import Path
 
 import pytest
 import yaml
+from langchain_core.messages import AIMessage
 
-from factory import contracts, gates as G, globs, sandbox, verification
+from factory import agents, config as C, contracts, gates as G, globs, sandbox, verification
+import factory.bench.run as bench_run
 from factory.bench import cases
+from factory.cli import main
 from conftest import git
+from fake_model import ScriptedModel, call
+from test_bench import BENCH_CASES, GOOD_CALC, VISIBLE_TEST, bench_repo
 
 SHIPPED = cases.load_cases()
 
@@ -278,3 +284,217 @@ def test_bad_cases_are_rejected_with_the_reason(problem, reason, tmp_path):
         cases.load_case(directory)
     assert str(error.value).startswith(f"{case_id}:")
     assert reason in str(error.value)
+
+
+# --- evals-t02: pass-to-pass commands, protected paths, grading order and scope metrics -----
+
+TRIVIAL_TEST = (
+    "import unittest\n\n\n"
+    "class TrivialTests(unittest.TestCase):\n"
+    "    def test_nothing(self):\n"
+    "        self.assertTrue(True)\n"
+)
+
+
+def _adder_case(root, *, keys=None, config=None):
+    """A writable copy of the adder case, with top-level case.yaml `keys` set and `config`
+    entries overridden."""
+    case_dir = Path(root) / "adder"
+    shutil.copytree(BENCH_CASES / "adder", case_dir)
+    data = yaml.safe_load((case_dir / "case.yaml").read_text())
+    data.update(keys or {})
+    data["config"].update(config or {})
+    (case_dir / "case.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
+    return case_dir
+
+
+def _plays(writes, *, run="python3 -m unittest -q", extra=()):
+    """Scripts for one lean-flow cell: the builder writes `writes` (path -> text), runs `run`
+    and any `extra` commands, then reports DONE; the reviewer approves."""
+    return {
+        "BUILDER": [
+            *[call("write_file", path=path, content=text) for path, text in writes.items()],
+            *[call("run", command=command) for command in (run, *extra)],
+            AIMessage("Implemented the change and its visible tests.\nRESULT: DONE"),
+        ],
+        "REVIEWER": [call("git_diff", stat=True), "VERDICT"],
+        "_verdicts": [],
+        "_calls": [],
+    }
+
+
+def _run_cell(bench_repo, monkeypatch, case, plays, directory):
+    """Run one lean-flow cell of `case` with a scripted model in the invoking repository the
+    bench runs use, and return the cell's record."""
+    variant = bench_run.variants(C.load(bench_repo), ["lean"], ["scripted:cell"])[0]
+    monkeypatch.setattr(agents, "build_model",
+                        lambda spec: ScriptedModel(plays=copy.deepcopy(plays)))
+    return bench_run.run_cell(bench_repo, case, variant, Path(directory), max_attempts=1,
+                              max_cost=5.0, sandbox_on=shutil.which("bwrap") is not None)
+
+
+def _outside(path, session_log):
+    """Whether a path counts for scope metrics: outside tests/ and the session-log directory."""
+    if path == "tests" or path.startswith("tests/"):
+        return False
+    if session_log and (path == session_log or path.startswith(f"{session_log.rstrip('/')}/")):
+        return False
+    return True
+
+
+def _changed_paths(repo, base, sha):
+    """The paths base..sha changed (modified, added or deleted)."""
+    return [line for line in git(repo, "diff", "--name-only", f"{base}..{sha}").splitlines() if line]
+
+
+def _diff_lines(repo, base, sha, session_log):
+    """Lines added plus deleted by base..sha, outside tests/ and the session-log directory."""
+    total = 0
+    for line in git(repo, "diff", "--numstat", f"{base}..{sha}").splitlines():
+        added, deleted, path = line.split("\t")
+        if _outside(path, session_log):
+            total += int(added) + int(deleted)
+    return total
+
+
+def _reference_scope(case, repo):
+    """Materialize the case and apply its reference solution: the base, the diff-line count the
+    cell should record as reference_lines, and the paths the solution changed."""
+    base = cases.materialize(case, repo)
+    shutil.copytree(case.solution_dir, repo, dirs_exist_ok=True)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "reference solution")
+    sha = git(repo, "rev-parse", "HEAD")
+    return base, _diff_lines(repo, base, sha, case.cfg.session_log), _changed_paths(repo, base, sha)
+
+
+def test_pass_to_pass_and_protected_are_case_keys(tmp_path, capsys):
+    """case.yaml accepts two optional keys: `pass_to_pass`, a list of commands, and `protected`,
+    a list of repository path globs. `hidden` keeps its meaning (the fail-to-pass commands);
+    unknown keys are still refused; `factory bench cases` shows each case's counts of
+    fail-to-pass and pass-to-pass commands and protected globs."""
+    # The keys are optional: a case without them loads with empty tuples.
+    plain = cases.load_case(BENCH_CASES / "adder")
+    assert plain.pass_to_pass == () and plain.protected == ()
+
+    keys = {"pass_to_pass": ["python3 -m unittest -q tests.test_calc"],
+            "protected": ["tests/**", "docs/**"]}
+    case = cases.load_case(_adder_case(tmp_path, keys=keys))
+    assert case.pass_to_pass == ("python3 -m unittest -q tests.test_calc",)
+    assert case.protected == ("tests/**", "docs/**")
+    assert case.hidden == plain.hidden          # hidden keeps its meaning
+
+    # A key that is not a list of non-empty strings is refused; unknown keys still are too.
+    for key, value, reason in (
+        ("pass_to_pass", "python3 -m unittest -q", "pass_to_pass must be a list of non-empty strings"),
+        ("protected", [""], "protected must be a list of non-empty strings"),
+        ("surprise", ["/dev/null"], "unknown key"),
+    ):
+        broken = _adder_case(tmp_path / "broken" / key,
+                             keys={"surprise": ["/dev/null"]} if key == "surprise" else {key: value})
+        with pytest.raises(cases.CaseError) as error:
+            cases.load_case(broken)
+        assert reason in str(error.value)
+
+    capsys.readouterr()
+    assert main(["bench", "cases", "--cases", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert (f"{'adder':<18} {'feature':<12} 1 fail-to-pass · 1 pass-to-pass · 2 protected  "
+            f"{case.title}" in out)
+    assert main(["bench", "cases", "--cases", str(BENCH_CASES)]) == 0
+    out = capsys.readouterr().out
+    assert (f"{'adder':<18} {'feature':<12} 1 fail-to-pass · 0 pass-to-pass · 0 protected  "
+            f"Add integer addition to the calc package" in out)
+
+
+def test_a_candidate_that_breaks_pass_to_pass_is_regressed(bench_repo, tmp_path, monkeypatch):
+    """A verified candidate that breaks a pass_to_pass command scores `regressed`: it is
+    neither tampered (nothing is protected) nor a false pass (the hidden tests still pass)."""
+    case = cases.load_case(_adder_case(
+        tmp_path,
+        keys={"pass_to_pass": ["python3 -m unittest -q tests.test_calc"]},
+        config={"unit_tests": ["python3 -m unittest -q tests.test_adder"]}))
+    broken_double = GOOD_CALC.replace("    return x * 2", "    return x * 3")
+    writes = {"calc/__init__.py": broken_double, "tests/test_adder.py": VISIBLE_TEST}
+    record = _run_cell(bench_repo, monkeypatch, case,
+                       _plays(writes, run="python3 -m unittest -q tests.test_adder"),
+                       tmp_path / "cell")
+
+    assert record["outcome"] == "regressed"
+    assert record["tampered"] is False and record["extra_files"] == []
+    assert record["diff_lines"] >= record["reference_lines"] > 0
+
+
+def test_a_candidate_that_edits_a_protected_path_is_tampered(bench_repo, tmp_path, monkeypatch):
+    """A verified candidate whose change matches a protected glob scores `tampered`, ahead of a
+    hidden failure: the builder also breaks `add` (the hidden tests would fail), changes
+    tests/__init__.py, adds tests/test_adder.py and deletes tests/test_calc.py — every one of
+    change, add and delete matches tests/**, so tampered wins over false_pass."""
+    case = cases.load_case(_adder_case(tmp_path, keys={"protected": ["tests/**"]}))
+    broken_add = GOOD_CALC.replace("    return a + b", "    return a + b + 1")
+    writes = {"calc/__init__.py": broken_add,
+              "tests/test_adder.py": TRIVIAL_TEST,          # added, matches tests/**
+              "tests/__init__.py": "# doctored\n"}          # changed, matches tests/**
+    record = _run_cell(bench_repo, monkeypatch, case,
+                       _plays(writes, extra=("rm tests/test_calc.py",)),   # deleted, matches tests/**
+                       tmp_path / "cell")
+
+    assert record["outcome"] == "tampered"
+    assert record["tampered"] is True
+    assert record["extra_files"] == []          # only calc/__init__.py, which the solution changes
+    assert record["diff_lines"] >= record["reference_lines"] > 0
+
+
+def test_scope_counts_lines_and_files_beyond_the_reference(bench_repo, tmp_path, monkeypatch):
+    """Every cell with a candidate records how far its change went beyond the reference:
+    diff_lines (lines added plus deleted outside tests/ and the session-log directory),
+    reference_lines (the same count for the case's solution) and extra_files (paths the
+    candidate changed that the solution didn't, outside those directories)."""
+    case = cases.load_case(_adder_case(tmp_path, config={"session_log": "docs/sessions"}))
+    writes = {
+        "calc/__init__.py": GOOD_CALC,
+        "calc/extra.py": "def helper():\n    return 1\n",
+        "tests/test_adder.py": VISIBLE_TEST,                              # outside scope: tests/
+        "docs/sessions/2026-11-24-evals-t02.md": "## [12:00] adder-t01\n",  # outside: session log
+    }
+    record = _run_cell(bench_repo, monkeypatch, case, _plays(writes), tmp_path / "cell")
+    assert record["outcome"] == "solved" and record["tampered"] is False
+
+    # The counts the record should carry, derived from the case's own fixtures.
+    base, reference, reference_paths = _reference_scope(case, tmp_path / "reference")
+    candidate = tmp_path / "candidate"
+    assert cases.materialize(case, candidate) == base
+    for path, text in writes.items():
+        (candidate / path).parent.mkdir(parents=True, exist_ok=True)
+        (candidate / path).write_text(text)
+    git(candidate, "add", "-A")
+    git(candidate, "commit", "-q", "-m", "candidate")
+    sha = git(candidate, "rev-parse", "HEAD")
+    diff = _diff_lines(candidate, base, sha, case.cfg.session_log)
+    extra = sorted(path for path in set(_changed_paths(candidate, base, sha)) - set(reference_paths)
+                   if _outside(path, case.cfg.session_log))
+
+    assert record["reference_lines"] == reference > 0
+    assert record["diff_lines"] == diff
+    assert diff == reference + 2          # only calc/extra.py's two lines went beyond the reference
+    assert record["extra_files"] == extra == ["calc/extra.py"]
+
+
+@pytest.mark.parametrize("case", SHIPPED, ids=lambda case: case.id)
+def test_every_shipped_solution_still_scores_solved(bench_repo, case, tmp_path, monkeypatch):
+    """Every shipped case gains pass_to_pass (its existing test command) and protected (its
+    pre-existing test files), and its reference solution still scores solved, with no scope
+    beyond the reference."""
+    assert case.pass_to_pass == case.cfg.unit_tests
+    pre_existing = sorted(path.relative_to(case.repo_dir).as_posix()
+                         for path in (case.repo_dir / "tests").rglob("test_*.py") if path.is_file())
+    assert pre_existing and sorted(case.protected) == pre_existing
+
+    writes = {path.relative_to(case.solution_dir).as_posix(): path.read_text()
+              for path in sorted(case.solution_dir.rglob("*")) if path.is_file()}
+    record = _run_cell(bench_repo, monkeypatch, case, _plays(writes), tmp_path / case.id)
+
+    assert record["outcome"] == "solved"
+    assert record["tampered"] is False
+    assert record["extra_files"] == []
+    assert record["diff_lines"] == record["reference_lines"] > 0

@@ -211,7 +211,9 @@ def test_a_bench_run_scores_each_cell_with_gates_and_hidden_tests(bench_repo, ho
     assert len(results["cases"]["adder"]["fixture_sha"]) == 64
     assert [cell["outcome"] for cell in results["cells"]] == ["solved", "false_pass"]
     fields = {"variant", "case", "repeat", "outcome", "attempts", "cost_usd", "seconds", "model_calls",
-              "tokens_in", "tokens_out", "review_changes", "step_limit_stops", "failed_gates", "dir"}
+              "tokens_in", "tokens_out", "review_changes", "step_limit_stops", "failed_gates", "dir",
+              # evals-t02: every cell with a candidate also records its tampering and scope.
+              "tampered", "diff_lines", "reference_lines", "extra_files"}
     for cell in results["cells"]:
         assert set(cell) == fields
         assert cell["case"] == "adder" and cell["repeat"] == 1
@@ -220,6 +222,8 @@ def test_a_bench_run_scores_each_cell_with_gates_and_hidden_tests(bench_repo, ho
         assert cell["tokens_in"] == cell["tokens_out"] == 0
         assert cell["review_changes"] == cell["step_limit_stops"] == 0
         assert cell["failed_gates"] == []
+        assert cell["tampered"] is False and cell["extra_files"] == []
+        assert cell["diff_lines"] >= cell["reference_lines"] > 0
         directory = bench_run_dir(home) / cell["dir"]
         assert (directory / "factory.db").is_file()
         assert (directory / "repo").is_dir()
@@ -950,19 +954,18 @@ def test_list_shows_runs_newest_first_and_cases_lists_the_suite(home, capsys):
 
     assert main(["bench", "cases"]) == 0
     out = capsys.readouterr().out
-    expected = [
-        ("slugify", "feature", "Slugify titles for URLs"),
-        ("money-rounding", "bugfix", "Round ledger money exactly to cents"),
-        ("report-json", "multi-file", "Add --format json to the report tool"),
-        ("ini-refactor", "refactor", "Extract one shared settings parser"),
-        ("rate-limiter", "algorithm", "Implement the token-bucket rate limiter"),
-    ]
-    for case_id, kind, title in expected:
-        assert f"{case_id:<18} {kind:<12} {title}" in out
+    from factory.bench import cases as bench_cases
+    for case in bench_cases.load_cases():
+        # evals-t02: the listing shows each case's counts of fail-to-pass and pass-to-pass
+        # commands and protected globs.
+        assert (f"{case.id:<18} {case.kind:<12} {len(case.hidden)} fail-to-pass · "
+                f"{len(case.pass_to_pass)} pass-to-pass · {len(case.protected)} protected  "
+                f"{case.title}" in out)
 
     assert main(["bench", "cases", "--cases", str(BENCH_CASES)]) == 0
     out = capsys.readouterr().out
-    assert f"{'adder':<18} {'feature':<12} Add integer addition to the calc package" in out
+    assert (f"{'adder':<18} {'feature':<12} 1 fail-to-pass · 0 pass-to-pass · 0 protected  "
+            f"Add integer addition to the calc package" in out)
 
 
 def test_a_cell_can_be_inspected_with_factory_show(bench_repo, home, monkeypatch, capsys):
@@ -1153,3 +1156,54 @@ def test_compare_names_each_variant_whose_steps_changed(home, capsys):
     out = capsys.readouterr().out
     assert "default · build: model fake:old → fake:new" in out
     assert "lean · build: model fake:old → fake:new" in out
+
+
+def test_report_counts_regressed_and_tampered(home, capsys):
+    """evals-t02: regressed and tampered cells count as eligible but not solved in every rate,
+    the report shows them in their own columns, and report --json and compare --json carry
+    their counts (the cells themselves carry them in results.json)."""
+    a, b = "20261124-080000", "20261124-080500"
+    suite = {"adder": "a" * 64}
+    variants = {"default": _steps(), "lean": _steps()}
+    cells = [
+        _cell("default", "adder", repeat=1),
+        _cell("default", "adder", repeat=2, outcome="regressed"),
+        _cell("default", "adder", repeat=3, outcome="tampered"),
+        _cell("lean", "adder", repeat=1, outcome="false_pass"),
+        _cell("lean", "adder", repeat=2, outcome="regressed"),
+        _cell("lean", "adder", repeat=3, outcome="regressed"),
+    ]
+    _write_run(home, a, suite, variants, cells, repeat=3)
+    _write_run(home, b, suite, variants, [
+        _cell("default", "adder", repeat=1, outcome="tampered"),
+        _cell("default", "adder", repeat=2, outcome="tampered"),
+        _cell("default", "adder", repeat=3),
+    ], repeat=3)
+
+    assert main(["bench", "report", a]) == 0
+    out = capsys.readouterr().out
+    header = next(line for line in out.splitlines() if line.startswith("variant"))
+    assert "regressed" in header and "tampered" in header, "their own columns in the variant table"
+    row = next(line for line in out.splitlines() if line.startswith("default "))
+    columns = dict(zip([c for c in re.split(r" {2,}", header) if c],
+                       [c for c in re.split(r" {2,}", row) if c]))
+    assert columns["regressed"] == "1" and columns["tampered"] == "1"
+    assert "1/3 33%" in row          # regressed and tampered are eligible, not solved
+
+    capsys.readouterr()
+    assert main(["bench", "report", a, "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["variants"]["default"]["regressed"] == 1
+    assert data["variants"]["default"]["tampered"] == 1
+    assert data["variants"]["default"]["solved"]["rate"] == pytest.approx(1 / 3)
+    assert data["variants"]["default"]["pass_k"]["rate"] == 0.0
+    assert data["variants"]["lean"]["regressed"] == 2
+    assert data["variants"]["lean"]["tampered"] == 0
+
+    capsys.readouterr()
+    assert main(["bench", "compare", a, b, "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["variants"][f"{a}:default"]["regressed"] == 1
+    assert data["variants"][f"{a}:default"]["tampered"] == 1
+    assert data["variants"][f"{b}:default"]["regressed"] == 0
+    assert data["variants"][f"{b}:default"]["tampered"] == 2
