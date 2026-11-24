@@ -313,6 +313,9 @@ def _record_from_db(db, variant: Variant, case: cases.Case, repeat: int, outcome
     gate_runs = [run for run in runs if run["step"] == "gates"]
     if gate_runs:
         record["failed_gates"] = re.findall(r"^\| (\S+) \| FAIL \|", gate_runs[-1]["report"] or "", re.M)
+    if row["candidate_sha"] and row["base_sha"]:
+        record.update(cases.candidate_scope(
+            case, directory / "repo", row["base_sha"], row["candidate_sha"]))
     return record
 
 
@@ -330,12 +333,14 @@ def _recover_record(directory: Path, variant: Variant, case: cases.Case, repeat:
             db.close()
 
 
-def _hidden_log(score: cases.HiddenScore) -> str:
+def _hidden_log(score: cases.CandidateScore) -> str:
     chunks = []
-    for command in score.commands:
+    for command in (*score.hidden.commands, *score.pass_to_pass.commands):
         output = command.output.rstrip()
         chunks.append(f"$ {command.cmd}\n{command.outcome}\n{output}\n")
-    chunks.append(f"hidden: {'PASS' if score.passed else 'FAIL'}\n")
+    chunks.append(f"hidden: {'PASS' if score.hidden.passed else 'FAIL'}\n")
+    if score.pass_to_pass.commands:
+        chunks.append(f"pass_to_pass: {'PASS' if score.pass_to_pass.passed else 'FAIL'}\n")
     return "\n".join(chunks)
 
 
@@ -377,13 +382,13 @@ def run_cell(root: Path, case: cases.Case, variant: Variant, directory: Path, *,
                           opts, log=log, transcript_dir=directory / "transcripts" / task.id).run()
         if result.get("outcome") == "verified":
             candidate = db.task(task.id)["candidate_sha"]
-            score = cases.score_hidden(
-                case, directory / "repo", candidate,
+            score = cases.score_candidate(
+                case, directory / "repo", base, candidate,
                 lambda hidden_wt: S.make(hidden_wt, directory / "cache", sandbox=sandbox_on,
                                          cfg=case.cfg.sandbox),
             )
             (directory / "hidden.log").write_text(_hidden_log(score), encoding="utf-8")
-            outcome = "solved" if score.passed else "false_pass"
+            outcome = score.outcome
         elif result.get("outcome") == "failed":
             outcome = "failed"
     except PipelineError as e:

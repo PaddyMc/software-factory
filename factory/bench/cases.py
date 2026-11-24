@@ -7,17 +7,21 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
 from .. import config as C
-from .. import contracts, verification
+from .. import contracts, globs, verification
 from ..verification import PASS, classify
 
 KINDS = ("feature", "bugfix", "multi-file", "refactor", "algorithm")
-KEYS = {"title", "kind", "requires", "config", "contract", "hidden"}
+REQUIRED_KEYS = {"title", "kind", "requires", "config", "contract", "hidden"}
+OPTIONAL_KEYS = {"pass_to_pass", "protected"}
+KEYS = REQUIRED_KEYS | OPTIONAL_KEYS
 ID_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -46,6 +50,8 @@ class Case:
     cfg: C.Config
     contract: contracts.Task
     hidden: tuple[str, ...]
+    pass_to_pass: tuple[str, ...]
+    protected: tuple[str, ...]
 
     @property
     def repo_dir(self) -> Path:
@@ -76,6 +82,23 @@ class HiddenScore:
         return all(c.outcome == PASS for c in self.commands)
 
 
+@dataclass(frozen=True)
+class CandidateScore:
+    hidden: HiddenScore
+    pass_to_pass: HiddenScore
+    tampered: bool
+
+    @property
+    def outcome(self) -> str:
+        if self.tampered:
+            return "tampered"
+        if not self.hidden.passed:
+            return "false_pass"
+        if not self.pass_to_pass.passed:
+            return "regressed"
+        return "solved"
+
+
 def _git(cwd: Path, *args: str, env: dict[str, str] | None = None) -> str:
     return subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True,
                           check=True).stdout.strip()
@@ -99,7 +122,7 @@ def load_case(dir: Path) -> Case:
         raise CaseError(f"{case_id}: cannot read case.yaml: {e}") from None
     if not isinstance(data, dict):
         raise CaseError(f"{case_id}: case.yaml must be a mapping")
-    missing = sorted(KEYS - set(data))
+    missing = sorted(REQUIRED_KEYS - set(data))
     unknown = sorted(set(data) - KEYS, key=str)
     if missing:
         raise CaseError(f"{case_id}: case.yaml missing key(s): {', '.join(missing)}")
@@ -109,8 +132,8 @@ def load_case(dir: Path) -> Case:
         raise CaseError(f"{case_id}: case id must match {ID_RE.pattern}")
     if data["kind"] not in KINDS:
         raise CaseError(f"{case_id}: kind {data['kind']!r} must be one of {', '.join(KINDS)}")
-    for key in ("requires", "hidden"):
-        if not _string_list(data[key]):
+    for key in ("requires", "hidden", "pass_to_pass", "protected"):
+        if not _string_list(data.get(key, [])):
             raise CaseError(f"{case_id}: {key} must be a list of non-empty strings")
     if not isinstance(data["config"], dict):
         raise CaseError(f"{case_id}: config must be a mapping")
@@ -139,7 +162,8 @@ def load_case(dir: Path) -> Case:
             raise CaseError(f"{case_id}: {name}/ is empty or missing")
     return Case(id=case_id, dir=dir, title=data["title"], kind=data["kind"],
                 requires=tuple(data["requires"]), config=data["config"], cfg=cfg, contract=task,
-                hidden=tuple(data["hidden"]))
+                hidden=tuple(data["hidden"]), pass_to_pass=tuple(data.get("pass_to_pass", [])),
+                protected=tuple(data.get("protected", [])))
 
 
 def load_cases(dirs=None) -> list[Case]:
@@ -179,25 +203,96 @@ def materialize(case: Case, dest: Path) -> str:
     return _git(dest, "rev-parse", "HEAD")
 
 
-def score_hidden(case: Case, repo: Path, sha: str, sandbox) -> HiddenScore:
-    """Score a commit with the case's hidden files in a disposable linked worktree."""
-    repo = Path(repo)
-    scratch = Path(tempfile.mkdtemp(prefix=f"factory-bench-{case.id}-"))
+@contextmanager
+def _detached_worktree(repo: Path, sha: str, prefix: str) -> Iterator[Path]:
+    scratch = Path(tempfile.mkdtemp(prefix=prefix))
     worktree = scratch / "wt"
     added = False
     try:
         _git(repo, "worktree", "add", "-q", "--detach", str(worktree), sha)
         added = True
-        shutil.copytree(case.hidden_dir, worktree, dirs_exist_ok=True)
-        box = sandbox(worktree)
-        results = []
-        for cmd in case.hidden:
-            result = box.run(cmd)
-            results.append(CommandResult(cmd, classify(cmd, result.code, result.output), result.output))
-        return HiddenScore(tuple(results))
+        yield worktree
     finally:
         try:
             if added:
                 _git(repo, "worktree", "remove", "--force", str(worktree))
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _score_commands(commands: tuple[str, ...], box) -> HiddenScore:
+    results = []
+    for cmd in commands:
+        result = box.run(cmd)
+        results.append(CommandResult(cmd, classify(cmd, result.code, result.output), result.output))
+    return HiddenScore(tuple(results))
+
+
+def score_hidden(case: Case, repo: Path, sha: str, sandbox) -> HiddenScore:
+    """Score a commit with the case's hidden files in a disposable linked worktree."""
+    with _detached_worktree(Path(repo), sha, f"factory-bench-{case.id}-") as worktree:
+        shutil.copytree(case.hidden_dir, worktree, dirs_exist_ok=True)
+        return _score_commands(case.hidden, sandbox(worktree))
+
+
+def _changed_paths(repo: Path, base: str, sha: str) -> list[str]:
+    # A rename is also a deletion of its source, which may itself be protected.
+    return _git(repo, "diff", "--name-only", "--no-renames", f"{base}..{sha}").splitlines()
+
+
+def score_candidate(case: Case, repo: Path, base: str, sha: str, sandbox) -> CandidateScore:
+    """Run both test suites in one scratch worktree and apply grading precedence."""
+    repo = Path(repo)
+    changed = _changed_paths(repo, base, sha)
+    tampered = any(globs.matches_any(path, case.protected) for path in changed)
+    with _detached_worktree(repo, sha, f"factory-bench-{case.id}-") as worktree:
+        shutil.copytree(case.hidden_dir, worktree, dirs_exist_ok=True)
+        box = sandbox(worktree)
+        hidden = _score_commands(case.hidden, box)
+        pass_to_pass = _score_commands(case.pass_to_pass, box)
+    return CandidateScore(hidden=hidden, pass_to_pass=pass_to_pass, tampered=tampered)
+
+
+def _counted_path(path: str, session_log: str | None) -> bool:
+    """Whether a path contributes to the implementation-scope metrics."""
+    if path == "tests" or path.startswith("tests/"):
+        return False
+    if session_log:
+        session_log = session_log.rstrip("/")
+        if path == session_log or path.startswith(session_log + "/"):
+            return False
+    return True
+
+
+def _diff_lines(numstat: str, session_log: str | None) -> int:
+    total = 0
+    for line in numstat.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3 or not _counted_path(parts[2], session_log):
+            continue
+        added, deleted = parts[:2]
+        # Git uses dashes rather than line counts for binary files.
+        total += int(added) if added.isdigit() else 0
+        total += int(deleted) if deleted.isdigit() else 0
+    return total
+
+
+def candidate_scope(case: Case, repo: Path, base: str, sha: str) -> dict:
+    """Measure a candidate's implementation diff and paths beyond the reference solution."""
+    repo = Path(repo)
+    session_log = case.cfg.session_log
+    candidate_numstat = _git(repo, "diff", "--numstat", f"{base}..{sha}")
+    candidate_paths = _changed_paths(repo, base, sha)
+    with _detached_worktree(repo, base, f"factory-bench-{case.id}-reference-") as worktree:
+        shutil.copytree(case.solution_dir, worktree, dirs_exist_ok=True)
+        _git(worktree, "add", "-A")
+        reference_numstat = _git(worktree, "diff", "--cached", "--numstat", base)
+        reference_paths = _git(worktree, "diff", "--cached", "--name-only", base).splitlines()
+    extra = sorted(path for path in set(candidate_paths) - set(reference_paths)
+                   if _counted_path(path, session_log))
+    return {
+        "tampered": any(globs.matches_any(path, case.protected) for path in candidate_paths),
+        "diff_lines": _diff_lines(candidate_numstat, session_log),
+        "reference_lines": _diff_lines(reference_numstat, session_log),
+        "extra_files": extra,
+    }

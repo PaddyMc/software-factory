@@ -1170,7 +1170,8 @@ def cmd_bench_cases(a) -> int:
         print(e, file=sys.stderr)
         return 1
     for case in loaded:
-        print(f"{case.id:<18} {case.kind:<12} {case.title}")
+        print(f"{case.id:<18} {case.kind:<12} {len(case.hidden)} fail-to-pass · "
+              f"{len(case.pass_to_pass)} pass-to-pass · {len(case.protected)} protected  {case.title}")
     return 0
 
 
