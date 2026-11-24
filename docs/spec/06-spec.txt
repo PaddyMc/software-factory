@@ -86,7 +86,7 @@ and tests/test_pipeline.py::test_a_stranded_merge_whose_changes_reached_main_by_
 up eligible factory PRs, reads their current GitHub state, and then restacks
 open dependents. An existing factory-owned candidate that is simply OPEN keeps
 its identity; a foreign PR can be taken up and adopted as the board's candidate.
-Source: factory/cli.py:cmd_status, _refresh, _take_up, and _adopt.
+Source: factory/cli.py:cmd_status, _refresh, and _adopt.
 
 For a PR merged into the trunk, `_refresh` calls the merge recorder. `record`
 compares the actual merged head with the board candidate and labels it
@@ -139,7 +139,7 @@ Refresh gives an open candidate three outcomes in this precedence order:
 Thus conflict comes before human review, and human review comes before CI. A
 later approval can clear the requests and reveal a CI failure on a later
 refresh. Source: factory/cli.py:_refresh and factory/reviews.py:requests and
-factory/ci.py:failure. Evidence:
+factory/ci.py:red. Evidence:
 tests/test_pipeline.py::test_conflicts_come_before_requested_changes_and_requested_changes_before_ci.
 
 The run entry point follows the board's selected kind: conflict resolution, CI
@@ -158,7 +158,7 @@ diff and the upstream diff for each conflicted file. A resolver commit goes
 through the configured reviews, gates, and summary before the leased update. If
 the change now replays cleanly, no resolver/reviewer is needed and it goes
 straight to gates and summary. Source: factory/cli.py:_replay and
-factory/pipeline.py:replay_worktree, resolve, and resolve_open. Evidence:
+factory/pipeline.py:replay_worktree and Pipeline.resolve. Evidence:
 tests/test_pipeline.py::test_conflicting_pr_is_resolved_by_the_builder_then_reviewed_and_gated,
 tests/test_pipeline.py::test_conflict_that_now_replays_cleanly_goes_straight_to_the_gates,
 and tests/test_stack.py::test_replay_leaves_diff3_markers_and_a_brief.
@@ -168,7 +168,7 @@ names and available failed-job logs. Human-review rework starts at that same
 candidate and supplies the outstanding review brief and inline comments. Both
 commit on top of the old candidate, then run the flow's build/review/gates and
 summary steps before replacing the PR head. Source: factory/cli.py:_ci_fix and
-_review_fix, and factory/pipeline.py:Pipeline.rework_review and attempt. Evidence:
+_review_fix, and factory/pipeline.py:Pipeline.rework and attempt. Evidence:
 tests/test_pipeline.py::test_failing_ci_is_fixed_on_the_pr_branch_then_reviewed_and_gated
 and
 tests/test_pipeline.py::test_requested_changes_are_addressed_on_the_pr_branch_then_reviewed_and_gated.
@@ -192,7 +192,7 @@ Successful review rework, or a no-change answer, advances the watermark through
 the requests covered. Adoption of an existing PR initializes it through the
 latest existing review so old conversation is history; later IDs still count.
 Restack preserves both the watermark and outstanding requested-change state.
-Source: factory/reviews.py:latest_review and requests, factory/cli.py:_adopt,
+Source: factory/reviews.py:requests, factory/cli.py:_adopt,
 and factory/pipeline.py:Pipeline.pr and answer. Evidence:
 tests/test_reviews.py::test_each_reviewers_latest_decision_wins,
 tests/test_reviews.py::test_addressed_reviews_no_longer_count,
@@ -200,11 +200,11 @@ tests/test_pipeline.py::test_a_taken_up_pr_treats_earlier_reviews_as_addressed,
 and tests/test_pipeline.py::test_a_stacked_pr_keeps_its_requested_changes_when_restacked.
 
 Candidate ownership is checked by SHA, not branch name: a head someone else
-pushed is not ours to fix. `ci.failure` judges only `head == candidate_sha`;
-CANCELLED and SKIPPED are outside its terminal-red FAILING set. Review rework
+pushed is not ours to fix. `ci.red` judges only `head == candidate_sha`;
+CANCELLED and SKIPPED are outside its terminal-red FAILED set. Review rework
 also refuses a head that is not the board candidate and suggests `--force` for
-an intentional from-scratch rebuild. Source: factory/ci.py:FAILING and failure,
-and factory/cli.py:_review_fix. Evidence:
+an intentional from-scratch rebuild. Source: factory/ci.py:FAILED, failing,
+and red, and factory/cli.py:_review_fix. Evidence:
 tests/test_ci.py::test_red_only_judges_the_factorys_own_candidate and
 tests/test_pipeline.py::test_review_rework_needs_an_outstanding_request_on_the_factorys_candidate.
 
@@ -233,5 +233,5 @@ Human review has one intentional no-change outcome: on the first no-change
 attempt the builder can answer instead of editing. The factory posts that answer
 as a PR comment, advances the review watermark, and leaves the same head open;
 it does not manufacture a new commit, re-review, or push. Source:
-factory/pipeline.py:Pipeline.rework_review and answer. Evidence:
+factory/pipeline.py:Pipeline.rework and answer. Evidence:
 tests/test_pipeline.py::test_a_review_that_needs_no_change_is_answered_and_the_pr_left_as_is.

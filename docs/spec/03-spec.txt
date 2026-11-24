@@ -1,5 +1,4 @@
-SOFTWARE FACTORY SPECIFICATION
-Chapter 03 — Flows and attempts
+03 — Flows and attempts
 
 Edition: 8bd7012
 Status: normative for the factory at that revision.

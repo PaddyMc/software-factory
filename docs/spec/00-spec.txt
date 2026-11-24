@@ -1,0 +1,374 @@
+00 Overview and reading guide
+
+Baseline: 8bd7012, the factory shipped on main at that revision.
+Scope: the audience, edition, requirement language, shared vocabulary, reading
+paths, and one end-to-end example for the numbered specification. The topic
+chapters own the detailed rules; this overview is not a second command manual
+and does not specify behavior introduced after the baseline.
+
+1. Audience, edition and requirement words
+
+1.1 Audience and authority
+
+This series is for an implementer who needs to predict the factory's observable
+behavior: its inputs, decisions, state transitions, outputs, and failure paths.
+It is also the map for a reviewer or operator who needs the chapter that owns a
+particular rule. An implementer should be able to check a claim against the
+named source symbol or behavioral pytest node rather than infer it from a
+command summary.
+
+The first edition describes the factory at 8bd7012. The Locked Decisions and
+Chapter conventions in docs/plans/factory-spec.md establish that baseline and
+make the shipped code and its behavioral tests the evidence for each
+requirement. Later plans and unmerged options are not retroactively part of
+this edition. A detail identified as a source-only implementation note has a
+source citation but no separately named behavioral test; it must not be
+presented as having test evidence it does not have.
+
+1.2 Requirement words
+
+The uppercase requirement words have these meanings throughout the series:
+
+  MUST and MUST NOT
+      Required behavior, or a required prohibition, for this edition.
+
+  SHOULD and SHOULD NOT
+      Recommended behavior, or a recommended prohibition. A deviation needs a
+      reason and must not be silently treated as a baseline guarantee.
+
+  MAY
+      Optional behavior. An implementation or operator may choose the described
+      option only where its stated preconditions and limits hold.
+
+Lowercase uses of those words are ordinary prose. Descriptive statements
+without an uppercase requirement word still record baseline behavior; omission
+of MUST does not make the behavior optional. Worked examples and implementation
+notes are labelled separately from requirements. Examples illustrate a rule
+and do not add fixtures, commands, or guarantees. The authority boundaries in
+docs/architecture.md#policy apply to every example: gates decide whether the
+factory may publish, and merging is the human approval.
+
+2. Reading guide: the numbered series
+
+Each entry gives the exact basename, the chapter's title, and its owning topic.
+
+  01-spec.txt — Project inputs and task contracts
+      Initialization, effective settings, state location, plan discovery, and
+      the exact eight-key contract and validation rules.
+
+  02-spec.txt — Board and scheduling
+      Stored status versus derived readiness and liveness, synchronization,
+      dependency eligibility, stacking, parallel plans, holds, and reruns.
+
+  03-spec.txt — Flows and attempts
+      Built-in and configured flows, role inputs and outputs, verdict routing,
+      gate placement, build attempts, retries, and stop conditions.
+
+  04-spec.txt — Isolation and authority
+      Actor authority, file-tool and shell boundaries, sandbox mounts,
+      dependency sources, caches, provider requests, and GitHub credentials.
+
+  05-spec.txt — Verification gates
+      The candidate and base under judgment, gate order and applicability,
+      structural and command checks, and failed or inconclusive outcomes.
+
+  06-spec.txt — PR lifecycle and rework
+      PR creation, stacking and bottom-up merges, refresh and restack, conflict,
+      CI and human-review rework, candidate ownership, and leased updates.
+
+  07-spec.txt — Operator interfaces
+      The complete CLI map, run targets, status and refresh, process controls,
+      version output, and the local web interface and its background jobs.
+
+  08-spec.txt — Observability and statistics
+      Logs, traces, transcripts, task and run records, usage accounting,
+      prompt versions, merge provenance, filters, and metric denominators.
+
+  09-spec.txt — Benchmarks and scoring
+      Benchmark cases, variants and cells, isolated execution, hidden scoring,
+      recorded outcomes, report denominators, budgets, and comparisons.
+
+3. Reading paths
+
+3.1 Implementing a task run
+
+Read the chapters in this order when implementing or changing the path from a
+contract to a published candidate:
+
+  1. Chapter 01, Project inputs and task contracts, sections 3–6: discover and
+     validate the work, including manual-only verification.
+  2. Chapter 02, Board and scheduling, sections 1–6: establish stored state,
+     readiness, dependency eligibility, and launch behavior.
+  3. Chapter 03, Flows and attempts, sections 1–5: select the flow and route
+     each build, review, gate, and retry decision.
+  4. Chapter 04, Isolation and authority, sections 1–5: determine what each
+     actor may read, write, execute, or send to an external service.
+  5. Chapter 05, Verification gates, sections 1–4: judge the exact committed
+     candidate and enforce the publication barrier.
+  6. Chapter 06, PR lifecycle and rework, sections 1–6: publish, stack, merge,
+     refresh, restack, and repair the resulting PR.
+
+Use docs/reference.md#commands for command spelling and options; use the
+chapters above for the behavior those commands invoke.
+
+3.2 Diagnosing an operator-visible failure
+
+Start from the observed surface, then move to the state and evidence layers:
+
+  1. Chapter 07, Operator interfaces, sections 3–7: identify the command or web
+     action, whether it merely reads state, and which background job ran.
+  2. Chapter 02, Board and scheduling, sections 1–2 and 5–7: distinguish a
+     stored failure or hold from waiting dependencies, a dead process, and a
+     stale display; check whether a rerun is eligible.
+  3. Chapter 08, Observability and statistics, sections 1–6: inspect the task
+     note and run history, then the operational log, transcript, trace, and
+     merge record. Do not substitute aggregate statistics for that evidence.
+  4. For a failed publication check, read Chapter 05, Verification gates,
+     sections 2–4. For a conflict, red CI, requested changes, a moved head, or
+     an unexpected merge result, read Chapter 06, PR lifecycle and rework,
+     sections 2–6 before starting rework.
+
+A plain board read does not refresh GitHub. In particular, a displayed DEAD
+process and a remote PR's current condition require the refresh behavior
+described in those chapters, not an inference from an old stored row.
+
+4. Shared terms
+
+The following definitions apply across chapter boundaries. The cited chapter
+and sections own the detailed rule.
+
+  plan
+      A repository document containing prose and, for executable work, fenced
+      YAML task contracts. Plans are maintainer input, not runtime status.
+      Owner: Chapter 01, sections 3–5.
+
+  task contract
+      One exact eight-key mapping: id, goal, spec_refs, depends_on, non_goals,
+      acceptance, verification, and risk. Its ID is repository-wide and its
+      dependencies form a validated graph. Owner: Chapter 01, sections 4–6.
+
+  board
+      The per-maintainer local task/run state derived from synchronized
+      contracts and subsequent factory or operator actions. It is not written
+      back into the plans. Owner: Chapter 02, sections 1 and 3.
+
+  stored status
+      A persistent board value such as queued, building, pr_open, conflict,
+      ci_failed, changes_requested, merged, failed, or abandoned. Running is a
+      classification of active statuses, not another stored value. Owner:
+      Chapter 02, section 1.
+
+  derived readiness
+      A fresh dependency calculation: dependencies are merged, healthy open
+      PRs with candidate revisions, or unmet. Ready and waiting are therefore
+      observations, not stored statuses. Owner: Chapter 02, sections 2 and 4.
+
+  liveness
+      An observation of the process PID associated with a row. DEAD and a quiet
+      heartbeat describe different conditions and neither is dependency
+      readiness. Owner: Chapter 02, section 2.2.
+
+  worktree
+      The isolated Git checkout in which agents and gates operate. It is not
+      the main checkout and does not supply trusted mid-run configuration.
+      Owner: Chapter 04, sections 1–3.
+
+  candidate, candidate_sha and base_sha
+      The candidate is the committed change under review or verification;
+      candidate_sha identifies it. base_sha identifies the trunk revision or
+      composed open-dependency base from which its own diff is measured.
+      Owner: Chapter 05, section 1, and Chapter 06, sections 2–3.
+
+  flow, step and attempt
+      A flow is the ordered arrangement of planner, builder, reviewer, gate,
+      and verifier steps. An attempt is one routed pass through the applicable
+      build and post-build steps, not an individual model call. Owner:
+      Chapter 03, sections 1–5.
+
+  gates
+      Deterministic structural and command checks on the committed candidate.
+      Their pass results permit factory publication; they are not human merge
+      approval. Owner: Chapter 05, sections 1–4.
+
+  trunk
+      The destination branch onto which independent candidates are based and
+      onto which a dependent is moved after its stacked prerequisites merge.
+      Owner: Chapter 06, sections 2–3.
+
+  stacking
+      Building a dependent from a healthy open dependency candidate and
+      targeting its PR at factory/<dependency>. Open stacks merge bottom-up,
+      with a refresh after each human merge. Owner: Chapter 02, section 4, and
+      Chapter 06, sections 2–3.
+
+  rework: resolve, ci and human_review
+      The specialized entries for conflict resolution, CI repair, and requested
+      human-review changes. They preserve the old published head until a
+      replacement is eligible; they are not fresh independent builds. Owner:
+      Chapter 06, sections 4–6.
+
+  variant and cell
+      Benchmark terms: a variant is a selected flow plus an optional model
+      override; a cell is one (variant, case, repeat) execution. A cell is not
+      an extra pipeline attempt. Owner: Chapter 09, section 3.
+
+  session log
+      The task's repository evidence file under the configured session-log
+      directory. The dated one-new-file naming rule is a project convention;
+      the mechanical gate checks changed paths under that directory. Owner:
+      Chapter 05, section 3.4.
+
+  FACTORY_HOME
+      The highest-precedence setting for the per-maintainer state directory,
+      followed by the project home setting and then the default state path.
+      Owner: Chapter 01, section 2.2.
+
+5. Worked lifecycle: contract discovery to two human merges
+
+This non-normative example uses the same two-task dependency shape as the
+scheduler and pipeline fixtures. Suppose configured discovery finds the
+following valid eight-key contracts in docs/plans/demo.md. The greeting and
+second-file commands stand for the contracts' own verification; the evidence
+citations below, not these illustrative files, establish the lifecycle rules.
+
+    - id: demo-t01
+      goal: "Add the greeting module"
+      spec_refs: []
+      depends_on: []
+      non_goals: []
+      acceptance: ["src/greet.txt says hello"]
+      verification: ["grep -q hello src/greet.txt"]
+      risk: low
+    - id: demo-t02
+      goal: "Add the second module"
+      spec_refs: []
+      depends_on: [demo-t01]
+      non_goals: []
+      acceptance: ["src/second.txt exists"]
+      verification: ["test -s src/second.txt"]
+      risk: low
+
+5.1 Discover and validate the contracts
+
+Decision and evidence. The factory host evaluates the configured plan globs,
+extracts recognized YAML contract lists, builds the repository-wide ID mapping,
+and validates both the eight-key shapes and dependencies. An unknown ID or a
+cycle is an error, not a task that can be scheduled. The implementation anchors
+are factory/contracts.py::discover_plans, parse_text, load_all, and
+validate_tasks. Shape and graph evidence is
+tests/test_contract_schema.py::test_parse_contract_exact_8_keys and
+tests/test_dependencies.py::test_reject_cycle_and_unknown_id.
+
+State authority. The maintainer authors and changes the plan. The factory host
+may read and reject it, but neither discovery nor an agent may rewrite it. The
+later plan_untouched gate enforces that the candidate did not change the task's
+own plan path (Chapter 05, section 3.2). Discovery alone creates no board row.
+
+5.2 Synchronize the board
+
+Run factory sync. The host inserts demo-t01 and demo-t02 as queued, refreshes
+stored contract content on a repeated sync, and preserves existing status and
+history. demo-t01 has no unmet dependencies; demo-t02 initially displays waits
+for demo-t01 (queued). Evidence is factory/cli.py::cmd_sync,
+factory/db.py::DB.upsert_task, DB.ready, and DB.readiness, together with
+tests/test_db.py::test_upsert_keeps_status_and_refreshes_contract.
+
+State authority. The host changes board rows through sync; the maintainer
+changes future contract input through the plan. A sync does not merge a PR,
+refresh remote state, or reset a lifecycle outcome. If validation failed in the
+previous step, the invalid mapping is not synchronized.
+
+5.3 Start the plan and admit only ready work
+
+Run factory run demo --parallel 1. The plan command synchronizes and refreshes
+before supervision. The scheduler launches demo-t01 first and leaves demo-t02
+waiting. After demo-t01 has a healthy open PR and candidate, the same scheduler
+can launch demo-t02 and report that it is stacked on demo-t01.
+tests/test_scheduler.py::test_one_run_gives_a_pr_per_task_with_dependents_stacked
+pins one PR per task, the dependent's stacked launch, and merge-order summary;
+its fixture also contains an independent third task, which this compact trace
+omits. Source anchors are factory/cli.py::cmd_run_plan and
+factory/scheduler.py::startable and run.
+
+State authority. The operator chooses the plan and run options and may stop the
+run. The host scheduler launches task children; each task run claims its board
+row and records its outcome. An agent cannot mark its own dependencies ready or
+launch a plan child. The scheduler derives eligibility from current rows; it
+does not write a permanent ready flag.
+
+5.4 Build, verify and publish demo-t01
+
+Under the default flow, the host runs plan, build, review, gates, verify, and
+then PR. The builder edits only the candidate worktree; the host commits build
+output. Review CHANGES or a failed gate routes another attempt rather than
+publishing. Once the required reviews and gates pass, the verifier supplies the
+PR report and the host pushes factory/demo-t01 and opens its PR against the
+trunk. The board row becomes pr_open with candidate_sha equal to the verified
+commit. tests/test_pipeline.py::test_run_ends_in_a_working_pr exercises a
+rejected then approved attempt and asserts that the remote branch head is
+exactly that candidate. The no-publication failure branch is pinned by
+tests/test_pipeline.py::test_gate_failures_never_open_a_pr. Source anchors are
+factory/pipeline.py::Pipeline._commit, Pipeline.gates, and Pipeline.pr.
+
+State authority. The builder proposes file changes; automated reviewers and
+deterministic gates supply routing evidence; the host alone commits the agent's
+work, updates the run/board records, pushes the accepted candidate, and opens
+or edits the PR. None of those actions is a merge. A human may review the PR,
+but passing gates alone do not approve a merge (docs/architecture.md#policy).
+
+5.5 Publish demo-t02 as a stacked PR
+
+A pr_open demo-t01 row with candidate_sha now satisfies demo-t02's dependency.
+The host starts demo-t02's worktree at that candidate, records it as base_sha,
+and sets the PR base to factory/demo-t01. After its own successful flow, the
+second PR has branch factory/demo-t02, stacked_on demo-t01, and a base..candidate
+diff containing only demo-t02's changes.
+tests/test_pipeline.py::test_dependent_stacks_on_an_open_pr_and_moves_to_main_after_merge
+asserts those base, stack, inherited-content, and own-diff facts as well as the
+stack warning in the PR body. Source anchors are factory/cli.py::cmd_run_one and
+factory/pipeline.py::create_worktree.
+
+State authority. The host chooses the base from current board evidence; the
+second builder proposes only its task change and cannot push or select a
+different remote base. The host verifies and publishes that candidate. If
+demo-t01 instead failed, demo-t02 would remain queued with waits for
+demo-t01 (failed), while independent work could continue, as shown by
+tests/test_scheduler.py::test_a_failure_blocks_only_its_dependents.
+
+5.6 Human merge of demo-t01, then refresh and restack
+
+The human reviews and merges demo-t01 first. That external GitHub decision does
+not rewrite this maintainer's board by itself. The operator then runs factory
+status --refresh. The host observes the merge, records merge provenance when
+the final head is readable, rebases demo-t02's own commits onto the new trunk
+tip, retargets its PR to the trunk, and clears stacked_on. The pipeline stack
+test cited above performs the bottom-up merge and asserts the new base and
+remote head. tests/test_merges.py::test_a_pr_merged_as_built_is_recorded_as_built
+pins the as_built record when the merged head is the factory candidate. Source
+anchors are factory/cli.py::_refresh, factory/merges.py::record, and
+factory/stack.py::restack and rebase.
+
+State authority. Only the human merges demo-t01. The operator chooses when to
+refresh; the host may then update local state and replace the dependent remote
+head with a leased push. Agents never merge or push. Restack does not fabricate
+a new gate run: the last gated commit is the old candidate, while the rebased
+head is what later CI and any rework must judge (Chapter 06, section 3). A
+rebase conflict instead leaves the old remote head alone and marks the task
+conflict, as covered by
+tests/test_stack.py::test_restack_conflict_marks_the_task_for_resolution.
+
+5.7 Human merge of demo-t02
+
+After the restack, the human reviews demo-t02 at its current head and merges it
+to the trunk. A following refresh changes its stored status to merged and
+records the applicable as_built or edited merge outcome; both tasks are then
+merged. The merge recorder and its idempotent repeat refresh are evidenced by
+tests/test_merges.py::test_a_pr_merged_as_built_is_recorded_as_built.
+
+State authority. Again, only the human performs the merge, while the host
+records its observable result on refresh. Merging a child into an open factory
+dependency branch before this retarget is not automatically a trunk merge;
+Chapter 06, section 2 owns that conditional path. The normal order is therefore
+bottom-up human merges, with factory status --refresh after each one. Command
+syntax is indexed in docs/reference.md#commands; no agent, gate, verifier, or
+scheduler can substitute its own success for either human merge.

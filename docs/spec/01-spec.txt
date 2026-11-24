@@ -202,7 +202,7 @@ it is valid both alone and in the repository-wide dependency graph.
 ```yaml
 - id: docs-demo-t01
   goal: Document the board readiness rules
-  spec_refs: [docs/reference.md#the-board]
+  spec_refs: [docs/reference.md#task-contracts]
   depends_on: []
   non_goals: [Changing scheduler behavior]
   acceptance:
