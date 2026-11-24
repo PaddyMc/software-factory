@@ -1175,6 +1175,23 @@ def cmd_bench_cases(a) -> int:
     return 0
 
 
+def cmd_bench_check(a) -> int:
+    from .bench import cases, check
+
+    try:
+        loaded = check.select_cases(a.cases, a.case_ids)
+        results = check.check_cases(loaded, a.mutants)
+    except (cases.CaseError, check.CheckError) as e:
+        print(e, file=sys.stderr)
+        return 1
+    if a.json:
+        print(json.dumps({"cases": [result.record() for result in results]}, indent=2))
+    else:
+        for result in results:
+            print(result.line())
+    return int(any(result.verdict == "broken" for result in results))
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="factory", description="plan -> build -> review -> verify -> PR, per task; "
                                                          "`factory run <plan>` runs a whole plan")
@@ -1257,6 +1274,14 @@ def main(argv: list[str] | None = None) -> int:
     s = bench_sub.add_parser("cases", help="list the available bench cases")
     s.add_argument("--cases", metavar="DIR", help="load cases from DIR instead of the shipped suite")
     s.set_defaults(fn=cmd_bench_cases)
+
+    s = bench_sub.add_parser("check", help="prove cases sound and measure their hidden tests with mutants")
+    s.add_argument("case_ids", nargs="*", metavar="CASE", help="case to check (default: every case)")
+    s.add_argument("--cases", metavar="DIR", help="load cases from DIR instead of the shipped suite")
+    s.add_argument("--mutants", type=int, default=20, metavar="N",
+                   help="maximum mutants per case (default: 20)")
+    s.add_argument("--json", action="store_true", help="print one JSON object containing every case verdict")
+    s.set_defaults(fn=cmd_bench_check)
 
     s = sub.add_parser("stop", help="stop a running task, or a plan run and every task it started")
     s.add_argument("target", help="a task on the board, or a plan (path, or file name without .md)")
