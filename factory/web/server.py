@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from .. import config, observe
+from .. import config, contracts, observe
 from ..db import ACTIVE, open_db, pid_alive
 from ..scheduler import plan_pid_file
 from . import jobs, plans, views
@@ -47,6 +47,12 @@ class App:
         self._plans_lock = threading.Lock()
         static = importlib.resources.files("factory.web") / "static"
         self.static = {name: (static / name).read_bytes() for name in STATIC_TYPES}
+
+    def _plan_links(self) -> dict[str, str]:
+        return {
+            path.relative_to(self.root).as_posix(): "/plans/" + quote(path.stem, safe="")
+            for path in contracts.discover_plans(self.root, self.config)
+        }
 
     def _response(self, status: int, content_type: str, body: bytes,
                   extra: list[tuple[str, str]] | None = None):
@@ -234,7 +240,8 @@ class App:
                 errors["flow"] = "Pick a flow from the list."
             if errors:
                 page = views.run_page(db, self.config, self.home, self.root, self.port, self.token,
-                                      kind, target, items, values, errors).encode()
+                                      kind, target, items, values, errors,
+                                      plan_links=self._plan_links()).encode()
                 return self._response(400, "text/html; charset=utf-8", page)
         finally:
             db.close()
@@ -324,7 +331,8 @@ class App:
             db = open_db(self.home, readonly=True)
             try:
                 page = views.board(db, self.config, self.home, self.port, self.token,
-                                   self._notice_job(request_path)).encode()
+                                   self._notice_job(request_path),
+                                   plan_links=self._plan_links()).encode()
             finally:
                 db.close()
             return self._response(200, "text/html; charset=utf-8", page)
@@ -398,7 +406,8 @@ class App:
                     page = views.error_page(self.project, self.home, self.port, lede, reason, back).encode()
                 else:
                     page = views.run_page(db, self.config, self.home, self.root, self.port, self.token,
-                                          kind, target, items).encode()
+                                          kind, target, items,
+                                          plan_links=self._plan_links()).encode()
             finally:
                 db.close()
             return self._response(200, "text/html; charset=utf-8", page)
@@ -414,7 +423,8 @@ class App:
                     back = (f"Back to {task_id}", f"/tasks/{quote(task_id, safe='')}")
                     return self._error(404, "Page not found.",
                                        f"Run {run_id} isn't one of {task_id}'s runs", back=back)
-                page = views.transcript(db, self.home, self.project, self.port, task_id, run).encode()
+                page = views.transcript(db, self.home, self.project, self.port, task_id, run,
+                                        plan_links=self._plan_links()).encode()
             finally:
                 db.close()
             return self._response(200, "text/html; charset=utf-8", page)
@@ -426,7 +436,8 @@ class App:
                 if db.task(task_id) is None:
                     return self._error(404, "Page not found.", f"{task_id} isn't on this board")
                 page = views.task(db, self.home, self.project, self.port, task_id, self.token,
-                                  self._notice_job(request_path)).encode()
+                                  self._notice_job(request_path),
+                                  plan_links=self._plan_links()).encode()
             finally:
                 db.close()
             return self._response(200, "text/html; charset=utf-8", page)

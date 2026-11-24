@@ -78,6 +78,13 @@ def safe_url(url: str | None) -> str | None:
     return url if url and url.startswith(("https://", "http://")) else None
 
 
+def _plan_href(plan_links: dict[str, str], plan: str, task_id: str | None = None) -> str | None:
+    href = plan_links.get(plan)
+    if href is not None and task_id is not None:
+        href += f"#task-{quote(task_id, safe='')}"
+    return href
+
+
 def action_form(action: str, token: str, next_: str, label: str, title: str,
                 target: str | None = None, btn: str = "btn") -> str:
     target_field = (f'<input type="hidden" name="target" value="{esc(target)}">'
@@ -266,7 +273,8 @@ def board_plan(db: DB, cfg: Config, name: str, rows) -> scheduler.Plan:
     return scheduler.Plan(name=name, tasks=[row["id"] for row in rows], manual=manual)
 
 
-def _plan(db: DB, cfg: Config, name: str, rows, open_: bool) -> str:
+def _plan(db: DB, cfg: Config, name: str, rows, open_: bool,
+          plan_links: dict[str, str]) -> str:
     infos = [status(db, row) for row in rows]
     counts, aria = _counts(rows, infos)
     squares = "".join(f'<i class="{info.css}"></i>' for info in infos)
@@ -275,12 +283,15 @@ def _plan(db: DB, cfg: Config, name: str, rows, open_: bool) -> str:
     plan = board_plan(db, cfg, name, rows)
     run = (f'<a class="btn" href="/run?plan={quote(name, safe="")}">Run plan</a>'
            if any(scheduler.startable(db, plan, row["id"], set()) for row in rows) else "")
+    href = plan_links.get(rows[0]["plan"])
+    read = (f'<a class="btn btn-quiet" href="{esc(href)}">Read the plan</a>'
+            if href is not None else "")
     return f"""<details class="plan" id="plan-{esc(name)}"{open_attr}>
   <summary>
     <span class="plan-name">{esc(name)}</span>
     <span class="strip" role="img" aria-label="{esc(aria)}">{squares}</span>
     <span class="plan-counts">{esc(counts)}</span>
-    <span class="plan-end"><span class="num">{esc(_plan_cost(rows))}</span>{run}</span>
+    <span class="plan-end">{read}<span class="num">{esc(_plan_cost(rows))}</span>{run}</span>
   </summary>
   <ul class="rows">{tasks}</ul>
 </details>"""
@@ -459,14 +470,17 @@ def last_cap(home: Path) -> str:
 
 def run_page(db: DB, cfg: Config, home: Path, root: Path, port: int | None, token: str,
              kind: str, target: str, items: list[RunItem], values: dict[str, str] | None = None,
-             errors: dict[str, str] | None = None) -> str:
+             errors: dict[str, str] | None = None, plan_links: dict[str, str] | None = None) -> str:
     from ..agents import flow_models, missing_keys
 
+    plan_links = plan_links or {}
     errors = errors or {}
     if values is None:
         values = {"max_cost": last_cap(home), "parallel": "3", "max_attempts": "3", "flow": cfg.flow}
     first = items[0].row
     plan_name = observe.plan_name(first["plan"])
+    plan_href = (_plan_href(plan_links, first["plan"], first["id"] if kind == "task" else None)
+                 or f"/#plan-{quote(plan_name, safe='')}")
     name = plan_name if kind == "plan" else target
     lede = f"Run the {name} plan." if kind == "plan" else f"Run {target}."
     task_crumb = (f'<li><a href="/tasks/{quote(target, safe="")}">{esc(target)}</a></li>'
@@ -522,7 +536,7 @@ def run_page(db: DB, cfg: Config, home: Path, root: Path, port: int | None, toke
     content = f"""<div class="page-head">
   <ol class="crumbs">
     <li><a href="/">Board</a></li>
-    <li><a href="/#plan-{quote(plan_name, safe='')}">{esc(plan_name)}</a></li>
+    <li><a href="{esc(plan_href)}">{esc(plan_name)}</a></li>
     {task_crumb}
     <li>Run</li>
   </ol>
@@ -569,7 +583,8 @@ def run_page(db: DB, cfg: Config, home: Path, root: Path, port: int | None, toke
 
 
 def board(db: DB, cfg: Config, home: Path, port: int | None, token: str = "",
-          job: jobs.Job | None = None) -> str:
+          job: jobs.Job | None = None, plan_links: dict[str, str] | None = None) -> str:
+    plan_links = plan_links or {}
     rows = db.tasks()
     infos = {row["id"]: status(db, row) for row in rows}
     running_rows = [row for row in rows if row["status"] in ACTIVE]
@@ -621,10 +636,10 @@ def board(db: DB, cfg: Config, home: Path, port: int | None, token: str = "",
             finished.append((name, rs))
         else:
             remaining.append((name, rs))
-    plans = "".join(_plan(db, cfg, name, rs, True) for name, rs in live)
-    plans += "".join(_plan(db, cfg, name, rs, False) for name, rs in remaining)
+    plans = "".join(_plan(db, cfg, name, rs, True, plan_links) for name, rs in live)
+    plans += "".join(_plan(db, cfg, name, rs, False, plan_links) for name, rs in remaining)
     if finished:
-        finished_plans = "".join(_plan(db, cfg, name, rs, False) for name, rs in finished)
+        finished_plans = "".join(_plan(db, cfg, name, rs, False, plan_links) for name, rs in finished)
         label = "1 finished plan" if len(finished) == 1 else f"{len(finished)} finished plans"
         plans += f'<details class="finished" id="finished"><summary>{esc(label)}</summary>{finished_plans}</details>'
     content += f"""<section class="block" aria-labelledby="h-plans">
@@ -691,10 +706,19 @@ def _next_step(db: DB, row, info: Status, contract, actions: str = "") -> str:
 </section>"""
 
 
-def _points(items, mono: bool = False) -> str:
+def _points(items, mono: bool = False, plan_links: dict[str, str] | None = None) -> str:
     class_ = ' class="mono"' if mono else ""
-    points = "".join(f"<li{class_}>{esc(item)}</li>" for item in items)
-    return f'<ul class="points">{points}</ul>'
+    points = []
+    for item in items:
+        content = esc(item)
+        if plan_links is not None:
+            path, _, fragment = item.partition("#")
+            href = plan_links.get(path)
+            if href is not None:
+                href += f"#{fragment}" if fragment else ""
+                content = f'<a href="{esc(href)}">{esc(item)}</a>'
+        points.append(f"<li{class_}>{content}</li>")
+    return f'<ul class="points">{"".join(points)}</ul>'
 
 
 def _dependency(db: DB, task_id: str) -> str:
@@ -706,7 +730,7 @@ def _dependency(db: DB, task_id: str) -> str:
             f'{esc(task_id)}</a></li>')
 
 
-def _contract_block(db: DB, contract, needed_by: list[str]) -> str:
+def _contract_block(db: DB, contract, needed_by: list[str], plan_links: dict[str, str]) -> str:
     commands = "".join(
         f'<div class="cmd"><code>{esc(command)}</code>'
         '<button class="copy" type="button" hidden>Copy</button></div>'
@@ -726,7 +750,7 @@ def _contract_block(db: DB, contract, needed_by: list[str]) -> str:
   <h3>Needed by</h3>
   <ul class="deps">{dependents}</ul>
   <h3>Reads</h3>
-  {_points(contract.spec_refs, mono=True)}
+  {_points(contract.spec_refs, mono=True, plan_links=plan_links)}
 </section>"""
 
 
@@ -931,11 +955,14 @@ def _step(ai: dict, results: list[dict], row: dict) -> str:
 </div>"""
 
 
-def transcript(db: DB, home: Path, project: str, port: int | None, task_id: str, run) -> str:
+def transcript(db: DB, home: Path, project: str, port: int | None, task_id: str, run,
+               plan_links: dict[str, str] | None = None) -> str:
+    plan_links = plan_links or {}
     label = _run_name(run)
     title = f"What the {_role_word(run)} did, step by step."
     task_row = db.task(task_id)
     plan_name = observe.plan_name(task_row["plan"])
+    plan_href = _plan_href(plan_links, task_row["plan"], task_id) or f"/#plan-{plan_name}"
     task_href = f"/tasks/{quote(task_id, safe='')}"
 
     events = None
@@ -984,7 +1011,7 @@ def transcript(db: DB, home: Path, project: str, port: int | None, task_id: str,
     content = f"""<div class="page-head">
   <ol class="crumbs">
     <li><a href="/">Board</a></li>
-    <li><a href="/#plan-{esc(plan_name)}">{esc(plan_name)}</a></li>
+    <li><a href="{esc(plan_href)}">{esc(plan_name)}</a></li>
     <li><a href="{task_href}">{esc(task_id)}</a></li>
     <li>{esc(label)}</li>
   </ol>
@@ -1049,7 +1076,8 @@ def _log_block(home: Path, task_id: str) -> str:
 
 
 def task(db: DB, home: Path, project: str, port: int | None, task_id: str, token: str = "",
-         job: jobs.Job | None = None) -> str:
+         job: jobs.Job | None = None, plan_links: dict[str, str] | None = None) -> str:
+    plan_links = plan_links or {}
     row = db.task(task_id)
     info = status(db, row)
     contract = db.contract(task_id)
@@ -1069,6 +1097,7 @@ def task(db: DB, home: Path, project: str, port: int | None, task_id: str, token
     if (home / "worktrees" / task_id).exists() and not running:
         actions.append(confirm_link("clean", task_id, "Remove worktree", f"factory clean {task_id}", "btn-quiet"))
     plan_name = observe.plan_name(row["plan"])
+    plan_href = _plan_href(plan_links, row["plan"], task_id) or f"/#plan-{plan_name}"
     runs = list(reversed(db.runs(task_id)))
     needed_by = [r["id"] for r in db.tasks() if task_id in db.contract(r["id"]).depends_on]
 
@@ -1091,7 +1120,7 @@ def task(db: DB, home: Path, project: str, port: int | None, task_id: str, token
     content = f"""<div class="page-head">
   <ol class="crumbs">
     <li><a href="/">Board</a></li>
-    <li><a href="/#plan-{esc(plan_name)}">{esc(plan_name)}</a></li>
+    <li><a href="{esc(plan_href)}">{esc(plan_name)}</a></li>
     <li>{esc(task_id)}</li>
   </ol>
   <div class="task-id"><span>{esc(task_id)}</span>{status_html(info)}</div>
@@ -1100,7 +1129,7 @@ def task(db: DB, home: Path, project: str, port: int | None, task_id: str, token
 </div>
 {notice(job)}{_next_step(db, row, info, contract, "".join(actions))}
 <div class="cols">
-  {_contract_block(db, contract, needed_by)}
+  {_contract_block(db, contract, needed_by, plan_links)}
   {_runs_block(runs, task_id)}
 </div>
 {_log_block(home, task_id)}
