@@ -545,3 +545,19 @@ def test_pathological_input_renders_quickly():
     assert doc.html.count("<ul>") == 16     # nesting stops at 16 levels
     assert doc.html.count("<li>") == 5_000  # and no line is dropped
     assert elapsed < 2.0
+
+
+def test_the_term_hook_never_sees_internal_placeholders():
+    calls = []
+
+    def term(word, code):
+        calls.append((word, code))
+        if not code and word.isdigit():
+            return f"<b>{word}</b>"
+        return None
+
+    doc = markdown.render("Run `ticks` for 12 seconds.", term=term)
+    assert doc.html == "<p>Run <code>ticks</code> for <b>12</b> seconds.</p>"
+    assert "\x00" not in doc.html
+    assert ("ticks", True) in calls
+    assert ("0", False) not in calls

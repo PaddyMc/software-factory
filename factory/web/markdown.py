@@ -18,6 +18,7 @@ HR = re.compile(r"^ *([-*_])(?: *\1){2,} *$")
 DELIM_CELL = re.compile(r"^:?-+:?$")
 RUN_RE = re.compile(r"`+")
 EMPHASIS = re.compile(r"\*\*([^*]+)\*\*|\*([^*]+)\*")
+WORD_RE = re.compile(r"[\w-]+")
 IMG_RE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
 AUTO_RE = re.compile(r"<(https?://[^>]*)>")
 LINK_RE = re.compile(r"\[([^\]]*)\]\(([^()\s]*(?:\([^()]*\)[^()\s]*)*)(?:\s+\"[^\"]*\")?\)")
@@ -111,8 +112,8 @@ class Ctx:
 
 
 def _inline(text, ctx, term_text=True):
-    # 1. code spans, links, autolinks, images and escapes; placeholders protect their
-    # rendered form from the word and emphasis passes below
+    # 1. protect code spans, links, autolinks, images and escapes from the escaping
+    # and emphasis passes below; words go straight from the source to the term hook
     placeholders = []
 
     def keep(rendered):
@@ -159,23 +160,24 @@ def _inline(text, ctx, term_text=True):
                 out.append(keep(_link(m.group(1), m.group(2), ctx)))
                 i = m.end()
                 continue
+        if term_text and ctx.term:
+            m = WORD_RE.match(text, i)
+            if m:
+                word = m.group(0)
+                hook = ctx.term(word, False)
+                out.append(keep(hook) if hook is not None else word)
+                i = m.end()
+                continue
         out.append(text[i])
         i += 1
     joined = "".join(out)
 
-    # 2. words -> the term hook (code spans, links and autolinks are placeholders)
-    if term_text and ctx.term:
-        def word(match):
-            hook = ctx.term(match.group(0), False)
-            return keep(hook) if hook is not None else match.group(0)
-        joined = re.sub(r"[\w-]+", word, joined)
-
-    # 3. escape the remaining text, then strong and emphasis (asterisks only)
+    # 2. escape the remaining text, then strong and emphasis (asterisks only)
     joined = esc(joined)
     joined = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", joined)
     joined = re.sub(r"\*([^*]+)\*", r"<em>\1</em>", joined)
 
-    # 4. put the placeholders back
+    # 3. put the placeholders back
     def back(match):
         return placeholders[int(match.group(1))]
     return re.sub(r"\x00(\d+)\x00", back, joined)
@@ -310,7 +312,8 @@ def _blocks(lines, i, end, ctx, depth=0):
 def _delimiter(line):
     if "|" not in line:
         return False
-    return all(DELIM_CELL.match(c.strip()) for c in _split_cells(line) if True) and len(_split_cells(line)) >= 1
+    cells = _split_cells(line)
+    return bool(cells) and all(DELIM_CELL.match(cell.strip()) for cell in cells)
 
 
 def _starts_block(line, lines, i, end):
