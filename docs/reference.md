@@ -268,6 +268,8 @@ Useful `run` flags:
 | Page | What it shows |
 |---|---|
 | `/` | The board: what needs you, counts, running tasks and every plan |
+| `/plans` | Every plan doc, with its tasks' statuses |
+| `/plans/NAME` | The plan rendered, its contracts as task rows with their statuses, task ids and other plans linked, and a notice when the plan and the board disagree |
 | `/tasks/TASK` | The next step and note, contract, runs with their reports, and the last 200 log lines |
 | `/tasks/TASK/runs/RUN` | One agent run's transcript |
 | `/activity` | Commands the page ran, with output, plus every task's log merged |
