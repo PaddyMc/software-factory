@@ -21,7 +21,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | ✓ | A review without a verdict costs a rebuild, a task gets one build per attempt, and nothing picks the default flow from data. Done: [Build candidates](docs/architecture.md#build-candidates) | — | — |
 | 15 | Specify the shipped factory for implementers. Planned in [factory-spec](docs/plans/factory-spec.md) | medium | shipped factory |
 | 16 | Nothing reviews a change for security, and a builder can rewrite its reviewer's guidance. Planned: [security-review](docs/plans/security-review.md) | medium | 9, 14 |
-| 17 | Plans can't be read on the web page, and a task doesn't link to the plan that explains it. Planned: [plan-pages](docs/plans/plan-pages.md) | small | 10 |
+| ✓ | Plans can't be read on the web page, and a task doesn't link to the plan that explains it. Done: [The web page](docs/architecture.md#the-web-page) | — | — |
 | 18 | The backlog moves only while someone is at the terminal. Planned: [devbox](docs/plans/devbox.md) | medium | — |
 | 19 | The bench can't rank flows: every variant solves every shipped case, and comparisons have no error bars. Planned: [evals](docs/plans/evals.md) | medium | 8, 14 |
 | 20 | Follow a task’s agent thoughts across runs and retries in the terminal and web UI. [Thought timeline](docs/plans/thought-timeline.md) | small | 10, 12 (shipped) |

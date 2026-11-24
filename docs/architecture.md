@@ -351,14 +351,18 @@ Factory task commits have subject `factory(ID): GOAL`, with GOAL shortened at a 
 
 ## The web page
 
-`factory web [--port N] [--no-open]` binds 127.0.0.1 only, on port 8765 by default. If 8765 is busy and no port was given it picks a free one; a busy explicit `--port` exits 1. It reuses `observe`, `db.readiness` and `scheduler.startable`, so the page and `factory top` never disagree, and every page works without JavaScript. It serves six pages:
+`factory web [--port N] [--no-open]` binds 127.0.0.1 only, on port 8765 by default. If 8765 is busy and no port was given it picks a free one; a busy explicit `--port` exits 1. It reuses `observe`, `db.readiness` and `scheduler.startable`, so the page and `factory top` never disagree, and every page works without JavaScript. It serves eight pages:
 
 - `/` — the board: what needs you, counts, running tasks and every plan;
+- `/plans` — every plan doc, with its tasks' statuses;
+- `/plans/NAME` — the plan rendered, with its contracts as task rows and their statuses, task ids and other plans linked, and a notice when the plan and the board disagree;
 - `/tasks/TASK` — the next step and note, contract, runs with reports, and the last 200 log lines;
 - `/tasks/TASK/runs/RUN` — one agent run's transcript;
 - `/activity` — commands from the page with their output, and every task's log merged;
 - `/run?plan=…` and `/run?task=…` — what will run, the required cost cap and other limits, the exact command and the cost warning;
 - `/confirm` — the consequences of Stop or Remove worktree before the command is run.
+
+**Plan pages read only discovered plan docs and render their text safely.** The `plans` globs find plan docs in the checkout, the same files `factory sync` loads. `/plans/NAME` looks NAME up among those docs' file stems, never treating a path in the URL as a file to read. `factory/web/markdown.py` renders a built-in Markdown subset; raw HTML is escaped and shown as text. Contract blocks become task rows with board statuses, while task ids and links to other discovered plans become links. A plan page doesn't refresh itself: it is read rather than watched, and reloading updates its statuses. When the checkout's plan and the board disagree, a notice explains the difference and Load plans runs `factory sync` to bring the board up to date with the changed plan.
 
 **The server only reads the board and every change is a `factory` command run as a job.** After the CLI's one startup migration open, each request reads through its own `file:PATH?mode=ro` SQLite connection, so the web application cannot write the board. Every change is `factory sync`, `factory status --refresh`, `factory abandon`, `factory requeue`, `factory clean`, `factory stop` or `factory run`, started detached in its own session. The command, output and result are recorded under `$FACTORY_HOME/web/jobs/NNNNNN/`. Jobs survive the server stopping, a restart finds them, and only the newest 200 directories are kept. The activity page lists the newest 50 of those retained commands with their output.
 
