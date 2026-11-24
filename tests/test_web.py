@@ -1448,6 +1448,7 @@ def test_run_form_lists_what_will_run_and_previews_the_command(home, repo, monke
     db.update("empty-t01", status="merged")
     db.update("empty-t02", status="pr_open")
     db.close()
+    (repo / "docs/plans/form").mkdir(parents=True)
     _write_plan(repo, "# Plan: Form\n\nThe form plan.\n", "docs/plans/form/form.md")
     app = App(home, repo)
 
