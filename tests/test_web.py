@@ -17,6 +17,7 @@ import urllib.request
 import webbrowser
 from collections import Counter
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 from urllib.parse import quote, urlencode
 from html.parser import HTMLParser
@@ -2139,10 +2140,16 @@ After.
 def test_plans_page_lists_every_plan_doc_with_its_status(home, repo):
     db = _board(home, [_contract("demo-t01"), _contract("demo-t02", depends=["demo-t01"])])
     db.update("demo-t01", status="merged", cost_usd=1.5)
+    waiting = db.contract("demo-t02")
+    db.upsert_task(replace(waiting, depends_on=(*waiting.depends_on, "demo-t99")))
     db.close()
     (repo / "docs/plans/alpha.md").write_text(f"# Plan: Alpha workstream\n\nText.\n")
+    (repo / "docs/plans/alpha.md").write_text(
+        (repo / "docs/plans/alpha.md").read_text() + "\n```yaml\n" + _contract("alpha-t01") + "```\n")
     (repo / "docs/plans/second").mkdir(parents=True)
     (repo / "docs/plans/second/second.md").write_text(f"# Plan: Second workstream\n\nText.\n")
+    (repo / "docs/plans/second/second.md").write_text(
+        (repo / "docs/plans/second/second.md").read_text() + "\n```yaml\n" + _contract("second-t01") + "```\n")
     (repo / "docs/plans/notes").mkdir(parents=True)
     (repo / "docs/plans/notes/empty.md").write_text("# Empty plan\n\nJust prose, no contracts.\n")
     status, _, body = _get(App(home, repo), "/plans")
@@ -2253,3 +2260,73 @@ def test_every_page_has_plans_in_its_navigation(home, repo):
     for path in ("/tasks/demo-t01", f"/tasks/demo-t01/runs/{run_id:05d}",
                  "/run?task=demo-t01", "/confirm?action=stop&target=demo-t01", "/nope"):
         assert plain in _get(app, path)[2]
+
+
+def test_plan_pages_show_invalid_yaml_instead_of_failing(home, repo):
+    _write_plan(repo, '# Plan: Demo\n\n```yaml\n- id: demo-t01\n  goal: "unterminated\n```\n')
+    _board(home).close()
+    app = App(home, repo)
+
+    status, _, body = _get(app, "/plans/demo")
+    assert status == 200
+    assert '<div class="notice notice-bad" role="status">' in body
+    assert "The board can&#x27;t load this plan&#x27;s contracts:" in body
+    assert '<ul class="rows task-cards">' not in body
+    assert '<pre class="code"><code>' in body
+    assert _get(app, "/plans")[0] == 200
+
+
+def test_plans_page_uses_board_readiness_and_the_mockup_structure(home, repo):
+    db = _board(home, [_contract("demo-t01"), _contract("demo-t02", depends=["demo-t01"])])
+    db.update("demo-t01", status="merged")
+    db.close()
+    app = App(home, repo)
+
+    assert "1 of 2 merged, 1 ready" in _get(app)[2]
+    status, _, body = _get(app, "/plans")
+    assert status == 200
+    row = re.search(r'<li id="plan-demo">(.*?)</li>', body, re.S).group(1)
+    assert 'aria-label="1 merged, 1 ready"' in row
+    assert '<i class="s-merged"></i><i class="s-ready"></i>' in row
+    assert '<span class="plan-counts">1 of 2 merged, 1 ready</span>' in row
+    assert '<section class="block" aria-labelledby="h-plans">' in body
+    assert '<span class="aside mono">docs/plans/**/*.md</span>' in body
+    assert body.count('class="live-dot"') == 1
+
+
+def test_a_plan_heading_without_contracts_is_not_unloaded(home, repo):
+    _write_plan(repo, "# Plan: Empty workstream\n\nJust prose.\n")
+    _board(home).close()
+    status, _, body = _get(App(home, repo), "/plans")
+
+    assert status == 200
+    assert '<h1 class="lede">1 plan, 0 with work left.</h1>' in body
+    row = re.search(r'<li id="plan-demo">(.*?)</li>', body, re.S).group(1)
+    assert '<span class="plan-counts">No task contracts</span>' in row
+    assert 'aria-label="no task contracts"' in row
+
+
+def test_plan_page_actions_are_inside_the_page_head(home, repo):
+    db = _board(home, [_contract("demo-t01"), _contract("demo-t02", depends=["demo-t01"])])
+    db.close()
+    body = _get(App(home, repo), "/plans/demo")[2]
+
+    before_actions = (body.split('<div class="page-head">', 1)[1]
+                      .split('<div class="page-acts">', 1)[0])
+    assert before_actions.count("<div") == before_actions.count("</div>")
+    assert '</dl><div class="page-acts">' in body
+
+
+def test_a_plan_deleted_during_discovery_is_skipped(home, repo, monkeypatch):
+    _board(home).close()
+    discover = contracts.discover_plans
+
+    def discover_then_delete(root, config):
+        paths = discover(root, config)
+        paths[0].unlink()
+        return paths
+
+    monkeypatch.setattr(contracts, "discover_plans", discover_then_delete)
+    status, _, body = _get(App(home, repo), "/plans")
+    assert status == 200
+    assert '<h1 class="lede">No plans yet.</h1>' in body

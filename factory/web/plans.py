@@ -20,7 +20,7 @@ class PlanDoc:
     title: str
     text: str
     tasks: tuple[contracts.Task, ...]
-    error: contracts.ContractError | None
+    error: contracts.ContractError | yaml.YAMLError | None
 
     @property
     def name(self) -> str:
@@ -31,18 +31,26 @@ def load_docs(root: Path, config, cache: dict) -> list[PlanDoc]:
     """Read and parse a doc only when its path, size or modification time changes."""
     docs = []
     for path in contracts.discover_plans(root, config):
-        stat = path.stat()
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            # A branch switch can remove a doc between discovery and stat.
+            continue
         key = (stat.st_size, stat.st_mtime_ns)
         cached = cache.get(path)
         if cached is not None and cached[0] == key:
             docs.append(cached[1])
             continue
         rel = path.relative_to(root).as_posix()
-        text = path.read_bytes().decode("utf-8", errors="replace")
+        try:
+            text = path.read_bytes().decode("utf-8", errors="replace")
+        except FileNotFoundError:
+            # Likewise, a doc can disappear after a successful stat.
+            continue
         error = None
         try:
             tasks = tuple(contracts.parse_text(text, plan=rel))
-        except contracts.ContractError as exc:
+        except (contracts.ContractError, yaml.YAMLError) as exc:
             tasks, error = (), exc
         title = markdown.render(text).title
         if title:
@@ -66,16 +74,15 @@ def _board_rows(db, doc: PlanDoc, rows):
                  if tasks and tasks[0]["plan"] == doc.rel), [])
 
 
-def _strip(db, rows, empty_label: str = "", queued_waiting: bool = False) -> str:
-    infos = [views.WAITING if queued_waiting and row["status"] == "queued"
-             else views.status(db, row) for row in rows]
+def _strip(db, rows, empty_label: str = "") -> str:
+    infos = [views.status(db, row) for row in rows]
     _, aria = views._counts(rows, infos)
     squares = "".join(f'<i class="{info.css}"></i>' for info in infos)
     return (f'<span class="strip" role="img" aria-label="{views.esc(aria or empty_label)}">'
             f'{squares}</span>')
 
 
-def _page_head(db, doc: PlanDoc, rows) -> str:
+def _page_head(db, doc: PlanDoc, rows, config) -> str:
     counts, _ = views._counts(rows, [views.status(db, row) for row in rows])
     spent = f"${sum(row['cost_usd'] or 0 for row in rows):.2f}"
     facts = (
@@ -88,8 +95,9 @@ def _page_head(db, doc: PlanDoc, rows) -> str:
     crumbs = ('<ol class="crumbs"><li><a href="/">Board</a></li>'
               '<li><a href="/plans">Plans</a></li>'
               f'<li>{views.esc(doc.name)}</li></ol>')
+    actions = _page_actions(db, doc, rows, config)
     return (f'<div class="page-head">{crumbs}<h1 class="lede">{views.esc(doc.title)}</h1>'
-            f'{facts}</div>')
+            f'{facts}{actions}</div>')
 
 
 def _page_actions(db, doc: PlanDoc, rows, config) -> str:
@@ -201,9 +209,11 @@ class _Renderer:
         self.doc = doc
         self.by_id = {row["id"]: row for row in rows}
         self.by_path = {item.path.resolve(): item for item in docs}
-        self.task_at = 0
+        self.tasks_by_id = {task.id: task for task in doc.tasks}
         self.contract_block = 0
         self.yaml_bodies = {}
+        # Markdown requires a clean closing fence while parse_text is looser. A malformed
+        # fence remains code; matching later blocks by id keeps their task rows in sync.
         for match in re.finditer(r"^```yaml\n(.*?)^```", doc.text, re.S | re.M):
             body = match.group(1)
             self.yaml_bodies[body] = self.yaml_bodies.get(body, 0) + 1
@@ -234,7 +244,8 @@ class _Renderer:
 
     @staticmethod
     def _code(body: str) -> str:
-        return f'<pre class="code"><code>{views.esc(body.removesuffix(chr(10)))}</code></pre>'
+        text = body.removesuffix("\n")
+        return f'<pre class="code"><code>{views.esc(text)}</code></pre>'
 
     def fence(self, lang: str, body: str):
         code = self._code(body)
@@ -247,10 +258,9 @@ class _Renderer:
         if not isinstance(items, list) or not items or not all(
                 isinstance(item, dict) and "id" in item for item in items):
             return code
-        tasks = self.doc.tasks[self.task_at:self.task_at + len(items)]
-        if len(tasks) != len(items) or [task.id for task in tasks] != [item["id"] for item in items]:
+        tasks = tuple(self.tasks_by_id.get(item["id"]) for item in items)
+        if any(task is None for task in tasks):
             return code
-        self.task_at += len(items)
         self.contract_block += 1
         self.yaml_bodies[body] -= 1
         rows = "".join(_task_row(self.db, task, self.by_id, self.link, self.term) for task in tasks)
@@ -284,16 +294,13 @@ def plan_page(db, doc: PlanDoc, docs: list[PlanDoc], config, home, port, token: 
     board = _board_rows(db, doc, rows)
     renderer = _Renderer(db, doc, docs, rows)
     rendered = markdown.render(doc.text, fence=renderer.fence, link=renderer.link, term=renderer.term)
-    body = (_page_head(db, doc, board) + _page_actions(db, doc, board, config)
-            + _notice(doc, rows, token)
+    body = (_page_head(db, doc, board, config) + _notice(doc, rows, token)
             + f'<div class="doc">{_contents(rendered.headings)}<div class="prose">{rendered.html}</div></div>')
     return views._page(doc.name, config.name, home, port, body, current="plans")
 
 
 def _awaiting_board(doc: PlanDoc) -> bool:
-    # A Plan: heading marks a workstream even before its first contract block is added.
-    return (bool(doc.tasks) or doc.error is not None
-            or re.search(r"^# +Plan:\s*", doc.text, re.M) is not None)
+    return bool(doc.tasks) or doc.error is not None
 
 
 def plans_page(db, docs: list[PlanDoc], config, home, port, token: str) -> str:
@@ -314,9 +321,7 @@ def plans_page(db, docs: list[PlanDoc], config, home, port, token: str) -> str:
     for doc in ordered:
         board = board_by_path[doc.rel]
         if board:
-            infos = [views.WAITING if row["status"] == "queued" else views.status(db, row)
-                     for row in board]
-            counts, _ = views._counts(board, infos)
+            counts, _ = views._counts(board, [views.status(db, row) for row in board])
             empty_label = ""
         else:
             awaiting = _awaiting_board(doc)
@@ -325,7 +330,7 @@ def plans_page(db, docs: list[PlanDoc], config, home, port, token: str) -> str:
         items.append(
             f'<li id="plan-{views.esc(doc.name)}">'
             f'<a class="plan-name" href="{_url(doc)}">{views.esc(doc.name)}</a>'
-            f'{_strip(db, board, empty_label, queued_waiting=True)}'
+            f'{_strip(db, board, empty_label)}'
             f'<span class="plan-about"><span class="plan-title">{views.esc(doc.title)}</span>'
             f'<span class="plan-path">{views.esc(doc.rel)}</span></span>'
             f'<span class="plan-end"><span class="plan-counts">{views.esc(counts)}</span>'
@@ -335,12 +340,12 @@ def plans_page(db, docs: list[PlanDoc], config, home, port, token: str) -> str:
         empty = ('<p class="fine">The config\'s <code>plans</code> globs are '
                  f'<code>{views.esc(", ".join(config.plans))}</code>.</p>')
     heading = (f'<h2 id="h-plans">Plans <span class="count">{len(ordered)}</span> '
-               f'<span class="fine">{views.esc(", ".join(config.plans))}</span></h2>')
-    section = f'<section class="board"><div class="board-head">{heading}</div><ul class="plan-list">{"".join(items)}</ul></section>'
+               f'<span class="aside mono">{views.esc(", ".join(config.plans))}</span></h2>')
+    section = (f'<section class="block" aria-labelledby="h-plans">{heading}'
+               f'<ul class="plan-list">{"".join(items)}</ul></section>')
     body = f'<div class="page-head"><h1 class="lede">{views.esc(lede)}</h1>{empty}</div>{section}'
-    top_end = (f'<span class="live-dot" title="Refreshing every 2 seconds"></span>'
-               f'{_sync_form(token, "/plans")}')
-    return views._page("Plans", config.name, home, port, body, refresh=2, current="plans", top_end=top_end)
+    return views._page("Plans", config.name, home, port, body, refresh=2, current="plans",
+                       top_end=_sync_form(token, "/plans"))
 
 
 def plan_error(name: str, matches: list[PlanDoc], config, home, port) -> str:
