@@ -1,5 +1,4 @@
-SOFTWARE FACTORY SPECIFICATION
-Chapter 04 — Isolation and authority
+04 — Isolation and authority
 
 Edition: 8bd7012
 Status: normative for the factory at that revision.
@@ -390,7 +389,7 @@ mappings rather than being merged key by key. Unspecified sandbox
 keys keep their defaults. Top-level `dependency_sources` and
 `denied_commands` control PathGuard sources and extra command regexes
 respectively; neither is a bubblewrap mount setting.
-[Source: `factory/config.py::SandboxConfig`, `Config.parse`,
+[Source: `factory/config.py::SandboxConfig`, `parse`,
 `Config.dependency_dirs`; `factory/sandbox.py::Bwrap`;
 tests: `tests/test_config.py::test_full_config_parses`,
 `tests/test_sandbox.py::test_sandbox_settings_come_from_config`.]
