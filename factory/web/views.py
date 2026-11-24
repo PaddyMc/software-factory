@@ -327,6 +327,7 @@ def _page(title: str, project: str, home: Path, port: int | None, content: str,
     address = f"127.0.0.1:{port}" if port is not None else "127.0.0.1"
     refresh_attr = f' data-refresh="{esc(refresh)}"' if refresh is not None else ""
     board_current = ' aria-current="page"' if current == "board" else ""
+    plans_current = ' aria-current="page"' if current == "plans" else ""
     activity_current = ' aria-current="page"' if current == "activity" else ""
     return f"""<!doctype html>
 <html lang="en">
@@ -342,7 +343,7 @@ def _page(title: str, project: str, home: Path, port: int | None, content: str,
 <header class="top">
   <div class="wrap">
     <a class="brand" href="/">factory <span>/ {esc(project)}</span></a>
-    <nav class="nav" aria-label="Pages"><a href="/"{board_current}>Board</a><a href="/activity"{activity_current}>Activity</a></nav>
+    <nav class="nav" aria-label="Pages"><a href="/"{board_current}>Board</a><a href="/plans"{plans_current}>Plans</a><a href="/activity"{activity_current}>Activity</a></nav>
     <div class="top-end"><span class="live-dot" data-state="live">Live</span>{top_end}</div>
   </div>
 </header>
