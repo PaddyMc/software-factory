@@ -22,3 +22,7 @@ contract:
   risk: low
 hidden:
   - python3 -m unittest -v bench_hidden.test_report
+pass_to_pass:
+  - python3 -m unittest -q
+protected:
+  - tests/test_cli.py

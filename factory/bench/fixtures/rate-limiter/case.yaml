@@ -21,3 +21,7 @@ contract:
   risk: low
 hidden:
   - python3 -m unittest -v bench_hidden.test_rate
+pass_to_pass:
+  - python3 -m unittest -q
+protected:
+  - tests/test_limiter.py

@@ -90,6 +90,8 @@ def _variant_stats(cells: list[dict]) -> dict:
         "solved": solved,
         "eligible": len(eligible),
         "false": sum(cell["outcome"] == "false_pass" for cell in cells),
+        "regressed": sum(cell["outcome"] == "regressed" for cell in cells),
+        "tampered": sum(cell["outcome"] == "tampered" for cell in cells),
         "failed": sum(cell["outcome"] == "failed" for cell in cells),
         "error": sum(cell["outcome"] == "error" for cell in cells),
         "stopped": sum(cell["outcome"] == "stopped" for cell in cells),
@@ -173,7 +175,7 @@ def summary(results: dict) -> str:
     pass_width = max([len("pass^k"), *(len(value) for value in pass_columns.values())])
     lines = [
         f"{'variant':<{variant_width}}  {'cells':>5}  {'solved':<{solved_width}}  "
-        f"{'pass^k':<{pass_width}}  {'false':>5}  {'failed':>6}  "
+        f"{'pass^k':<{pass_width}}  {'false':>5}  {'regressed':>9}  {'tampered':>8}  {'failed':>6}  "
         f"{'err/stop/skip/not run':>21}  {'attempts':>8}  {'cost/cell':>9}  "
         f"{'cost/solved':>11}  {'total':>9}  {'min/cell':>8}  *"
     ]
@@ -183,7 +185,8 @@ def summary(results: dict) -> str:
         marker = "  *" if variant in pareto else ""
         lines.append(
             f"{variant:<{variant_width}}  {raw['cells']:>5}  {solved_columns[variant]:<{solved_width}}  "
-            f"{pass_columns[variant]:<{pass_width}}  {raw['false']:>5}  {raw['failed']:>6}  "
+            f"{pass_columns[variant]:<{pass_width}}  {raw['false']:>5}  "
+            f"{raw['regressed']:>9}  {raw['tampered']:>8}  {raw['failed']:>6}  "
             f"{interruptions:>21}  {_number(raw['attempts']):>8}  "
             f"{_number(analysis['cost_per_cell']['mean'], '.2f', '$'):>9}  "
             f"{_number(analysis['cost_per_solved'], '.2f', '$'):>11}  "
