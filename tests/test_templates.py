@@ -455,3 +455,37 @@ def test_the_factory_ops_skill_covers_candidates():
         "the skill doesn't cover choosing a flow with candidates"
     assert any("candidate" in line and "factory show" in line for line in skill.splitlines()), \
         "the skill doesn't cover reading a task's candidate runs"
+
+
+# The plan pages are in the factory's own docs too (plan-pages-t04): the web page sections of the
+# reference and the architecture, the factory-ops skill's `factory web` bullet, and NEXT.md's item 17.
+
+
+def test_the_docs_describe_the_plan_pages():
+    """The docs describe the plan pages: the reference's web page table has a row for each page, the
+    architecture's web page section lists both pages and names the Markdown renderer, the factory-ops
+    skill says `factory web` shows the plans at /plans, and NEXT.md marks item 17 done."""
+    pages = _table(_section(_doc("reference.md"), "### The web page"))
+    assert any(re.match(r"\| `?/plans`? \|", row) for row in pages), \
+        "the page table in docs/reference.md's web page section has no `/plans` row"
+    assert any(re.match(r"\| `?/plans/NAME`? \|", row) for row in pages), \
+        "the page table in docs/reference.md's web page section has no `/plans/NAME` row"
+
+    web = _section(_doc("architecture.md"), "## The web page")
+    assert re.search(r"/plans(?!/NAME)", web), \
+        "the web page section in docs/architecture.md lists no `/plans` page"
+    assert "/plans/NAME" in web, \
+        "the web page section in docs/architecture.md lists no `/plans/NAME` page"
+    assert "markdown.py" in web, \
+        "the web page section in docs/architecture.md doesn't say plans are rendered by factory/web/markdown.py"
+
+    skill = (PACKAGE / "templates/skills/factory-ops/SKILL.md").read_text()
+    assert any("factory web" in line and "/plans" in line for line in skill.splitlines()), \
+        "the factory-ops skill doesn't say `factory web` shows the plans at /plans"
+
+    rows = [line for line in (PACKAGE.parent / "NEXT.md").read_text().splitlines()
+            if line.startswith("|") and "Plans can't be read on the web page" in line]
+    assert rows, "NEXT.md's table has no item 17 row (plans can't be read on the web page)"
+    assert rows[0].startswith("| ✓ |"), "item 17 isn't marked done in NEXT.md's table"
+    assert "architecture.md#the-web-page" in rows[0], \
+        "the done item doesn't link docs/architecture.md#the-web-page"
