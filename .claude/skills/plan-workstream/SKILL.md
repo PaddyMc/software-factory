@@ -13,6 +13,8 @@ Plan a unit of work as a reviewable, hand-off-able artifact: a plan doc in the p
 
 Locking strategic decisions with the user **before** writing the plan is the core discipline. It prevents wishlist plans and scope creep.
 
+Write for two audiences without making either decode the other's format: a maintainer should understand the problem, goal, and scope from a short opening summary, while the factory still receives complete executable contracts. Put the human explanation first; keep the implementation and machine-readable detail below it.
+
 ## Workflow
 
 Run these five phases in order. Skip a phase only with explicit user direction.
@@ -51,6 +53,8 @@ After answers come back, summarize the locked decisions in a table and proceed.
 ### Phase 3: Produce the plan doc
 
 Write `<plans-dir>/[<area>/unimplemented/]<workstream-slug>.md` using the template below.
+
+Start with **Plan at a Glance**. Keep it to roughly 150-200 words and use plain language: what is wrong, what will be different when the work is done, what is included and excluded, and how the work will proceed. A reader should understand the purpose without reading task IDs, YAML, file paths, or design detail. Explain unavoidable technical terms rather than expecting the reader to know them.
 
 The plan MUST include a detailed, bounded **Task Contracts** section. Every contract is one independently reviewable task with a stable, workstream-prefixed unique `id` (`<slug>-t01`). Do not hide implementation work only in milestone prose.
 
@@ -94,6 +98,25 @@ When the user asks for an engineer brief, write one with the brief template belo
 
 **Status:** Planned (YYYY-MM-DD). Workstream scoped; awaiting kickoff.
 
+## Plan at a Glance
+
+**Problem:** <What is broken or missing, and why it matters, in 1-2 plain-language sentences.>
+
+**Goal:** When this workstream is complete, <the observable outcome for the project or its users>.
+
+**In scope:** <The boundaries of this workstream in one sentence or a short list.>
+
+**Out of scope:** <The important exclusions, so readers know what not to expect.>
+
+**Approach:**
+1. <First major outcome in plain language.>
+2. <Next major outcome in plain language.>
+3. <Final major outcome, if needed.>
+
+**First task:** `<workstream-slug>-t01` — <what it delivers and why it comes first>.
+
+> **Reading guide:** Start here for the purpose and scope. Read **Execution Plan** for sequencing and review boundaries, **Task Contracts** for factory-executable work, and **Design** plus the remaining sections for implementation detail.
+
 ---
 
 ## Execution Plan
@@ -107,10 +130,10 @@ When the user asks for an engineer brief, write one with the brief template belo
 
 ### Milestones
 
-| # | Deliverable | Exit criteria | Parallelizable with |
+| # | Outcome | Exit criteria | Parallelizable with |
 |---|---|---|---|
 | **M0** | <prerequisite or spike, if any> | <how we know it's done> | <other Mn or —> |
-| **M1** | <first real deliverable> | <concrete exit gate> | <other Mn or —> |
+| **M1** | <first visible outcome in plain language> | <concrete exit gate> | <other Mn or —> |
 
 **Sequence:** `M0 → M1 ∥ M2 → M3` (`∥` parallel, `→` sequential).
 
@@ -146,13 +169,9 @@ Prerequisite for `<workstream-slug>-t02` (if any): <external prerequisite or dec
 
 ---
 
-## Problem
+## Background and Evidence
 
-<What's broken, missing, or needed. Cite file paths and line numbers.>
-
-## Goal
-
-<What success looks like in 1-3 sentences.>
+<Technical context that supports the opening problem statement. Cite file paths and line numbers; add detail here rather than crowding the summary.>
 
 ## Design
 
@@ -193,7 +212,7 @@ Plain text, not a file, roughly 200-300 words:
 ```
 **Task: <Workstream title>**
 
-Plan doc: `<path>` — read this first; locked decisions and milestones are in the Execution Plan section at the top.
+Plan doc: `<path>` — read **Plan at a Glance** first; locked decisions and milestones are in the Execution Plan section below it.
 
 **Context:** <2-3 sentences. What's broken/missing, why now.>
 
@@ -215,6 +234,9 @@ Plan doc: `<path>` — read this first; locked decisions and milestones are in t
 ## Rules and anti-patterns
 
 - **No plan without locked decisions.** If Phase 2 was skipped, the plan is half-baked.
+- **Purpose before machinery.** The opening summary must explain the problem, observable goal, scope, approach, and first task before any milestone table or YAML.
+- **Write for a new reader.** Use concrete, plain language; define unavoidable technical terms; keep file paths, line references, and commands in the supporting sections.
+- **Do not repeat the summary.** Put evidence in Background and Evidence, implementation detail in Design, and execution detail in Execution Plan.
 - **Recommendations belong in the question, not the plan.** The plan records what was decided, not what was considered.
 - **Status is a date, never "TBD".** Use today's date and the state (`Planned`, `In-flight`, `Implemented`).
 - **Milestones have exit criteria.** "Implement X" is not one; "test Y passes" is.
@@ -225,6 +247,7 @@ Plan doc: `<path>` — read this first; locked decisions and milestones are in t
 
 Before emitting a plan, check:
 
+- **Human readability:** the opening states the problem, goal, scope, approach, and first task in plain language; a new reader can explain the plan's purpose without reading the YAML.
 - **Completeness:** every milestone maps to task IDs, and every task belongs to a milestone.
 - **Schema:** `factory validate-plan <plan>` passes. Each item has exactly the 8 keys.
 - **Dependencies:** they resolve, the graph is acyclic, and shared write scopes are serialized.
