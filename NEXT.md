@@ -27,6 +27,7 @@ Gaps found by comparing the factory with similar projects (2026-10-31). This lis
 | 20 | Follow a task’s agent thoughts across runs and retries in the terminal and web UI. [Thought timeline](docs/plans/thought-timeline.md) | small | 10, 12 (shipped) |
 | 21 | Nothing measures the factory against outside benchmarks or on security work, and the SWE-bench Verified target is retired. Planned: [external-evals](docs/plans/external-evals.md) | large | evals, 16 |
 | 22 | Agents can't look anything up: no web search or page reading, no planner shell, installed Python packages unreadable. Planned: [web-tools](docs/plans/web-tools.md) | medium | 16, 19 |
+| 23 | Every factory PR waits for a human merge into `main`, so a stack moves one merge and one refresh at a time. Planned: [land](docs/plans/land.md) | medium | — |
 
 ## 1. Act on human PR review comments
 
@@ -306,3 +307,14 @@ How much this costs is unclear. On this repository's board, 1,092 agent commands
 - Every fetch refuses private addresses and the repository's own remote, honours allow and block lists, caps sizes, frames pages as untrusted and is recorded in the transcript.
 - A plan step can set `shell: readonly`, and `dependency_sources` accepts `{root}` and globs for installed packages.
 - A bench trial on the mined suite decides whether strict with web, or with the planner shell, replaces strict.
+
+## 23. Land factory PRs on a dev branch
+
+**Gap.** Only a human merges, and only into the branch a run started on. A stack of factory PRs moves one merge and one `factory status --refresh` at a time, and finished work waits whenever nobody is at GitHub. Nothing combines the signals refresh already reads (CI, mergeability, reviews, a pushed head) into "ready to merge", and a restacked head is checked only by CI.
+
+**Plan.** [docs/plans/land.md](docs/plans/land.md) (planned 2026-11-26, tasks `land-t01`…`t09`):
+- `trunk: dev` points factory PRs at an integration branch with lighter protection than `main`.
+- `factory land` (one pass, or `--watch`) finds ready PRs, gates each head the gates haven't passed, and has a new read-only role, the lander, review it. On `VERDICT: MERGE` the factory merges it into the trunk, pinned to the reviewed head, and restacks the next PR in the stack. `risk: high` contracts and changes to `.factory/`, `.github/` or guidance files wait for a human.
+- A `VERDICT: HOLD` sends the PR back for rework like a human's request for changes, up to `land.max_holds` times per fresh build.
+- `factory promote` keeps one trunk → `main` PR listing every task it carries. Merging it is the human approval.
+- A scripted end-to-end test of the whole flow (sync, stacked landings, a hold and its rework, a red trunk, promotion) runs as its own CI job on every push to `dev` and every PR. `factory land` merges only while every check on the trunk's head has passed, so one PR lands per trunk CI run. A `live smoke` workflow, started by hand, runs `factory bench run --require-solved` with the pinned models, and `main` requires it on the promotion PR's head.

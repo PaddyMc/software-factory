@@ -525,6 +525,7 @@ These run in `tests/test_pipeline.py`, driving the real CLI, pipeline, agents, g
   - [external-evals](external-evals.md). Its by-hand `external-evals-t10` depends on `security-review-t06` and runs the built-in `secure` flow against `strict` on SWE-bench Pro and PatchEval, so the security step is measured on real vulnerability fixes.
   - [web-tools](web-tools.md). `web-tools-t01` depends on `security-review-t06` and `web-tools-t05` on `security-review-t07`: web-tools changes the same `agents.py`, `flows.py`, `config.py`, `cli.py` and docs, adding web and shell tools to plan, test and build steps (never to review, verify or security steps).
   - [wiki](wiki.md). `wiki-t01` depends on `security-review-t06` and `wiki-t07` on `security-review-t07`. Wiki changes the same `agents.py`, `gates.py`, `cli.py` and docs, and its task agents' guidance comes from t01's main-checkout read. A `security` step gets a role page only if the wiki has one for it.
+- **Related:** [land](land.md). `land-t02` makes a PR that changes `.factory/`, `.github/` or a guidance file wait for a human before `factory land` merges it into the trunk. Those are the steering files this plan's `guarded_paths` gate covers. When both have landed, land's list should become `guarded_paths`.
 
 ## Notes / Out of Scope
 

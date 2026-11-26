@@ -403,6 +403,7 @@ The same line sits under `factory top`'s header and above the plans on the web b
   - [plan-pages](plan-pages.md) `plan-pages-t01`…`t03` and `steer-t04` change `factory/web/views.py`.
 
   The factory's conflict resolution handles these as it did for steer and security-review.
+- **Related:** [land](land.md). Its `factory land --watch` runs beside the worker. The worker starts `changes_requested` tasks, so it reworks the PRs the lander holds, and once `land-t01` has merged, the trunk this plan's checkout updater fast-forwards is `trunk:`. A land pass on each worker poll is deferred in both plans.
 - **Related:** NEXT.md item 6 ("Runs need this machine"). This plan lets one remote box run the backlog while you watch with `factory web` over `ssh -L`. The shared board and hosted workspaces stay open there.
 
 ## Notes / Out of Scope
