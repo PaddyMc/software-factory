@@ -1,6 +1,6 @@
-# Plan: Measure the factory on current SWE and security benchmarks
+# Plan: Measure the factory on SWE-rebench
 
-**Status:** Planned (2026-11-22). Workstream scoped; awaiting kickoff: t01 and t02 can run now; t03 waits for `evals-t07`. Roadmap: [NEXT.md item 21](../../NEXT.md#21-nothing-measures-the-factory-against-outside-benchmarks). It supersedes the `experiment/swe-bench` plan (PR #83, none of its tasks built), whose Docker sandbox design t01 reuses.
+**Status:** Planned (2026-11-22), reworked 2026-11-23 to a single benchmark. Workstream scoped; awaiting kickoff: t01 can run now; t02 waits for `evals-t07`. Roadmap: [NEXT.md item 21](../../NEXT.md#21-nothing-measures-the-factory-against-an-outside-benchmark). It supersedes the `experiment/swe-bench` plan (PR #83, none of its tasks built), whose Docker sandbox design t01 reuses.
 
 ---
 
@@ -10,49 +10,39 @@
 
 | Decision | Choice |
 |---|---|
-| Where it lives | **On `main`, in `factory bench`.** The Docker sandbox and the benchmark adapters ship with the factory, so anyone can reproduce a number. This replaces the by-hand `experiment/swe-bench` branch, and its SWE-bench Verified target is dropped: OpenAI stopped reporting Verified in February 2026 as contaminated, and Epoch rates it "Flawed" |
-| Harness | **Native bench adapters.** Each benchmark's instances become bench cases that run in the benchmark's own images, and the benchmark's official scorer decides `solved`. The factory is not packaged as a Harbor or Inspect agent: its worktrees, file tools and gates stay as they are, and evals' statistics, check, splits and ledger apply to the new cases unchanged |
-| SWE suite | **SWE-bench Pro, public V2** (`ScaleAI/SWE-bench_Pro`, default config: 642 tasks in 11 repositories, Go, Python, JavaScript and TypeScript). It's scored by Pro's authoritative re-grade: Harbor's `patch_replay` agent runs each captured diff on a pristine image |
-| Cyber suite | **Vulnerability patching on PatchEval-Verified** (`ByteDance/PatchEval`: 230 CVEs in Go, JavaScript and Python, Apache-2.0). It's scored by PatchEval's `run_evaluation.py`, which passes a patch when the image's `fix-run.sh` exits 0. Offensive work (CTFs, PoC generation, exploitation: Cybench, CyberGym, CVE-Bench) is out, because the factory's output is a PR, not an exploit |
-| Sequencing | **After evals' code tasks.** Every task here that changes `factory/bench/` depends on `evals-t07`. t01 (the Docker sandbox) and t02 (Go and JavaScript test runners) touch no bench file and run now |
-| Sample and budget | **50 Pro instances, stratified by repository, and 40 PatchEval CVEs, stratified by language**, both seeded. About ±13–15 points at 95%, about $250–400 per variant, and about 250 GB of images |
-| Measurements | **By hand, two of them.** First the configured `strict` flow on both suites (t09). Then `secure` against `strict` once security-review's `secure` flow lands (t10), reusing t09's strict cells |
+| Benchmark | **One: the [SWE-rebench leaderboard](https://huggingface.co/datasets/nebius/SWE-rebench-leaderboard) set** (`nebius/SWE-rebench-leaderboard`, CC-BY-4.0). It's Python only, with real GitHub issues and PRs collected every month, so the newest month postdates the models' training. Every task has a prebuilt public image (`docker_image`) and the leaderboard at [swe-rebench.com](https://swe-rebench.com/) scores bare models on the same months. SWE-bench Verified (contaminated), SWE-bench Pro (four languages, Harbor scoring, about 250 GB of images) and PatchEval (security only) are out |
+| Scoring | **The factory grades, as SWE-bench does.** In a fresh container of the task's image, the test patch's files are laid over the candidate, the task's `test_cmd` runs on them, and pytest's `-rA` lines are parsed as SWE-bench 4.0.3's `parse_log_pytest` does. Resolved means every `FAIL_TO_PASS` and `PASS_TO_PASS` test passed. `factory bench export` writes SWE-bench predictions, so a run can be re-graded by hand with SWE-rebench's own harness. No external tool runs per cell |
+| Tasks | **One whole month.** `factory bench prepare --month YYYY-MM` builds every task created that month (the dataset's monthly splits hold 30 to 110). There is no sampling, and the result lines up with the leaderboard's window for that month |
+| Measurement | **By hand, once: the configured `strict` flow, one repeat, on the newest month** (t06), with `--max-cost 300`. There is no flow comparison and no security measurement |
+| Sequencing | **After evals' code tasks.** t01 (the Docker sandbox) touches no bench file and runs now. Every task that changes `factory/bench/` waits for `evals-t07`, and the docs task for `evals-t08` |
 
 ### Milestones
 
 | # | Deliverable | Exit criteria | Parallelizable with |
 |---|---|---|---|
-| **M1** | Docker sandbox | `tests/test_sandbox_docker.py` passes; `tests/test_sandbox.py` and `tests/test_config.py` pass unmodified | M2 |
-| **M2** | Go and JavaScript test runners | The t02 tests in `tests/test_verification.py` pass | M1 |
-| **M3** | External cases in the bench | The t03 tests in `tests/test_bench_external.py` pass; the evals bench tests pass unmodified | — |
-| **M4** | Checking external cases | The t04 tests in `tests/test_bench_external.py` pass | — |
-| **M5** | SWE-bench Pro adapter | `tests/test_external_swebench_pro.py` passes | M6, M7 |
-| **M6** | PatchEval adapter | `tests/test_external_patcheval.py` passes | M5, M7 |
-| **M7** | Reading and exporting external runs | The t07 tests in `tests/test_bench_external.py` pass | M5, M6 |
-| **M8** | Runbook and docs | `tests/test_external_docs.py` and `tests/test_templates.py` pass | — |
-| **M9** | First measurement (by hand) | `docs/external-evals-results.md` gives strict's resolved k/50 and k/40 with intervals, cost, run id and factory version line, and the official re-grade agrees | — |
-| **M10** | secure vs strict (by hand) | `docs/external-evals-results.md` has the paired comparison line for each suite | — |
+| **M1** | Docker sandbox | `tests/test_sandbox_docker.py` passes; `tests/test_sandbox.py` and `tests/test_config.py` pass unmodified | — |
+| **M2** | SWE-rebench cases graded as SWE-bench grades them | The t02 tests in `tests/test_bench_swe_rebench.py` pass; the evals bench tests pass unmodified | — |
+| **M3** | A month prepared and checked | The t03 tests in `tests/test_bench_swe_rebench.py` pass | — |
+| **M4** | Report and export | The t04 tests in `tests/test_bench_swe_rebench.py` pass | — |
+| **M5** | Runbook and docs | `tests/test_swe_rebench_docs.py` and `tests/test_templates.py` pass | — |
+| **M6** | First measurement (by hand) | `docs/swe-rebench-results.md` gives strict's resolved k/n on one month with its interval, cost, run id and factory version line, and the official re-grade agrees | — |
 
-**Sequence:** `(M1 ∥ M2) → [evals-t07 →] M3 → M4 → (M5 ∥ M6 ∥ M7) → [evals-t08 →] M8 → M9 → [security-review-t06 →] M10`.
+**Sequence:** `M1 → [evals-t07 →] M2 → M3 → M4 → [evals-t08 →] M5 → M6`.
 
 ### Task Contracts
 
 | Milestone | Task IDs | Coverage |
 |---|---|---|
-| **M1** | `external-evals-t01` | `Docker` in `factory/sandbox.py`; `image`, `mount` and `seed` in `SandboxConfig` (`factory/config.py`); new `tests/fake_docker.py` and `tests/test_sandbox_docker.py` |
-| **M2** | `external-evals-t02` | `go test`, jest, mocha and vitest in `factory/verification.py`; tests in `tests/test_verification.py` |
-| **M3** | `external-evals-t03` | New `factory/bench/external/__init__.py` (the adapter interface, registry, sample and scoring); the `external` kind and key in `factory/bench/cases.py`; scoring, preflight and container cleanup in `factory/bench/run.py`; `factory bench prepare` in `factory/cli.py`; new `tests/external_toy.py` and `tests/test_bench_external.py` |
-| **M4** | `external-evals-t04` | New `factory/bench/external/templates.py` (language templates and probes); external cases in `factory bench check` (`factory/bench/check.py`), the leak probe and template probe in `factory/bench/external/__init__.py`, refill in prepare; tests in `tests/test_bench_external.py` |
-| **M5** | `external-evals-t05` | New `factory/bench/external/swebench_pro.py`; new `tests/fake_harbor.py` and `tests/test_external_swebench_pro.py` |
-| **M6** | `external-evals-t06` | New `factory/bench/external/patcheval.py`; new `tests/fake_patcheval.py` and `tests/test_external_patcheval.py` |
-| **M7** | `external-evals-t07` | The external section of `factory bench report` and `compare`, and `factory bench export`, in `factory/bench/report.py` and `factory/cli.py`; tests in `tests/test_bench_external.py` |
-| **M8** | `external-evals-t08` | New `docs/external-evals.md`; `docs/architecture.md`, `docs/reference.md`, `NEXT.md`, the factory-ops skill template and its copy; new `tests/test_external_docs.py` |
-| **M9** | `external-evals-t09` | By hand: the prepared suites, their check, the strict run, the official re-grade and new `docs/external-evals-results.md` |
-| **M10** | `external-evals-t10` | By hand: the secure run against t09's baseline, in `docs/external-evals-results.md` |
+| **M1** | `external-evals-t01` | `Docker` in `factory/sandbox.py`; `image` and `mount` in `SandboxConfig` (`factory/config.py`); new `tests/fake_docker.py` and `tests/test_sandbox_docker.py` |
+| **M2** | `external-evals-t02` | The `swe-rebench` kind and `swe_rebench` key in `factory/bench/cases.py`; per-test grading in new `factory/bench/swe_rebench.py`; scoring, patch.diff, preflight and container cleanup in `factory/bench/run.py`; new `tests/test_bench_swe_rebench.py` |
+| **M3** | `external-evals-t03` | `factory bench prepare` and the swe-rebench check in `factory/bench/swe_rebench.py`, `factory/bench/check.py` and `factory/cli.py`; `tests/fake_docker.py` extended for images; tests in `tests/test_bench_swe_rebench.py` |
+| **M4** | `external-evals-t04` | The swe-rebench line of `factory bench report` in `factory/bench/report.py`, and `factory bench export` in `factory/cli.py`; tests in `tests/test_bench_swe_rebench.py` |
+| **M5** | `external-evals-t05` | New `docs/swe-rebench.md`; `docs/architecture.md`, `docs/reference.md`, `NEXT.md`, the factory-ops skill template and its copy; new `tests/test_swe_rebench_docs.py` |
+| **M6** | `external-evals-t06` | By hand: the prepared month, the strict run, the official re-grade and new `docs/swe-rebench-results.md` |
 
 ```yaml
 - id: external-evals-t01
-  goal: "A sandbox config with an `image` runs every agent command and gate in a Docker container of that image, with the worktree mounted, no network, the host user's ids and the configured image paths hidden, and the container is removed when the sandbox closes"
+  goal: "A sandbox config with an `image` runs every agent command and gate in a Docker container of that image, with the worktree mounted, no network and the host user's ids, seeds the image's git-ignored files into the worktree when a `mount` is set, and removes the container when the sandbox closes"
   spec_refs:
     - "docs/plans/external-evals.md#a-docker-sandbox"
     - "factory/sandbox.py"
@@ -63,237 +53,147 @@
     - "Pulling images: a missing image is refused, never fetched"
     - "Anything benchmark specific: datasets, image names, scoring"
   acceptance:
-    - "SandboxConfig gains `image` (a Docker image), `mount` (an absolute path inside the container where the worktree is also mounted) and `seed` (an absolute path inside the image whose git-ignored files are copied into the worktree before the container starts), all defaulting to none. config.parse rejects a relative `mount` or `seed`, and `mount` or `seed` without `image`. With `image` the bubblewrap defaults don't apply: `hide`, `path`, `env` and `offline_env` default to empty, `hide` holds absolute paths inside the image (a relative one is rejected), and ro_binds, rw_binds and cache_dirs are not used"
+    - "SandboxConfig gains `image` (a Docker image) and `mount` (an absolute path inside the container where the worktree is also mounted), both defaulting to none. config.parse rejects a relative `mount`, and `mount` without `image`. With `image`, the bubblewrap defaults don't apply: `path`, `env` and `offline_env` default to empty, and ro_binds, rw_binds, hide and cache_dirs are not used"
     - "sandbox.make returns a Docker sandbox whenever the config has an `image`, with or without --no-sandbox, and a Bwrap or Unsandboxed one exactly as before otherwise"
-    - "The first run starts one container per sandbox with `docker run -d`: `--network none` unless the sandbox has network, `--read-only` with a writable /tmp tmpfs, `--user` set to the host uid and gid, `--cap-drop ALL`, `--security-opt no-new-privileges`, a `factory.sandbox` label holding the worktree path, and `sleep infinity` as its command in place of the image's entrypoint. Its mounts are the worktree at its own path and at `mount`, the git common dir read-only, the worktree's git admin dir writable, an empty read-only tmpfs over each hidden directory and /dev/null over each hidden file. Nothing else from the host is mounted, and the Docker socket never is"
+    - "The first run starts one container per sandbox with `docker run -d`: `--network none` unless the sandbox has network, `--read-only` with a writable /tmp tmpfs, `--user` set to the host uid and gid, `--cap-drop ALL`, `--security-opt no-new-privileges`, a `factory.sandbox` label holding the worktree path, and `sleep infinity` as its command in place of the image's entrypoint. Its mounts are the worktree at its own path and at `mount`, the git common dir read-only and the worktree's git admin dir writable. Nothing else from the host is mounted, and the Docker socket never is"
     - "Each run is a `docker exec` in the worktree directory with HOME=/tmp, PATH set to the config's `path` ahead of the image's PATH, the config's `env` and, without network, its `offline_env`. The command runs under coreutils `timeout` inside the container, so a timed-out command is stopped in the container and returns the same timeout Result as Bwrap"
-    - "With `seed`, before the sandbox's container starts, a short-lived container of the image with no network lists the files `git ls-files --others --ignored --exclude-standard` reports under `seed`, leaving out `build/` and `__pycache__` directories, and copies them into the worktree without overwriting files the worktree already has. That container is removed"
+    - "With `mount`, before the sandbox's container starts, a short-lived container of the image with no network, running as the host user, copies into the worktree the files that `git ls-files --others --ignored --exclude-standard` lists under `mount` in the image (leaving out `build/` and `__pycache__` directories), without overwriting files the worktree already has. That container is removed"
     - "close() removes the container and can be called twice. Containers still open at interpreter exit are removed"
     - "The first run refuses, naming the problem, when the docker command is missing or the daemon is unreachable, and when the image isn't present locally, naming `docker pull` and the image"
-    - "tests/fake_docker.py stands in for the docker CLI in tests: it records each call's arguments, keeps fake images as directories, and runs exec'd commands with bash in the given directory"
+    - "tests/fake_docker.py stands in for the docker CLI in tests: it records each call's arguments, keeps fake images as directories that hold an image's filesystem, and runs exec'd commands with bash in the given directory"
     - "docs/sessions/ has this task's session log entry"
   verification:
-    - "uv run pytest -q tests/test_sandbox_docker.py::test_a_config_image_selects_the_docker_sandbox tests/test_sandbox_docker.py::test_docker_config_keys_are_validated tests/test_sandbox_docker.py::test_one_container_per_sandbox_with_no_network_and_the_host_user tests/test_sandbox_docker.py::test_only_the_worktree_and_its_git_dirs_are_mounted tests/test_sandbox_docker.py::test_hidden_image_paths_are_overlaid tests/test_sandbox_docker.py::test_commands_run_in_the_worktree_with_the_config_path_and_env tests/test_sandbox_docker.py::test_a_timed_out_command_is_stopped_in_the_container tests/test_sandbox_docker.py::test_seed_copies_the_images_ignored_files_without_overwriting tests/test_sandbox_docker.py::test_close_removes_the_container_once tests/test_sandbox_docker.py::test_a_missing_docker_or_image_is_refused"
+    - "uv run pytest -q tests/test_sandbox_docker.py::test_a_config_image_selects_the_docker_sandbox tests/test_sandbox_docker.py::test_docker_config_keys_are_validated tests/test_sandbox_docker.py::test_one_container_per_sandbox_with_no_network_and_the_host_user tests/test_sandbox_docker.py::test_only_the_worktree_and_its_git_dirs_are_mounted tests/test_sandbox_docker.py::test_commands_run_in_the_worktree_with_the_config_path_and_env tests/test_sandbox_docker.py::test_a_timed_out_command_is_stopped_in_the_container tests/test_sandbox_docker.py::test_mount_seeds_the_images_ignored_files_without_overwriting tests/test_sandbox_docker.py::test_close_removes_the_container_once tests/test_sandbox_docker.py::test_a_missing_docker_or_image_is_refused"
     - "uv run pytest -q tests/test_sandbox.py tests/test_config.py"
   risk: medium
 
 - id: external-evals-t02
-  goal: "Go and JavaScript test runs count as tests: `go test`, jest, mocha and vitest commands are test commands, their output gives the number of tests that ran, and a run that selects no tests is inconclusive, never a pass"
+  goal: "`factory bench` runs SWE-rebench cases: a case of kind `swe-rebench` runs in its task's image, and a verified cell is graded as SWE-bench grades it, solved only when every listed fail-to-pass and pass-to-pass test passes"
   spec_refs:
-    - "docs/plans/external-evals.md#go-and-javascript-test-runners"
-    - "factory/verification.py"
-  depends_on: []
-  non_goals:
-    - "Changing how pytest, cargo or unittest commands and their output are classified"
-    - "Recognizing `npm test`, `yarn test` or other script aliases whose runner the command doesn't name"
-    - "Changes outside factory/verification.py, tests/test_verification.py and this task's session log"
-  acceptance:
-    - "verification.is_test_command is true for commands that run `go test`, `jest`, `mocha` or `vitest`, directly or through npx, yarn or pnpm, and stays true for every command it accepted before"
-    - "verification.tests_run counts `go test -v` output as the number of `--- PASS:`, `--- FAIL:` and `--- SKIP:` lines, subtests included, and as 0 when every package line says `[no tests to run]` or the output has `testing: warning: no tests to run` and no such lines"
-    - "tests_run counts jest from its `Tests:` summary line (the total), mocha from its `N passing`, `N failing` and `N pending` lines (their sum), and vitest from its `Tests` summary line (the total in parentheses), and returns 0 for jest's `No tests found`, mocha's `0 passing` with nothing failing, and vitest's `No test files found`"
-    - "For go test, jest, mocha and vitest commands, verification.classify returns inconclusive when tests_run is 0, whatever the exit code, so the strict flow's red check rejects a command that selects no tests. A non-zero exit with tests counted is a fail, and a compile failure with no count is a fail"
-    - "docs/sessions/ has this task's session log entry"
-  verification:
-    - "uv run pytest -q tests/test_verification.py::test_go_and_js_runners_are_test_commands tests/test_verification.py::test_go_test_counts_its_tests tests/test_verification.py::test_go_test_selecting_nothing_is_inconclusive tests/test_verification.py::test_jest_mocha_and_vitest_count_their_tests tests/test_verification.py::test_js_runners_finding_no_tests_are_inconclusive"
-    - "uv run pytest -q tests/test_verification.py"
-  risk: low
-
-- id: external-evals-t03
-  goal: "`factory bench` runs external cases: `factory bench prepare BENCHMARK` turns a seeded, stratified sample of a benchmark's instances into cases through that benchmark's adapter, and a verified cell of an external case is scored by the adapter's official scorer"
-  spec_refs:
-    - "docs/plans/external-evals.md#external-cases"
-    - "docs/plans/external-evals.md#the-sample"
-    - "docs/plans/external-evals.md#scoring"
+    - "docs/plans/external-evals.md#a-swe-rebench-case"
+    - "docs/plans/external-evals.md#grading"
+    - "docs/plans/evals.md#grading"
   depends_on:
     - external-evals-t01
     - evals-t07
   non_goals:
-    - "The SWE-bench Pro and PatchEval adapters themselves (external-evals-t05, external-evals-t06): this task tests with a toy adapter"
-    - "Checking external cases (external-evals-t04), or the report's external section and export (external-evals-t07)"
-    - "Downloading datasets: prepare reads local files"
+    - "Building cases from the dataset (external-evals-t03): this task's tests write small cases by hand"
+    - "The report line and export (external-evals-t04)"
+    - "Log parsers other than parse_log_pytest, or running SWE-rebench's own harness"
     - "Changing how cases of other kinds load, run or score"
     - "Editing documentation"
   acceptance:
-    - "New factory/bench/external/__init__.py defines the adapter interface the plan's external-cases section lists and the registry ADAPTERS, which maps `swebench-pro` to factory.bench.external.swebench_pro and `patcheval` to factory.bench.external.patcheval and imports a module only when it is used. An unknown benchmark, or one whose module isn't installed, is refused with the known names"
-    - "case.yaml accepts kind `external` with an `external` mapping holding benchmark, instance, image, stratum and source (the absolute path of the dataset file). An external case has an empty `hidden` and needs no hidden/ or solution/. The rules for every other kind are unchanged, and `factory bench cases` shows an external case's benchmark and instance"
-    - "`factory bench prepare BENCHMARK --source FILE --out DIR [--count N] [--seed S] [--instances ID ...]` picks the sample as the plan's sample section says (or exactly the given ids) and builds each case through the adapter. An instance the adapter refuses is recorded with its reason, and the next instance in its stratum's order takes its place; a stratum that runs out leaves its slots empty and says so. Case ids follow the plan's rule"
-    - "prepare writes DIR/sample.json (benchmark, the source file's sha256, seed, count, each stratum's share and how many it filled, each picked instance with its case id, and each skipped instance with its reason) and DIR/suite.yaml in the format evals-t04 defines, with kind external and each case's benchmark, instance and image as its source. Running prepare again with the same arguments keeps the existing cases and changes no file"
-    - "When a cell of an external case ends verified, run_cell writes CELL/external/patch.diff (`git diff --binary` from the base to the candidate, leaving out .factory/ and the case's plan file) and records the adapter's verdict: resolved is solved, unresolved is false_pass, and a scorer error, an exception or a run past external.SCORE_TIMEOUT (3600 seconds) is error. The scorer's log tail goes to CELL/hidden.log, and the cell record gains `external` with the verdict and its detail"
-    - "Scorers run on the host, outside the agents' sandbox, with the environment minus every variable sandbox.SECRET_ENV matches. Nothing under the case's source file or a scorer's checkout is mounted into the agents' container"
-    - "Bench preflight refuses before creating the run directory when a selected external case's docker is missing or unreachable, its image isn't present locally (naming `docker pull` and the image), or its adapter's scorer isn't available (with the adapter's reason). bubblewrap isn't required when every selected case has an image. The `requires` check runs in the case's container, and the hidden-file check is skipped for external cases"
+    - "case.yaml accepts kind `swe-rebench`, which requires a `swe_rebench` mapping with `instance`, `image`, `created_at`, `fail_to_pass` (a non-empty list of test ids) and `pass_to_pass` (a list of test ids), exactly one `hidden` command, and a config whose sandbox `image` equals `swe_rebench.image`. The `swe_rebench` key is refused on every other kind, and the rules for other kinds are unchanged. `factory bench cases` shows a swe-rebench case's instance and its counts of fail-to-pass and pass-to-pass tests"
+    - "New factory/bench/swe_rebench.py parses test output as SWE-bench 4.0.3's parse_log_pytest does: each line that starts with PASSED, FAILED, SKIPPED, ERROR or XFAIL gives a status, with ` - ` replaced by a space on FAILED lines, then split on whitespace; the first field is the status and the second the test id, and a line with fewer than two fields is skipped. A test passes when its status is PASSED or XFAIL. A test missing from the output hasn't passed"
+    - "A verified candidate of a swe-rebench case is scored by laying hidden/ over it in a scratch worktree, as for every case, and running the hidden command once in a sandbox of the case's config, with its exit code ignored. The outcome is `false_pass` when any fail_to_pass test hasn't passed, else `regressed` when any pass_to_pass test hasn't passed, else `solved`. evals' tampered check and the case's top-level pass_to_pass commands apply as for every kind"
+    - "The cell's hidden.log holds the command's output and a summary: fail-to-pass passed k/n, pass-to-pass passed k/n, and up to 20 test ids that didn't pass. The cell record gains `swe_rebench` with both counts"
+    - "When a swe-rebench cell ends verified, run_cell writes CELL/patch.diff: `git diff --binary` from the base to the candidate, leaving out .factory/ and the case's plan file"
+    - "Bench preflight refuses before creating the run directory when a selected case has a sandbox image and the docker command is missing, the daemon is unreachable, or the image isn't present locally (naming `docker pull` and the image). bubblewrap isn't required when every selected case has an image. The requires and hidden-file checks run in the case's container"
     - "A cell closes every Docker sandbox it made, for the pipeline and for scoring, whether it succeeds, fails or raises"
-    - "results.json records the factory version line (version.line()) in its run header, and each external case's benchmark, instance, image id (from `docker image inspect`) and the adapter's harness versions in its cases entry"
-    - "tests/external_toy.py is a toy adapter for tests, registered by the tests, whose instances are small git repositories in fake images and whose scorer reads a verdict file the test supplies"
+    - "results.json records, in each swe-rebench case's entry, its instance and its image id from `docker image inspect`"
     - "docs/sessions/ has this task's session log entry"
   verification:
-    - "uv run pytest -q tests/test_bench_external.py::test_an_external_case_loads_without_hidden_or_solution tests/test_bench_external.py::test_an_unknown_benchmark_is_refused_with_the_known_names tests/test_bench_external.py::test_prepare_samples_seeded_and_stratified tests/test_bench_external.py::test_prepare_skips_refused_instances_and_refills_the_stratum tests/test_bench_external.py::test_prepare_again_changes_nothing tests/test_bench_external.py::test_a_verified_external_cell_is_scored_by_its_adapter tests/test_bench_external.py::test_an_unresolved_verdict_is_a_false_pass_and_a_scorer_failure_an_error tests/test_bench_external.py::test_the_scored_patch_leaves_out_the_factory_files tests/test_bench_external.py::test_scorers_run_without_secrets tests/test_bench_external.py::test_bench_refuses_external_cases_without_docker_image_or_scorer tests/test_bench_external.py::test_a_cell_removes_its_containers tests/test_bench_external.py::test_results_record_the_benchmark_image_and_harness_versions"
+    - "uv run pytest -q tests/test_bench_swe_rebench.py::test_a_swe_rebench_case_loads_and_shows_its_instance tests/test_bench_swe_rebench.py::test_swe_rebench_keys_are_validated tests/test_bench_swe_rebench.py::test_pytest_statuses_are_parsed_as_swe_bench_does tests/test_bench_swe_rebench.py::test_a_verified_cell_is_solved_when_every_listed_test_passes tests/test_bench_swe_rebench.py::test_a_fail_to_pass_test_that_fails_is_a_false_pass tests/test_bench_swe_rebench.py::test_a_pass_to_pass_test_that_fails_is_regressed tests/test_bench_swe_rebench.py::test_the_scored_patch_leaves_out_the_factory_files tests/test_bench_swe_rebench.py::test_bench_refuses_a_missing_docker_or_image tests/test_bench_swe_rebench.py::test_a_cell_removes_its_containers"
     - "uv run pytest -q tests/test_bench.py tests/test_bench_cases.py tests/test_bench_mine.py"
   risk: high
 
-- id: external-evals-t04
-  goal: "`factory bench check` proves each external case sound before money is spent on it: its test template runs in the case's container, no copy of the fix is readable there, its benchmark's scorer resolves the gold patch and rejects an empty one, and prepare replaces cases the check marks broken"
+- id: external-evals-t03
+  goal: "`factory bench prepare` turns one month of SWE-rebench leaderboard tasks into checked bench cases: each case is its task's repository from the task's image, with the issue as its spec, the test patch as hidden tests and the gold patch as its solution, and a case whose gold patch doesn't resolve in the factory's sandbox is dropped"
   spec_refs:
-    - "docs/plans/external-evals.md#checking-an-external-case"
+    - "docs/plans/external-evals.md#preparing-a-month"
+    - "docs/plans/external-evals.md#checking-a-case"
     - "docs/plans/evals.md#checking-a-case"
+  depends_on:
+    - external-evals-t02
+  non_goals:
+    - "Downloading the dataset: prepare reads a local file"
+    - "Sampling: prepare builds every task of the month, or exactly the given instances"
+    - "Mutants for swe-rebench cases: the benchmark owns their tests"
+    - "Changing how other kinds are mined or checked"
+    - "Editing documentation"
+  acceptance:
+    - "`factory bench prepare --source FILE --month YYYY-MM --out DIR [--instances ID ...]` reads FILE as JSONL, or a JSON list, of nebius/SWE-rebench-leaderboard rows, accepting FAIL_TO_PASS and PASS_TO_PASS as lists or as JSON-encoded strings. It selects the rows whose `created_at` starts with the month, or exactly the given instance ids"
+    - "A row is refused, with its reason recorded and no case written, when its install_config's log_parser isn't parse_log_pytest, it has no docker_image, its patch or test_patch deletes, renames or binary-patches a file, its FAIL_TO_PASS is empty, its image can't be pulled, the image's /testbed isn't a git checkout whose HEAD is the row's base_commit, or the repository already has .factory/ or docs/plans/. prepare pulls an image that isn't present locally; it is the only bench command that pulls"
+    - "A case's id is `rebench-` followed by the instance id lowercased, with each run of characters outside [a-z0-9] turned into one hyphen and hyphens trimmed from the ends. An id longer than 64 characters keeps its first 55 characters, then a hyphen and the first 8 hex digits of the instance id's sha256"
+    - "Each case directory holds: repo/, the files `git ls-files --cached --others --exclude-standard` lists in the image's /testbed, as they are in its working tree; repo/.factory/issue.md, the row's problem_statement unchanged; repo/.factory/guidance.md, the guidance the plan's case section gives; hidden/, the files test_patch adds or changes, as they are after applying it; solution/, the files patch adds or changes, as they are after applying it; and case.yaml with kind swe-rebench, the `swe_rebench` mapping from the row, the contract and config the plan's case section gives, and one hidden command: the row's test_cmd followed by the paths test_patch changes, leaving out those ending in .json, .png, csv, .txt, .md, .jpg, .jpeg, .pkl, .yml, .yaml or .toml"
+    - "Nothing from the row's patch or test_patch, and none of its hints_text, appears under repo/"
+    - "Every written case is checked, and a case that fails any check is removed and recorded with the reason `check: ` and the check's name. template: with a one-line passing test at test_factory_issue.py the contract's verification classifies pass with at least one test counted in the case's sandbox, and with a one-line failing test it classifies fail. base: the base, graded as external-evals-t02 grades a candidate, isn't solved. gold: the solution laid over the base is solved"
+    - "`factory bench check` on swe-rebench cases runs the same three checks, with no mutants, and prints and exits as evals-t03 defines"
+    - "prepare writes DIR/suite.yaml in the format evals-t04 defines, with every case's split `holdout`, its kind, a source of benchmark swe-rebench with the instance and image, the row's created_at as its date, and its check result. It also writes DIR/prepare.json: the source file's sha256, the month, the number of rows in the month, the case ids written, each refused or dropped instance with its reason, and the total size of the cases' images"
+    - "Running prepare again with the same arguments keeps the existing cases and changes no file"
+    - "tests/fake_docker.py also fakes `docker pull`, `docker image inspect` and reading files from a fake image, so these tests need neither Docker nor the network"
+    - "docs/sessions/ has this task's session log entry"
+  verification:
+    - "uv run pytest -q tests/test_bench_swe_rebench.py::test_prepare_builds_every_task_of_the_month tests/test_bench_swe_rebench.py::test_prepare_refuses_unusable_rows_with_reasons tests/test_bench_swe_rebench.py::test_a_prepared_case_hides_the_fix_and_its_tests tests/test_bench_swe_rebench.py::test_the_hidden_command_runs_the_test_patch_files tests/test_bench_swe_rebench.py::test_a_case_whose_gold_patch_fails_is_dropped tests/test_bench_swe_rebench.py::test_a_case_whose_template_counts_no_tests_is_dropped tests/test_bench_swe_rebench.py::test_bench_check_runs_the_swe_rebench_checks tests/test_bench_swe_rebench.py::test_prepare_again_changes_nothing tests/test_bench_swe_rebench.py::test_prepared_cases_are_holdout_in_the_suite_manifest"
+    - "uv run pytest -q tests/test_bench_check.py tests/test_bench_swe_rebench.py"
+  risk: medium
+
+- id: external-evals-t04
+  goal: "`factory bench report` gives a run's SWE-rebench resolved rate over every task it ran, as the leaderboard counts it, with its interval and the month's refused tasks, and `factory bench export` writes a run's patches as SWE-bench predictions for an official re-grade"
+  spec_refs:
+    - "docs/plans/external-evals.md#reading-a-run"
+    - "docs/plans/evals.md#statistics"
   depends_on:
     - external-evals-t03
   non_goals:
-    - "Mutants for external cases: their scorer, not the factory, owns their tests"
-    - "Changing the check of cases of other kinds"
-    - "Calling a model, or editing documentation"
-  acceptance:
-    - "New factory/bench/external/templates.py holds the plan's language templates for Python, Go and JavaScript (also used for TypeScript): each one's test path, verification command, `test_paths`, guidance, and a passing and a failing probe test. For JavaScript the runner is jest, mocha or vitest, whichever a package.json names first in that order among its dependencies and devDependencies, and a package.json that names none gets no template"
-    - "For an external case, `factory bench check` materializes it and runs three checks in order. Template: with the adapter's passing probe test at the template's test path, the contract's verification commands classify pass with at least one test counted in the case's Docker sandbox, and with the failing probe they classify fail. Leak: inside the case's container, `grep -rIlF` over the filesystem, outside /proc, /sys, /dev and the worktree's mounts, finds none of the gold patch's distinctive added lines, at most five lines of 30 or more non-space characters that the base doesn't contain. Scorer: the adapter's scorer resolves the gold patch and doesn't resolve an empty patch"
-    - "A failed template or scorer check, or a leak hit, makes the case `broken`, naming the check (and, for a leak, the path). A leak probe that runs past check.LEAK_TIMEOUT (300 seconds) makes it `weak`. Otherwise it's `ok`. The output line, exit code and `--json` are as evals-t03 defines them, and the result is written to the case's entry in suite.yaml"
-    - "`factory bench check --parallel N` checks up to N external cases at once"
-    - "Running prepare again removes the cases suite.yaml marks broken, records each in sample.json's skipped instances with the reason `check: ` followed by the failed check, and refills their strata from the next instances in order. Cases already marked ok or weak are kept"
-    - "docs/sessions/ has this task's session log entry"
-  verification:
-    - "uv run pytest -q tests/test_bench_external.py::test_language_templates_pick_the_js_runner_from_package_json tests/test_bench_external.py::test_check_runs_the_template_probe_in_the_case_container tests/test_bench_external.py::test_a_template_that_counts_no_tests_is_broken tests/test_bench_external.py::test_a_leaked_gold_patch_is_broken tests/test_bench_external.py::test_a_leak_probe_timeout_is_weak tests/test_bench_external.py::test_gold_must_resolve_and_empty_must_not tests/test_bench_external.py::test_prepare_replaces_broken_cases_from_the_same_stratum tests/test_bench_external.py::test_check_runs_external_cases_in_parallel"
-    - "uv run pytest -q tests/test_bench_check.py tests/test_bench_external.py"
-  risk: medium
-
-- id: external-evals-t05
-  goal: "The `swebench-pro` adapter prepares SWE-bench Pro V2 instances as cases that run in each instance's own image with Pro's instruction, and scores a cell's patch with Pro's authoritative re-grade: Harbor's patch_replay agent on a pristine image"
-  spec_refs:
-    - "docs/plans/external-evals.md#swe-bench-pro"
-    - "docs/plans/external-evals.md#language-templates"
-  depends_on:
-    - external-evals-t04
-  non_goals:
-    - "Pro's v1 harness (swe_bench_pro_eval.py), its commercial or held-out sets, or Modal"
-    - "Pro's locked agent protocol: the factory's pipeline is the agent"
-    - "Changes outside factory/bench/external/swebench_pro.py, its tests and this task's session log"
-  acceptance:
-    - "The adapter reads `--source` as a JSONL export of `ScaleAI/SWE-bench_Pro`'s default config and the environment variable FACTORY_SWEBENCH_PRO as a checkout of scaleapi/SWE-bench_Pro-os. Each row is an instance whose stratum is its `repo`"
-    - "Building a case refuses an instance whose v2/tasks/ID directory is missing from the checkout, or whose environment/Dockerfile `FROM` image isn't the row's `docker_image`. It pulls the image when it's missing. The repository directory is /app when that is a git checkout in the image, else /testbed, else the instance is refused. repo/ holds the files `git ls-files --cached --others --exclude-standard` lists there, as they are in the image's working tree. An instance whose repository already has a .factory/ directory is refused"
-    - "repo/.factory/issue.md is the task's instruction.md, unchanged, and repo/.factory/guidance.md is the language template's guidance. case.yaml has kind external, the plan's contract with the instance's language template, `test_paths` from the template, empty `unit_tests` and `dependency_sources`, and a sandbox with the image, `mount` and `seed` at the repository directory, and the template's `path` and `env`"
-    - "Each case uses the template from factory/bench/external/templates.py for its row's `repo_language`; a JavaScript or TypeScript instance whose package.json names no supported runner is refused with that reason"
-    - "None of the row's `patch`, `test_patch`, `fail_to_pass`, `pass_to_pass` or `selected_test_files_to_run`, nor any file of the task's solution/ or tests/ directories, appears anywhere under the cases directory"
-    - "Scoring writes CELL/external/source/instance_1/result.json holding `task_name` (the instance id) and CELL/external/source/instance_1/agent/model.patch, then runs the Harbor executable (FACTORY_HARBOR, default `harbor`) as `run -p TASKS/ID -e docker -n 1 -a patch_replay:PatchReplayAgent -m replay --ak source_job=CELL/external/source --job-name JOB -o CELL/external/jobs`, with PYTHONPATH set to the checkout's v2/tooling and JOB unique to the cell. A reward of 1 at `verifier_result.rewards.reward` in the trial's result.json is resolved, and 0 is unresolved. A non-zero exit, no trial, `exception_info`, or a missing reward is an error, with the detail. The trial's replay.json `apply_rc` goes into the verdict detail"
-    - "The adapter is available when FACTORY_SWEBENCH_PRO holds v2/tasks and v2/tooling/patch_replay.py and the Harbor executable runs. Its harness versions are Harbor's version and the checkout's commit. The gold patch for check is the row's `patch`"
-    - "Export writes, per variant, the source-job layout patch_replay re-grades: one instance_N directory per sampled instance, with its result.json and agent/model.patch, and an empty patch for instances whose cell didn't end verified"
-    - "tests/fake_harbor.py stands in for the Harbor executable: it records its arguments and writes a trial result.json and replay.json from files the test supplies"
-    - "docs/sessions/ has this task's session log entry"
-  verification:
-    - "uv run pytest -q tests/test_external_swebench_pro.py::test_pro_instances_are_stratified_by_repository tests/test_external_swebench_pro.py::test_a_pro_case_runs_in_its_image_with_the_task_instruction tests/test_external_swebench_pro.py::test_the_repository_comes_from_the_images_working_tree tests/test_external_swebench_pro.py::test_a_pro_case_leaves_out_the_fix_and_its_tests tests/test_external_swebench_pro.py::test_js_cases_use_the_repositorys_test_runner tests/test_external_swebench_pro.py::test_pro_is_scored_by_harbor_patch_replay tests/test_external_swebench_pro.py::test_a_failed_harbor_trial_is_an_error tests/test_external_swebench_pro.py::test_pro_export_is_a_patch_replay_source_job"
-    - "uv run pytest -q tests/test_bench_external.py"
-  risk: medium
-
-- id: external-evals-t06
-  goal: "The `patcheval` adapter prepares PatchEval-Verified CVEs as cases that run in each CVE's image with PatchEval's own prompt and its validation files hidden, and scores a cell's patch with PatchEval's run_evaluation.py"
-  spec_refs:
-    - "docs/plans/external-evals.md#patcheval"
-    - "docs/plans/external-evals.md#language-templates"
-  depends_on:
-    - external-evals-t04
-  non_goals:
-    - "PoC generation, vulnerability discovery, or any offensive task"
-    - "PatchEval's own agent runners (codex, opencode, traecli)"
-    - "Changes outside factory/bench/external/patcheval.py, its tests and this task's session log"
-  acceptance:
-    - "The adapter reads `--source` as PatchEval's dataset file (a JSON list or JSONL with cve_id, cve_description, programming_language, repo, image_url and fix_func), and the environment variables FACTORY_PATCHEVAL as a checkout of bytedance/PatchEval and FACTORY_PATCHEVAL_PYTHON as the interpreter with its requirements (default: the checkout's .venv/bin/python). Each CVE is an instance whose stratum is its programming_language"
-    - "Building a case pulls image_url when it's missing. The repository directory is the first git checkout among /workspace/NAME, /workspace/ with NAME lowercased, and /workspace, where NAME is the last part of `repo` without `.git`; with none, the CVE is refused. repo/ holds the files `git ls-files --cached --others --exclude-standard` lists there, as in the image's working tree"
-    - "The case's sandbox hides every top-level entry of /workspace other than the repository directory or a directory that contains it, so /workspace/fix.patch and /workspace/fix-run.sh can't be read by the agents"
-    - "repo/.factory/issue.md is PatchEval's own prompt opening, `Please fix the vulnerabilities in the code repository based on the following information:`, followed by cve_description and nothing else: no cwe_info, vul_func, fix_func or patch_url. case.yaml has kind external and the plan's contract for a vulnerability, with the CVE's language template from factory/bench/external/templates.py"
-    - "Scoring writes CELL/external/patches.jsonl, one line with `cve`, `fix_patch` and `language`, and runs FACTORY_PATCHEVAL_PYTHON `run_evaluation.py --output OUT --patch_file CELL/external/patches.jsonl --input_file SOURCE --max_workers 1` in the checkout's patcheval/evaluation, with OUT unique to the cell. It reads evaluation_output/OUT/summary.json: a CVE listed in `poc_evaluation.successful_cves` is resolved; one listed in `failure_analysis.failed_cves` is unresolved, with its validation type (apply_fail, compilation_fail, validation_fail) as the detail; one in `execution_errors` or absent is an error. The output directory is then moved into CELL/external/"
-    - "The adapter is available when FACTORY_PATCHEVAL holds patcheval/evaluation/run_evaluation.py and its interpreter runs. Its harness version is the checkout's commit. The gold patch for check is the image's /workspace/fix.patch, read through a short-lived container, so a CVE whose original fix doesn't pass fix-run.sh fails the check, and the leak probe looks for fix_func's distinctive lines"
-    - "Export writes, per variant, one patches.jsonl with a line for every sampled CVE and an empty fix_patch for CVEs whose cell didn't end verified"
-    - "tests/fake_patcheval.py stands in for run_evaluation.py: it records its arguments and writes a summary.json from files the test supplies"
-    - "docs/sessions/ has this task's session log entry"
-  verification:
-    - "uv run pytest -q tests/test_external_patcheval.py::test_patcheval_instances_are_stratified_by_language tests/test_external_patcheval.py::test_the_repository_is_found_under_workspace tests/test_external_patcheval.py::test_the_workspace_payload_is_hidden_from_agents tests/test_external_patcheval.py::test_the_issue_is_patchevals_prompt_and_nothing_else tests/test_external_patcheval.py::test_patcheval_scores_from_its_summary tests/test_external_patcheval.py::test_a_patcheval_execution_error_is_an_error tests/test_external_patcheval.py::test_the_gold_for_check_is_the_images_fix_patch tests/test_external_patcheval.py::test_patcheval_export_is_a_patch_file"
-    - "uv run pytest -q tests/test_bench_external.py"
-  risk: medium
-
-- id: external-evals-t07
-  goal: "`factory bench report` and `compare` give each benchmark's resolved rate over every sampled instance, as a leaderboard counts it, with its interval, strata, replaced cases and harness versions, and `factory bench export` writes a run's patches in each benchmark's submission format"
-  spec_refs:
-    - "docs/plans/external-evals.md#reading-an-external-run"
-    - "docs/plans/evals.md#statistics"
-  depends_on:
-    - external-evals-t04
-  non_goals:
-    - "Changing how cells run or are scored, or evals' rates for other kinds"
-    - "Submitting to a leaderboard"
+    - "Changing how cells run or are graded, or evals' rates for other kinds"
+    - "A comparison line for swe-rebench in `factory bench compare`: evals' compare already covers its cases"
+    - "Submitting to the leaderboard"
     - "Editing documentation"
   acceptance:
-    - "For a run with external cells, `factory bench report` adds a section per benchmark and variant. It shows resolved k/n, where k is solved cells and n is every cell of the benchmark's cases, so failed, false_pass, stopped, error and skipped cells count as unresolved, with the 95% interval from evals' stats over cases. It also shows k/n per stratum, cost and minutes per instance, how many cases sample.json says were replaced, counted by reason, and the factory version line and harness versions from results.json"
-    - "`factory bench compare` adds one line per benchmark and variant pair with the resolved difference, its interval and evals' paired verdict, over the instances both runs have"
-    - "`--json` on report and compare carries the same under an `external` key"
-    - "`factory bench export RUN [--variant ID ...] --out DIR` writes each external benchmark's submission files for each variant through its adapter's export, and refuses a run with no external cells, with the reason"
+    - "For each variant with swe-rebench cells, `factory bench report` prints `swe-rebench resolved k/n (P%) [LO–HI]`. k is solved cells, and n is every swe-rebench cell, so failed, false_pass, regressed, tampered, stopped, error and skipped cells count as unresolved. The interval comes from evals' clustered bootstrap with every cell counted. The report also shows false passes, regressions, and cost and minutes per task"
+    - "When the run's cases directory has a prepare.json, the report also prints the month, the rows in the month, the refused and dropped instances counted by reason, and k over the rows in the month"
+    - "`--json` on report carries the same under a `swe_rebench` key"
+    - "`factory bench export RUN --out FILE [--variant ID]` writes one JSONL line per swe-rebench case of the run: `instance_id`, `model_name_or_path` as `factory-` followed by the variant id, and `model_patch` as the first repeat's patch.diff, or an empty string when that cell didn't end verified. It refuses a run with no swe-rebench cells, and a run with more than one variant when --variant isn't given, with the reason"
     - "docs/sessions/ has this task's session log entry"
   verification:
-    - "uv run pytest -q tests/test_bench_external.py::test_report_counts_resolved_over_every_sampled_instance tests/test_bench_external.py::test_report_shows_strata_replacements_and_harness_versions tests/test_bench_external.py::test_compare_gives_a_resolved_verdict_per_benchmark tests/test_bench_external.py::test_export_writes_each_benchmarks_submission tests/test_bench_external.py::test_export_refuses_a_run_without_external_cells"
-    - "uv run pytest -q tests/test_bench.py tests/test_bench_stats.py tests/test_bench_external.py"
-  risk: medium
+    - "uv run pytest -q tests/test_bench_swe_rebench.py::test_report_counts_resolved_over_every_task tests/test_bench_swe_rebench.py::test_report_shows_the_month_and_its_refused_tasks tests/test_bench_swe_rebench.py::test_export_writes_swe_bench_predictions tests/test_bench_swe_rebench.py::test_export_refuses_a_run_without_swe_rebench_cells"
+    - "uv run pytest -q tests/test_bench.py tests/test_bench_stats.py tests/test_bench_swe_rebench.py"
+  risk: low
 
-- id: external-evals-t08
-  goal: "docs/external-evals.md takes a reader from an empty machine to an exported, re-graded external run, and docs/architecture.md, docs/reference.md, NEXT.md and the factory-ops skill describe external suites and the Docker sandbox"
+- id: external-evals-t05
+  goal: "docs/swe-rebench.md takes a reader from an empty machine to a re-graded SWE-rebench run, and docs/architecture.md, docs/reference.md, NEXT.md and the factory-ops skill describe SWE-rebench cases and the Docker sandbox"
   spec_refs:
     - "docs/plans/external-evals.md#the-runbook"
     - "docs/architecture.md#evaluating-flows-factory-bench"
   depends_on:
-    - external-evals-t05
-    - external-evals-t06
-    - external-evals-t07
+    - external-evals-t04
     - evals-t08
   non_goals:
     - "Changing code, or tests beyond the new docs test and what tests/test_templates.py needs for the new template text"
     - "Rewriting sections unrelated to this plan, or editing README.md"
   acceptance:
-    - "New docs/external-evals.md covers, in order: what each suite measures and why these were chosen (Verified's contamination; offensive tasks out of scope); installing Harbor 0.27.0 with `uv tool install harbor==0.27.0`; cloning SWE-bench_Pro-os and PatchEval and recording their commits; writing Pro's default config to JSONL; FACTORY_HARBOR, FACTORY_SWEBENCH_PRO, FACTORY_PATCHEVAL and FACTORY_PATCHEVAL_PYTHON; disk needs; the prepare, check and prepare-again loop; a dry run; the run with --max-cost; report; export, and re-grading an export with each benchmark's own tools; removing the sample's images; and what the numbers can and can't be compared with"
-    - "docs/architecture.md's Evaluating flows section describes external cases, adapters, official scoring, the Docker sandbox and the external check, and links docs/external-evals.md. docs/reference.md covers `factory bench prepare` and `export` with every option, the `external` kind and case key, the sandbox keys `image`, `mount` and `seed`, the four environment variables, and troubleshooting rows for a missing image, an unavailable scorer, a broken template and a leak"
-    - "NEXT.md marks item 21 done, linking docs/external-evals.md"
-    - "factory/templates/skills/factory-ops/SKILL.md covers preparing, checking, running and exporting an external suite, and the changed template files are copied to .claude/skills/factory-ops/, so tests/test_templates.py passes"
-    - "tests/test_external_docs.py checks that docs/external-evals.md names every option of `factory bench prepare` and `factory bench export`, read from the CLI's argument parser, and that docs/reference.md names the sandbox keys image, mount and seed"
+    - "New docs/swe-rebench.md covers, in order: what SWE-rebench measures and why it was chosen; the host it needs (x86_64, Docker, the disk the month's images take); exporting one month of nebius/SWE-rebench-leaderboard to JSONL with the `datasets` library; prepare and reading prepare.json; a dry run; the run with --max-cost; report; export, and re-grading the export with SWE-rebench's SWE-bench fork; removing the month's images; and what the number can and can't be compared with"
+    - "docs/architecture.md's Evaluating flows section describes swe-rebench cases, their grading, their check and the Docker sandbox, and links docs/swe-rebench.md. docs/reference.md covers `factory bench prepare` and `factory bench export` with every option, the `swe-rebench` kind and `swe_rebench` key, the sandbox keys `image` and `mount`, and troubleshooting rows for a missing image, an unreachable Docker daemon, a refused row and a dropped case"
+    - "NEXT.md marks item 21 done, linking docs/swe-rebench.md"
+    - "factory/templates/skills/factory-ops/SKILL.md covers preparing, running, reporting and exporting a SWE-rebench month, and the changed template files are copied to .claude/skills/factory-ops/, so tests/test_templates.py passes"
+    - "tests/test_swe_rebench_docs.py checks that docs/swe-rebench.md names every option of `factory bench prepare` and `factory bench export`, read from the CLI's argument parser, and that docs/reference.md names the sandbox keys image and mount"
     - "docs/sessions/ has this task's session log entry"
   verification:
-    - "uv run pytest -q tests/test_external_docs.py::test_the_runbook_names_every_prepare_and_export_option tests/test_external_docs.py::test_the_reference_names_the_docker_sandbox_keys"
+    - "uv run pytest -q tests/test_swe_rebench_docs.py::test_the_runbook_names_every_prepare_and_export_option tests/test_swe_rebench_docs.py::test_the_reference_names_the_docker_sandbox_keys"
     - "uv run pytest -q tests/test_templates.py"
-    - "grep -q 'docs/external-evals.md' NEXT.md"
+    - "grep -q 'docs/swe-rebench.md' NEXT.md"
   risk: low
 
-- id: external-evals-t09
-  goal: "docs/external-evals-results.md records the first measurement: the factory's strict flow on 50 SWE-bench Pro instances and 40 PatchEval CVEs, as resolved out of each with its interval, cost and time, the run id, seeds and factory version line it came from, and the benchmarks' own re-grade of the exported patches"
+- id: external-evals-t06
+  goal: "docs/swe-rebench-results.md records the first measurement: the factory's configured strict flow on one whole month of SWE-rebench, as resolved out of the month's tasks with its interval, cost and time, the run id and factory version line it came from, and SWE-rebench's own re-grade of the exported patches"
   spec_refs:
-    - "docs/plans/external-evals.md#the-measurements"
+    - "docs/plans/external-evals.md#the-measurement"
   depends_on:
-    - external-evals-t08
+    - external-evals-t05
   non_goals:
     - "Changing any code, prompt, flow or model to raise the score"
     - "Comparing flows or models: one run of the configured strict flow"
   acceptance:
-    - "Both suites are prepared and checked as the runbook says, and every case left is ok or weak. The run's ledger note names it the external baseline"
-    - "docs/external-evals-results.md holds the report's external section for the run, the date, the run id, each suite's source sha256 and seed from sample.json, the replaced cases by reason, the factory version line, the harness versions, the total cost, and each case the check marked weak"
-    - "The run's export, re-graded with each benchmark's own tools as the runbook says, gives the same resolved count as the report, or the doc lists every instance where they differ, with the reason"
-    - "It says in words what the numbers can and can't be compared with, as the plan's measurements section lists"
+    - "The newest monthly split of nebius/SWE-rebench-leaderboard is prepared as the runbook says, and one run of `factory bench run --cases DIR --flow strict --repeat 1 --max-cost 300` on it has finished or reached its budget, with a ledger note naming the month"
+    - "docs/swe-rebench-results.md has a section headed with the run's date that gives the factory version line, the run id, the month, the source file's sha256, the rows in the month, the refused and dropped instances by reason, the report's swe-rebench line, k over the rows in the month, the false passes and regressions, the total cost, and cost and minutes per task"
+    - "The run's export, re-graded with SWE-rebench's own harness as the runbook says, gives the same resolved count as the report, or the section lists every instance where they differ, with the reason"
+    - "The section gives the leaderboard's resolved rate for the same month for the listed models closest to the configured ones, and says in words what differs: the leaderboard runs one model in one agent scaffold, while the factory runs its pipeline and submits only gate-verified candidates. For each configured model it says whether the month's tasks were created after the model's release"
     - "docs/sessions/ has this task's session log entry"
   verification:
-    - "factory bench ledger"
-    - "grep -q 'resolved' docs/external-evals-results.md"
-    - "grep -q 'PatchEval' docs/external-evals-results.md"
-    - "grep -Eq 'factory[[:space:]][0-9]' docs/external-evals-results.md"
-  risk: low
-
-- id: external-evals-t10
-  goal: "docs/external-evals-results.md records whether the secure flow beats strict on each suite: secure's resolved rate on the same sampled cases, with evals' paired verdict against t09's strict cells"
-  spec_refs:
-    - "docs/plans/external-evals.md#the-measurements"
-  depends_on:
-    - external-evals-t09
-    - security-review-t06
-  non_goals:
-    - "Changing any code, prompt, flow or model"
-    - "Changing the default flow: the result informs that decision, it doesn't make it"
-  acceptance:
-    - "A run of the built-in secure flow on both suites, with `--baseline` set to t09's run so strict's cells are reused, has finished or reached its budget, and its ledger note names the comparison"
-    - "docs/external-evals-results.md gains a section headed with the run's date. Per suite, it gives secure's resolved k/n with its interval, the compare line against strict with its verdict for resolved and for cost, the cells where the security step sent a build back, and the false passes of each flow"
-    - "docs/sessions/ has this task's session log entry"
-  verification:
-    - "factory bench ledger"
-    - "grep -q 'secure' docs/external-evals-results.md"
-    - "grep -Eq '(better|worse|inconclusive)' docs/external-evals-results.md"
+    - "factory bench report"
+    - "grep -q 'resolved' docs/swe-rebench-results.md"
+    - "grep -Eq 'factory[[:space:]][0-9]' docs/swe-rebench-results.md"
   risk: low
 ```
 
@@ -301,71 +201,63 @@ Planned test additions:
 
 | Task | Tests | Kind |
 |---|---|---|
-| t01 | `tests/fake_docker.py` (new); `tests/test_sandbox_docker.py` (new): ten tests named in its verification | unit, through the fake docker CLI |
-| t02 | `tests/test_verification.py`: five tests | unit |
-| t03 | `tests/external_toy.py` (new toy adapter); `tests/test_bench_external.py` (new): twelve tests | CLI end to end, scripted models |
-| t04 | `tests/test_bench_external.py`: eight tests | unit, CLI end to end |
-| t05 | `tests/fake_harbor.py` (new); `tests/test_external_swebench_pro.py` (new): eight tests | unit, CLI end to end |
-| t06 | `tests/fake_patcheval.py` (new); `tests/test_external_patcheval.py` (new): eight tests | unit, CLI end to end |
-| t07 | `tests/test_bench_external.py`: five tests | CLI end to end |
-| t08 | `tests/test_external_docs.py` (new): two tests | docs against the CLI's parser |
-| t09, t10 | none: by hand | — |
+| t01 | `tests/fake_docker.py` (new); `tests/test_sandbox_docker.py` (new): nine tests named in its verification | unit, through the fake docker CLI |
+| t02 | `tests/test_bench_swe_rebench.py` (new): nine tests | unit, CLI end to end with scripted models |
+| t03 | `tests/test_bench_swe_rebench.py`: nine tests; `tests/fake_docker.py` extended | unit, CLI end to end |
+| t04 | `tests/test_bench_swe_rebench.py`: four tests | CLI end to end |
+| t05 | `tests/test_swe_rebench_docs.py` (new): two tests | docs against the CLI's parser |
+| t06 | none: by hand | — |
 
-Every verification command names tests the task adds, or a test file that exists when it runs, so a filter that selects nothing fails. No test needs Docker, the network, Harbor or PatchEval: `tests/fake_docker.py`, `tests/fake_harbor.py` and `tests/fake_patcheval.py` stand in for them, and the bench tests run cells with scripted models (`tests/fake_model.py`), as `tests/test_bench.py` does. Each of t01–t08 is factory-runnable on this repository under `strict`: its first verification command names only new tests, which fail before the change.
+Every verification command names tests the task adds, or a test file that exists when it runs, so a filter that selects nothing fails. No test needs Docker or the network: `tests/fake_docker.py` stands in for docker, and the bench tests run cells with scripted models (`tests/fake_model.py`), as `tests/test_bench.py` does. Each of t01–t05 can be run by the factory on this repository under `strict`: its first verification command names only new tests, which fail before the change.
 
-**t09 and t10 are done by hand.** They need the network (datasets, images, the scorers' own setup) and spend a model budget. Their verification runs `factory bench ledger`, which the factory refuses, so `factory run` refuses them and `factory run external-evals` lists them as manual.
+**t06 is done by hand.** It needs the network (the dataset, the images, SWE-rebench's harness) and spends a model budget. Its verification runs `factory bench report`, which the factory refuses, so `factory run` refuses it and `factory run external-evals` lists it as manual. Do it on branch `factory/external-evals-t06`, so `factory status --refresh` adopts its PR.
 
-Prerequisite for `external-evals-t03`: the [evals](evals.md) plan, in open PR #85, merged to `main`, and `evals-t07` merged. Until #85 merges, `factory sync` can't resolve this plan's `evals-t07` and `evals-t08` dependencies, so merge #85 before this plan's PR.
-
-Prerequisite for `external-evals-t09`: Harbor 0.27.0, a SWE-bench_Pro-os checkout and a PatchEval checkout with its requirements installed (all need the network, so they're installed by hand on the host); a budget of up to $400 agreed; and about 250 GB of free disk for the sampled images.
-
-Prerequisite for `external-evals-t10`: `security-review-t06` merged, so the built-in `secure` flow exists; a budget of up to $400 agreed.
+Prerequisite for `external-evals-t06`: an x86_64 host with Docker and room for the month's images (prepare.json gives their total); the newest month of nebius/SWE-rebench-leaderboard exported to JSONL; SWE-rebench's SWE-bench fork installed on the host for the re-grade; and a budget of up to $300 agreed.
 
 ### Risks
 
-1. **The fix leaks to the agents.** Pro images keep a git history, PatchEval images keep the original fix at `/workspace/fix.patch`, and the datasets hold the gold patches. **Action:** the worktree is mounted over the image's repository, so the image's checkout and its `.git` are hidden. The cell's repository has one commit. PatchEval's `/workspace` payload is overlaid. Datasets and scorer checkouts stay on the host, where the container can't see them. t04's leak probe greps every case's container for the gold patch's lines before the case is used.
-2. **The factory's environment differs from the scorer's.** Agents run as the host user on a read-only root, offline, with HOME=/tmp, while the scorers run as the image's user and Pro's verifier can fetch Go modules. Some tests may then behave differently for the agents. **Action:** t04's template probe runs every case's test command in the factory's own sandbox before a run. A case that fails it is replaced in its stratum, and the report says how many were replaced and why. The score itself always comes from the official scorer.
-3. **Replacing cases biases the sample.** If whole repositories or languages fail the check, the sample stops representing the benchmark. **Action:** replacements stay within their stratum, an exhausted stratum is reported, not silently filled from others, and sample.json and the report list every replaced instance with its reason.
-4. **The number is compared with the wrong thing.** The factory isn't Pro's locked protocol, it submits only candidates its gates verified, and 50 instances give about ±13 points. **Action:** report divides by every sampled instance, as leaderboards do, and shows the interval and the strata. The results doc says what the number compares with. t09 re-grades the export with the benchmarks' own tools.
-5. **Cost.** Pro tasks change about 100 lines across about 4 files, much larger than this board's tasks (an average of $1.77). **Action:** a dry run first, `--max-cost 400`, and `--baseline` in t10, so strict's cells aren't paid for twice. A spent budget leaves the rest `skipped`, which counts as unresolved and is shown.
-6. **Disk and time.** About 250 GB of images, scorer runs of several minutes each, and seeded `node_modules` copied into every JavaScript cell. **Action:** prepare prints the images' total size. `check --parallel` runs checks side by side. The runbook removes the sample's images using the list in sample.json.
-7. **Harbor and PatchEval output formats change.** The scorers read `verifier_result.rewards.reward` (Harbor 0.27.0) and `summary.json`'s `successful_cves` (PatchEval at its recorded commit). **Action:** the runbook pins both. t04's scorer check (gold resolves, empty doesn't) fails loudly on a format change, and results.json records the harness versions.
-8. **Docker is root-equivalent on the host.** **Action:** only the factory's own process calls docker. Agents' commands run inside containers with no network, every capability dropped, no-new-privileges, a read-only root and the host user's ids. The Docker socket is never mounted, and scorers run without secret-shaped environment variables.
-9. **This plan collides with evals and web-tools in `factory/bench/`.** **Action:** t03 waits for `evals-t07`. `web-tools-t04` also changes bench fingerprints after `evals-t07`, so whichever lands second rebases. The factory's conflict rework handles it, and the coordination section names the overlap.
+1. **The factory's sandbox isn't the official harness.** Agents and scoring run offline, as the host user, on a read-only root, with the conda environment on PATH instead of activated, while SWE-rebench grades as root in a writable container. Some tests may then behave differently. **Action:** t03's base and gold checks grade in the factory's own sandbox, so a task whose gold patch doesn't resolve there is dropped and listed. t06 re-grades the export with SWE-rebench's harness and lists every disagreement.
+2. **Dropped tasks bias the month.** **Action:** prepare.json lists every refused and dropped instance with its reason. The report gives k over the rows in the month next to k/n, and the results doc gives both.
+3. **The fix leaks to the agents.** An image's /testbed keeps the repository's git history, which can hold the fix. **Action:** the worktree is mounted over /testbed, so the image's checkout and `.git` are hidden. The cell's repository has one commit, the case directory is never mounted, and issue.md is the problem statement only.
+4. **The month predates a model.** A task created before a model's release may be in its training data. **Action:** t06 uses the newest month and says, for each configured model, whether the month postdates it.
+5. **The number is compared with the wrong thing.** The leaderboard scores one model in one scaffold, while the factory is a pipeline that submits only verified candidates, and a month of 30 to 110 tasks gives about ±9–17 points at 95%. **Action:** the report divides by every task, as the leaderboard does, and shows the interval. The results doc says what the number compares with.
+6. **Cost.** **Action:** a dry run first, and `--max-cost 300`. A spent budget leaves the rest `skipped`, which counts as unresolved and is shown.
+7. **Disk.** Each task has its own image of a few GB. **Action:** prepare.json gives the images' total size, and the runbook removes them afterwards.
+8. **Docker is root-equivalent on the host.** **Action:** only the factory's own process calls docker. Agents' commands run in containers with no network, every capability dropped, no-new-privileges, a read-only root and the host user's ids. The Docker socket is never mounted.
+9. **This plan collides with evals and web-tools in `factory/bench/`.** **Action:** t02 waits for `evals-t07`. `web-tools-t04` also changes bench fingerprints after `evals-t07`, so whichever lands second rebases. The factory's conflict rework handles it.
 
 ---
 
 ## Problem
 
-Nothing measures the factory against an outside reference, or on security work:
+Nothing measures the factory against an outside reference:
 
-- **The shipped bench suite is saturated.** Run `20261116-220919` solved 60 of 60 cells across four variants. Evals ([PR #85](https://github.com/PaddyMc/software-factory/pull/85)) adds mined cases from this repository and statistics that can rank flows, but it locked "no external benchmark is imported", so its numbers say how the factory does on its own code only.
-- **The SWE reference the factory planned on is retired.** The `experiment/swe-bench` plan targets SWE-bench Verified. OpenAI stopped reporting Verified in February 2026: it's contaminated, and at least 59.4% of its audited hard problems have flawed tests. SWE-bench Pro is the recommended replacement, and it's multi-language: 642 public V2 tasks in Go, Python, JavaScript and TypeScript.
-- **Nothing measures security.** [security-review](security-review.md) adds a `secure` flow, a security reviewer and two gates, but no suite says whether the factory fixes vulnerabilities, or whether `secure` helps it do so.
-- **The bench can't run real repositories.** Cases run under bubblewrap with host paths bound in place (`factory/sandbox.py:45`), so a repository needing its own toolchain and pinned dependencies has no environment. A case must have hidden tests and a solution (`factory/bench/cases.py:137`), and scoring lays them over the candidate (`factory/bench/cases.py:182`, `factory/bench/run.py:370`), while external benchmarks score with their own harnesses.
-- **Go and JavaScript tests don't count as tests.** `verification.is_test_command` (`factory/verification.py:41`) knows pytest, cargo and unittest only. So the strict flow's red check can't run on Go or JavaScript repositories, and a Go or jest run that selects nothing would pass.
+- **The bench only knows this repository.** The shipped suite is saturated (run `20261116-220919` solved 60 of 60 cells), and [evals](evals.md) mines this repository's own merged tasks, which says how the factory does on its own code only.
+- **The SWE reference the factory planned on is retired.** The by-hand `experiment/swe-bench` plan targets SWE-bench Verified, which OpenAI stopped reporting in February 2026 as contaminated.
+- **The bench can't run real repositories.** Cases run under bubblewrap with host paths bound in place (`factory/sandbox.py:45`), so a repository that needs its own Python and installed dependencies has no environment.
+- **The first version of this plan was too big.** It measured two benchmarks with an adapter registry, Harbor and PatchEval scorers, Go and JavaScript test runners, leak probes, two export formats and two paid runs, in ten tasks.
 
 ## Goal
 
-`factory bench prepare swebench-pro` and `factory bench prepare patcheval` each write a checked, seeded sample of cases. `factory bench run --cases DIR` runs the factory's flows on them in each instance's own image, and `factory bench report` gives each benchmark's resolved rate, as the official scorer judges it, out of every sampled instance with an interval. The first measurement of strict, and of secure against strict, is recorded in `docs/external-evals-results.md`.
+`factory bench prepare` turns one month of SWE-rebench into checked cases, `factory bench run --cases DIR` runs the factory's flows on them in each task's own image, and `factory bench report` gives the resolved rate out of every task, graded as SWE-bench grades it, with an interval. The first measurement of strict is recorded in `docs/swe-rebench-results.md` and confirmed by SWE-rebench's own harness.
 
 ## Design
 
 ```text
-dataset file (by hand) ──► factory bench prepare BENCHMARK ──► DIR/CASE/{case.yaml, repo/}   DIR/sample.json   DIR/suite.yaml
-                              │ adapter: instances, strata, build (image pulled; repo/ from the image's working tree)
-                              ▼
-                           factory bench check --cases DIR ──► template probe · leak probe · gold resolves, empty doesn't
-                              │ broken ─► prepare again refills the stratum
-                              ▼
-factory bench run --cases DIR --flow strict --max-cost 400 --parallel 4
+month JSONL (by hand) ──► factory bench prepare --month M ──► DIR/CASE/{case.yaml, repo/, hidden/, solution/}
+                             │ per row: pull image, copy /testbed, split the patches, write the case     DIR/suite.yaml
+                             │ check: template probe · base not solved · gold solved (else dropped)       DIR/prepare.json
+                             ▼
+factory bench run --cases DIR --flow strict --repeat 1 --max-cost 300
    cell: materialize repo/ ─► Pipeline (test → build → gates → review → verify)
-            every agent command and gate: docker exec in the instance's image, worktree over the repository
-            verified ─► patch.diff ─► adapter.score (official scorer, on the host) ─► resolved? solved : false_pass
-            failed / stopped / error ─► not scored
-                              ▼
-results.json ──► factory bench report ──► resolved k/n per benchmark, interval, strata, replacements
-             └─► factory bench export ──► Pro: patch_replay source job · PatchEval: patches.jsonl
+            every agent command and gate: docker exec in the task's image, worktree over /testbed
+            verified ─► patch.diff ─► hidden/ over the candidate, test_cmd in a fresh container
+                       ─► parse_log_pytest ─► every FAIL_TO_PASS and PASS_TO_PASS passed? solved
+                                              else false_pass / regressed
+            failed / stopped / error ─► not graded
+                             ▼
+results.json ──► factory bench report ──► swe-rebench resolved k/n [interval], k over the month's rows
+             └─► factory bench export ──► predictions.jsonl ──► SWE-rebench's harness (by hand)
 ```
 
 ### A Docker sandbox
@@ -374,218 +266,146 @@ The bench cell already builds its sandbox from the case's config (`factory/bench
 
 ```yaml
 sandbox:
-  image: ghcr.io/scaleapi/swe-bench_pro-v2:instance_nodebb__nodebb-04998908…   # the instance's image
-  mount: /app          # the worktree is mounted here too, where the image's tooling expects the repository
-  seed: /app           # copy the image's git-ignored files first (node_modules, built extensions, generated files)
-  hide: []             # absolute paths inside the image to overlay (PatchEval: its /workspace payload)
-  path: []
+  image: swerebench/sweb.eval.x86_64.0b01001001_1776_spectree-64   # the task's image
+  mount: /testbed       # the worktree is also mounted here; the image's git-ignored files under it are copied in first
+  path: [/opt/miniconda3/envs/testbed/bin]
   env: {}
 ```
 
-- **One container per sandbox,** started on the first `run` and removed by `close()` or at exit. Commands run with `docker exec` in the worktree at its host path, so file tools and commands agree on paths. The same files are also at `mount`, so the image's editable installs and configs that name the repository's path still work.
+- **One container per sandbox,** started on the first `run` and removed by `close()` or at exit. Commands run with `docker exec` in the worktree at its host path, so file tools and commands agree on paths. The same files are also at `mount`, so the image's editable install and configs that name /testbed still work.
 - **Isolation:** `--network none`, `--read-only` with a writable `/tmp`, `--cap-drop ALL`, `--security-opt no-new-privileges`, and the host's uid and gid, so files written in the worktree belong to the user. Only the worktree and its git dirs are mounted, the same set Bwrap binds writable.
-- **Seeding:** mounting the worktree over the repository hides the image's ignored files, which are dependencies, built extensions and generated files. So before the container starts, a short-lived container copies them into the worktree. Ignored files never show in a diff, so the candidate stays clean.
+- **Seeding:** mounting the worktree over /testbed hides the image's git-ignored files, such as `*.egg-info` and built extensions. So before the container starts, a short-lived container copies them into the worktree. git refuses to read a repository owned by another user unless it is marked safe, so that container runs git with `safe.directory` set. Ignored files never show in a diff, so the candidate stays clean.
 - **Timeouts:** the command runs under coreutils `timeout` inside the container, so it doesn't outlive a timeout that only killed `docker exec`.
 
-### Go and JavaScript test runners
-
-| Runner | Recognized when the command runs | Count | Zero |
-|---|---|---|---|
-| go test | `go test` | `--- PASS:`, `--- FAIL:`, `--- SKIP:` lines under `-v` | every package `[no tests to run]`, or `testing: warning: no tests to run` with no result lines |
-| jest | `jest` (also via npx, yarn, pnpm) | the `Tests:` line's total | `No tests found` |
-| mocha | `mocha` | `N passing` + `N failing` + `N pending` | `0 passing`, nothing failing |
-| vitest | `vitest` | the `Tests` line's total in parentheses | `No test files found` |
-
-For these runners a counted zero is inconclusive whatever the exit code. jest exits 1 when it finds nothing, and that is not a failing test. This is useful beyond the bench: any Go or JavaScript repository on the strict flow needs it.
-
-### External cases
-
-An adapter is a module in `factory/bench/external/` that provides:
-
-| Name | What it does |
-|---|---|
-| `NAME`, `PREFIX` | The benchmark's name (`swebench-pro`) and its case-id prefix (`pro`) |
-| `instances(source)` | The dataset's instances, each with an id and a stratum |
-| `build(instance, source, case_dir, docker)` | Writes one case: `case.yaml` and `repo/`. It raises a refusal with a reason for an instance it can't use |
-| `available(env)` | None when the scorer can run, else the reason it can't |
-| `versions(env)` | The harness versions to record |
-| `score(case, patch, out_dir, env)` | The verdict (`resolved`, `unresolved` or `error`) with its detail and log tail |
-| `gold(case)`, `probe_lines(case)` | The gold patch for check, and the lines the leak probe searches for |
-| `export(case_cells, out_dir)` | One variant's submission files |
-
-A prepared case, for Pro:
+### A SWE-rebench case
 
 ```yaml
-title: "NodeBB/NodeBB: instance_nodebb__nodebb-0499…"
-kind: external
-requires: [git]
-external: {benchmark: swebench-pro, instance: "instance_nodebb__nodebb-0499…", stratum: NodeBB/NodeBB,
-           image: "ghcr.io/scaleapi/swe-bench_pro-v2:instance_nodebb__nodebb-0499…", source: /abs/pro-v2.jsonl}
+title: "0b01001001/spectree: 0b01001001__spectree-64"
+kind: swe-rebench
+requires: []
+swe_rebench: {instance: 0b01001001__spectree-64, image: "swerebench/sweb.eval.x86_64.0b01001001_1776_spectree-64",
+              created_at: "2026-03-04T10:11:12Z", fail_to_pass: ["tests/test_plugin.py::test_x"], pass_to_pass: [...]}
 config:
-  test_paths: ["test/factory_issue.test.js"]
-  unit_tests: []                      # no suite gate: the full suite is slow, and naming tests leaks hints
+  test_paths: ["test_factory_issue.py"]
+  unit_tests: []                      # no suite gate: the full suite is slow, and naming its tests leaks hints
   guidance: [".factory/guidance.md"]
   dependency_sources: []
-  sandbox: {image: "…", mount: /app, seed: /app, path: [], env: {}}
+  sandbox: {image: "swerebench/sweb.eval.x86_64.0b01001001_1776_spectree-64", mount: /testbed,
+            path: [/opt/miniconda3/envs/testbed/bin], env: {}}
 contract:
-  id: pro-instance-nodebb-nodebb-0499…-t01
-  goal: "Make the change .factory/issue.md asks for (NodeBB/NodeBB), with a test that shows it"
+  id: rebench-0b01001001-spectree-64-t01
+  goal: "Make the change .factory/issue.md asks for in 0b01001001/spectree, with a test that shows it"
   spec_refs: [".factory/issue.md"]
   depends_on: []
   non_goals: ["Changing behaviour the issue doesn't ask to change", "Editing or deleting existing tests to make them pass"]
   acceptance:
-    - "The behaviour .factory/issue.md asks for is implemented, including every requirement and interface it lists"
-    - "test/factory_issue.test.js has a test that fails on the base commit and passes with the change"
+    - "The behaviour .factory/issue.md asks for is implemented"
+    - "test_factory_issue.py has a test that fails on the base commit and passes with the change"
     - "Existing tests of the code you changed still pass"
-  verification: ["npx mocha test/factory_issue.test.js"]
+  verification: ["pytest --no-header -rA --tb=line --color=no -p no:cacheprovider test_factory_issue.py"]   # test_cmd + the file
   risk: medium
-hidden: []
+hidden: ["pytest --no-header -rA --tb=line --color=no -p no:cacheprovider tests/test_plugin.py"]   # test_cmd + test_patch's files
 ```
 
-- **The issue goes in a file, not the contract.** Problem statements contain `TODO` and `<FOO>`-style text, which contract validation rejects as placeholders. `.factory/issue.md` is in the base commit, listed in `spec_refs` and named in the goal, and the tester and planner prompts read spec references.
-- **A PatchEval contract** has the goal "Fix the vulnerability .factory/issue.md describes (CVE-ID), with a test that reproduces it". Its acceptance says the vulnerable behaviour is fixed without changing other behaviour, and that the template's test fails on the base and passes with the fix.
-- **Case ids** are the adapter's prefix, a hyphen, and the instance id lowercased with each run of characters outside `[a-z0-9]` turned into one hyphen. An id longer than 64 characters keeps its first 55 characters plus a hyphen and the first 8 hex digits of the instance id's sha256.
+(The instance, dates and test command are illustrative.)
+
+- **The issue goes in a file, not the contract.** Problem statements contain `TODO` and `<FOO>`-style text, which contract validation rejects as placeholders. `.factory/issue.md` is in the base commit, listed in `spec_refs` and named in the goal, and the tester and planner prompts read spec references. It is the problem statement only: no `hints_text`, as in SWE-bench's standard setting.
+- **The agents' test** goes in `test_factory_issue.py` at the repository's root. pytest collects a file named on its command line whatever its `python_files` setting, so this works in any layout. The guidance (`.factory/guidance.md`) says what an agent harness usually does: the environment is installed and offline, the repository is also at /testbed, the test goes in `test_factory_issue.py`, and the contract's verification runs it.
+- **path:** `/opt/miniconda3/envs/testbed/bin` when the image has that directory (SWE-bench's conda environment), else empty.
 - The base commit adds `.factory/` and `docs/plans/CASE.md`. The scored patch leaves both out.
 
-### The sample
+### Grading
 
-Each stratum gets its largest-remainder share of `--count`. Within a stratum, the order is the sorted instance ids shuffled by `random.Random(f"{seed}:{stratum}")`. Prepare walks that order until the stratum's share is built, skipping instances the adapter refuses or a check marked broken. Pro is stratified by repository (50 of 642, so about 4–5 per repository) and PatchEval by language (40 of 230 across Go, JavaScript and Python). `--instances` builds exact ids instead, for trying one. sample.json records what was picked and skipped, so a later run can use the same cases.
+| Pipeline ends | Every FAIL_TO_PASS passed? | Every PASS_TO_PASS passed? | Cell outcome |
+|---|---|---|---|
+| `verified` | yes | yes | `solved` |
+| `verified` | no | — | `false_pass`: the factory's gates passed a patch the benchmark rejects |
+| `verified` | yes | no | `regressed` |
+| `failed`, cost limit, exception, budget spent | not graded | — | `failed`, `stopped`, `error`, `skipped`, as today |
 
-### Scoring
+SWE-bench resets the test patch's files and applies the test patch before it runs the tests. Laying hidden/ (those files, as after the test patch) over the candidate does the same. The test files the agents wrote stay in the candidate but aren't run, so they never decide the verdict.
 
-| Pipeline ends | Scorer says | Cell outcome |
-|---|---|---|
-| `verified` | resolved | `solved` |
-| `verified` | unresolved | `false_pass`: the factory's gates passed a patch the benchmark rejects |
-| `verified` | error, timeout, no verdict | `error` |
-| `failed`, cost limit, exception, budget spent | not run | `failed`, `stopped`, `error`, `skipped`, as today |
-
-The patch is `git diff --binary BASE CANDIDATE -- . ':!.factory' ':!docs/plans/CASE.md'`. Both scorers apply it in a fresh container of the instance's image and run their own tests. Tests the agents wrote may or may not run there, and they never decide the verdict.
-
-### Checking an external case
+### Checking a case
 
 | Check | Expect | Else |
 |---|---|---|
-| Template probe: the passing probe at the test path, then the failing probe, through the contract's verification in the case's sandbox | pass with ≥ 1 test, then fail | `broken: template` |
-| Leak probe: `grep -rIlF` for up to five distinctive gold lines over the container's filesystem (not /proc, /sys, /dev or the worktree) | no hit | `broken: leak PATH`; past 300 s, `weak` |
-| Scorer: the gold patch, then an empty patch | resolved, then not resolved | `broken: scorer` |
+| template: a one-line passing, then failing, test at `test_factory_issue.py`, through the contract's verification in the case's sandbox | pass with ≥ 1 test, then fail | dropped: `check: template` |
+| base: the base, graded | not solved | dropped: `check: base` (the tests don't need the change) |
+| gold: solution/ over the base, graded | solved | dropped: `check: gold` (the factory's sandbox can't run the tests) |
 
-### Language templates
+### Preparing a month
 
-| Language | Test the agents add | Verification | `test_paths` |
-|---|---|---|---|
-| Python | `test_factory_issue.py` at the repository root | `python -m pytest -rA test_factory_issue.py` | `test_factory_issue.py` |
-| Go | `factory_issue_test.go` in the package the change touches, with test names starting `TestFactoryIssue` | `go test -v -run '^TestFactoryIssue' ./...` | `**/factory_issue_test.go` |
-| JavaScript, TypeScript | `test/factory_issue.test.js` | `npx jest --ci test/factory_issue.test.js`, `npx mocha test/factory_issue.test.js` or `npx vitest run test/factory_issue.test.js`, by the runner package.json names first | `test/factory_issue.test.js` |
+The source is a local export of the leaderboard dataset, for example `load_dataset("nebius/SWE-rebench-leaderboard", split="2026_03").to_json("2026-03.jsonl")`. Its monthly splits (`2025_01` … `2026_03` at the time of writing, 30 to 110 tasks each) are its rows grouped by `created_at`, so `--month` filters on that field. Every case goes in suite.yaml's `holdout` split. A goal loop following [evals](evals.md)' protocol never tunes on an outside month, and evals warns when the holdout is overused.
 
-Each template's guidance tells every agent what an agent harness usually says: the environment is installed and offline, the repository is also at `mount`, how to run the test, and where it goes. The probes are a one-line passing test and a one-line failing test for each runner.
-
-### SWE-bench Pro
-
-- **Inputs:** a JSONL export of `ScaleAI/SWE-bench_Pro`'s default config (`--source`) and a checkout of `scaleapi/SWE-bench_Pro-os` (FACTORY_SWEBENCH_PRO), whose `v2/tasks/ID/` are Harbor tasks with `instruction.md`, `environment/Dockerfile` (`FROM ghcr.io/scaleapi/swe-bench_pro-v2:ID`), `solution/` and `tests/`.
-- **What agents see:** the task's `instruction.md` (the PR description, requirements and new interfaces, as Pro shows its agents), and the repository at `/app`, or `/testbed` for a few tasks.
-- **Scoring is Pro's authoritative re-grade.** Its README says "fresh-sandbox re-grade = reported score", run as the `patch_replay` agent over a source job. The factory writes a one-instance source job and runs Harbor locally:
+### Reading a run
 
 ```text
-CELL/external/source/instance_1/result.json        {"task_name": "ID"}
-CELL/external/source/instance_1/agent/model.patch   the scored patch
-PYTHONPATH=$FACTORY_SWEBENCH_PRO/v2/tooling $FACTORY_HARBOR run -p $FACTORY_SWEBENCH_PRO/v2/tasks/ID -e docker -n 1 \
-    -a patch_replay:PatchReplayAgent -m replay --ak source_job=CELL/external/source \
-    --job-name bench-RUN-CELL -o CELL/external/jobs
-CELL/external/jobs/bench-RUN-CELL/TRIAL/result.json  verifier_result.rewards.reward: 1 resolved, 0 unresolved
+swe-rebench · strict    resolved 31/104  30% [21–39]    $2.10/task   11.4 min/task
+                        month 2026-03: 110 rows, 6 refused or dropped (log_parser 2, image 1, check: gold 3) → 31/110 (28%)
+                        false passes 7 · regressed 4
 ```
 
-### PatchEval
-
-- **Inputs:** PatchEval's dataset file (`--source`), a checkout of `bytedance/PatchEval` (FACTORY_PATCHEVAL) and its interpreter (FACTORY_PATCHEVAL_PYTHON).
-- **What agents see:** PatchEval's own prompt, which is its opening line plus `cve_description` and nothing more, and the repository at `/workspace/NAME`. Its own runner deletes the rest of `/workspace` before the agent starts. The factory overlays it instead, since the image's `/workspace/fix.patch` is the original fix and `fix-run.sh` is the validation.
-- **Scoring:** `run_evaluation.py --output OUT --patch_file CELL/external/patches.jsonl --input_file SOURCE --max_workers 1`, which runs `cd /workspace && bash fix-run.sh` with the patch at `/workspace/fix.patch`; exit 0 passes. The verdict comes from `evaluation_output/OUT/summary.json`: `poc_evaluation.successful_cves` resolved, `failure_analysis.failed_cves` unresolved, `execution_errors` error.
-- **Gold for check:** the image's own `/workspace/fix.patch`. PatchEval warns that with its strengthened PoCs some original fixes fail `fix-run.sh`. Those CVEs fail the check and are replaced, so every case left is one whose original fix passes.
-
-### Reading an external run
-
-```text
-external · swebench-pro · strict     resolved 17/50  34% [22–47]   $3.90/instance  14.2 min/instance
-                                     NodeBB/NodeBB 2/5 · ansible/ansible 1/4 · …
-                                     replaced 6 (template 4, leak 0, scorer 2) · harbor 0.27.0 · SWE-bench_Pro-os 1a2b3c4
-external · patcheval · strict        resolved 22/40  55% [40–70]   $1.20/instance   6.1 min/instance
-                                     Go 8/13 · JavaScript 7/13 · Python 7/14
-                                     replaced 9 (template 3, scorer 6) · PatchEval 5d6e7f8
-```
-
-(The numbers are illustrative.) The denominator is every cell of the benchmark's cases, so the rate is comparable in method with a leaderboard's, though not with Pro's locked protocol.
+(The numbers are illustrative.) n counts every cell, so the rate is comparable in method with the leaderboard's, though the leaderboard averages several runs of a single agent.
 
 ### The runbook
 
-`docs/external-evals.md` (t08) is the path a reader follows: install Harbor 0.27.0 and the two checkouts, export the datasets, prepare, check and prepare again until stable, dry run, run, report, export and re-grade, clean up images.
+`docs/swe-rebench.md` (t05) is the path a reader follows: host needs, exporting a month, prepare, dry run, run, report, export and re-grade with [SWE-rebench's SWE-bench fork](https://github.com/SWE-rebench/SWE-bench-fork), and cleaning up images.
 
-### The measurements
+### The measurement
 
-- **t09:** `strict`, the repository's configured flow and models, once, on both suites, with `--max-cost 400`. The results doc says what the numbers compare with. Pro's leaderboard numbers come from a locked single-agent protocol on all 642 tasks, so a factory number is a pipeline on a 50-instance sample, scored the same way. Only verified candidates are submitted, so a stopped factory scores zero where a leaderboard agent would still submit its diff.
-- **t10:** `secure` on the same cases with `--baseline` set to t09's run, and the compare line per suite. The question it answers: does the security step raise PatchEval's resolved rate, or cut its false passes, without lowering Pro's?
+t06 runs the configured `strict` flow with its models once on the newest month, with `--max-cost 300`. The results doc says what the number compares with. The leaderboard scores bare models in a fixed scaffold, so a factory number is a pipeline on the same tasks, scored the same way. Only verified candidates are submitted, so a stopped factory scores zero where a leaderboard agent would still submit its diff.
 
 ## Files Changed
 
 | File | Change |
 |---|---|
-| `factory/sandbox.py` | `Docker` sandbox; `make` selects it for a config with `image` (t01) |
-| `factory/config.py` | `image`, `mount`, `seed` in `SandboxConfig`, and validation (t01) |
-| `factory/verification.py` | go test, jest, mocha, vitest (t02) |
-| `factory/bench/external/__init__.py` | New: adapter interface, registry, sample, scoring, probes (t03, t04) |
-| `factory/bench/external/templates.py` | New: language templates and probes (t04) |
-| `factory/bench/external/swebench_pro.py` | New: the Pro adapter (t05) |
-| `factory/bench/external/patcheval.py` | New: the PatchEval adapter (t06) |
-| `factory/bench/cases.py` | Kind `external` and its key (t03) |
-| `factory/bench/run.py` | External scoring, preflight, container cleanup, version records (t03) |
-| `factory/bench/check.py` | External checks (t04) |
-| `factory/bench/report.py` | External section and export (t07) |
-| `factory/cli.py` | `bench prepare` (t03), `check --parallel` (t04), `bench export` (t07) |
-| `tests/fake_docker.py`, `tests/fake_harbor.py`, `tests/fake_patcheval.py`, `tests/external_toy.py` | New test doubles (t01, t05, t06, t03) |
-| `tests/test_sandbox_docker.py`, `tests/test_bench_external.py`, `tests/test_external_swebench_pro.py`, `tests/test_external_patcheval.py`, `tests/test_external_docs.py` | New tests |
-| `tests/test_verification.py` | New tests (t02) |
-| `docs/external-evals.md` | New: the runbook (t08) |
-| `docs/architecture.md`, `docs/reference.md`, `NEXT.md`, factory-ops skill (template and copy) | t08 |
-| `docs/external-evals-results.md` | New: the measurements (t09, t10, by hand) |
+| `factory/sandbox.py` | `Docker` sandbox; `make` picks it when the config has an image (t01) |
+| `factory/config.py` | `image` and `mount` in `SandboxConfig`, validated (t01) |
+| `factory/bench/swe_rebench.py` | New: parse_log_pytest grading (t02); prepare, case ids and checks (t03) |
+| `factory/bench/cases.py` | The `swe-rebench` kind and `swe_rebench` key; per-test grading for that kind (t02) |
+| `factory/bench/run.py` | patch.diff, Docker preflight, container cleanup, image ids in results (t02) |
+| `factory/bench/check.py` | The swe-rebench checks in `factory bench check` (t03) |
+| `factory/bench/report.py` | The swe-rebench resolved line (t04) |
+| `factory/cli.py` | `factory bench prepare` (t03) and `factory bench export` (t04) |
+| `tests/fake_docker.py`, `tests/test_sandbox_docker.py` | New (t01); fake images extended (t03) |
+| `tests/test_bench_swe_rebench.py` | New (t02), extended (t03, t04) |
+| `tests/test_swe_rebench_docs.py` | New (t05) |
+| `docs/swe-rebench.md`, `docs/architecture.md`, `docs/reference.md`, `NEXT.md`, `factory/templates/skills/factory-ops/SKILL.md`, `.claude/skills/factory-ops/SKILL.md` | Runbook and docs (t05) |
+| `docs/swe-rebench-results.md` | New: the first measurement (t06, by hand) |
+| `docs/sessions/` | One entry per task |
 
 ## Test Plan
 
 ### Unit tests
 
-- `tests/test_sandbox_docker.py` (t01), through `tests/fake_docker.py`: config selection and validation; the `docker run` flags (no network, host user, dropped capabilities, read-only root, label); exactly the worktree and its git dirs mounted, plus hidden overlays; exec with the config's PATH and env; timeouts inside the container; seeding without overwriting; close idempotent; a missing docker or image refused.
-- `tests/test_verification.py` (t02): recognition of the four runners, counts from real output samples, and zero counts that are inconclusive.
+- **t01** (`tests/test_sandbox_docker.py`, through `tests/fake_docker.py`): an image selects Docker, even with --no-sandbox; `mount` must be absolute and needs `image`; one container per sandbox with `--network none`, the host uid and gid, every capability dropped and a read-only root; only the worktree, its git common dir and its admin dir are mounted; commands run in the worktree with the config's PATH and env; a timed-out command is stopped inside the container; seeding copies ignored files and leaves existing ones alone; close() removes the container once; a missing docker, daemon or image is refused, naming `docker pull`.
+- **t02** (`tests/test_bench_swe_rebench.py`): parse_log_pytest's rules on real `-rA` output, including FAILED lines with ` - ` and XFAIL counted as passed; key validation for the new kind.
 
 ### End-to-end tests
 
-Through `factory bench` with scripted models, the fake docker CLI and fake scorers:
+Through `factory bench run` with scripted models and the fake docker CLI:
 
-- t03: prepare's sample, refusals and refill, idempotence; a verified cell scored solved, false_pass or error; the scored patch's exclusions; scorers without secrets; preflight refusals; containers removed; version records.
-- t04: the JavaScript runner choice, the template probe, a template that counts nothing, a leak, a leak-probe timeout, gold and empty, refill after a broken check, parallel checks.
-- t05 and t06: each adapter's instances, case building, hiding, issue text, scoring from its harness's real output format, errors and export.
-- t07: resolved over every sampled instance, strata, replacements and versions in report; the compare verdict; export.
-- t08: the runbook and reference against the CLI's own parser.
+- **t02:** a verified cell is solved when every listed test passes, `false_pass` when a fail-to-pass test fails and `regressed` when a pass-to-pass test fails. patch.diff leaves out .factory/ and the plan file. Preflight refuses a missing image, and a cell removes its containers.
+- **t03:** `factory bench prepare` on a JSONL of fake rows builds every task of the month, refuses unusable rows with reasons, keeps the fix and its tests out of repo/, builds the hidden command from test_patch's files, drops cases that fail the template or gold check, marks cases holdout, and changes nothing the second time. `factory bench check` runs the same checks.
+- **t04:** report divides by every task and shows the month's refused tasks; export writes predictions and refuses runs without swe-rebench cells.
+- **t05:** the runbook names every option of prepare and export, read from the CLI's parser.
 
 ## Verification
 
-- Each task's verification commands, and `uv run pytest -q` passing at each merge.
-- By hand after t08: `factory bench prepare swebench-pro --source pro-v2.jsonl --out ~/suites/pro --count 50 --seed 1`, then `factory bench check --cases ~/suites/pro --parallel 4`, then prepare again until no case is broken. The same for `patcheval` with `--count 40`.
-- By hand: `factory bench run --cases ~/suites/pro --cases ~/suites/patcheval --dry-run` lists 90 cells. t09's run and its re-grade then confirm the scorer path end to end.
+- t01–t05: each contract's commands, then `uv run pytest -q`.
+- t06: `factory bench report` on the run shows the swe-rebench line, `docs/swe-rebench-results.md` records it, and SWE-rebench's harness agrees on the export.
 
 ## Cross-Workstream Coordination
 
-- **Depends on:**
-  - [evals](evals.md) (open PR #85). `external-evals-t03` depends on `evals-t07`, its last code task, and `external-evals-t08` on `evals-t08`, its docs task. External cases use evals' check verdicts and `--json` (t03 of evals), suite.yaml and splits (t04, t06), statistics and paired verdicts (t01), `--baseline` (t06) and the ledger (t07). This plan reverses evals' locked "no external benchmark is imported" for these two suites only. Its mined and synthetic suites are unchanged. The reverse link belongs in evals.md's coordination section, on #85.
-  - [security-review](security-review.md). The by-hand `external-evals-t10` depends on `security-review-t06`, which ships the built-in `secure` flow.
-  - [bench](bench.md), merged. External cases are bench cases with one new kind. The cell, the run directory and results.json keep their shape.
-  - [strict-flow](strict-flow.md), merged. The language templates give the test step a test command that fails first, and t02 lets it count Go and JavaScript runs.
-- **Required by:** none yet.
-- **Overlaps without ordering:** `web-tools-t04` (in #85) also changes `factory/bench/run.py` after `evals-t07`, so whichever lands second rebases. `flow-tuning` and `security-review-t02` change `factory/config.py` beside t01. The factory's conflict rework handles these.
-- **Supersedes:** the `experiment/swe-bench` plan (PR #83 into that branch). None of its tasks was built. Its Docker sandbox design is t01 here, its harness scoring became adapters, and its Verified target is dropped. The branch can be deleted once this plan merges.
+- **Depends on:** [evals](evals.md). t02 depends on `evals-t07`, the last evals task to change `factory/bench/`, and t05 on `evals-t08`, its docs task. These cases use evals' outcomes (`regressed`, `tampered`), its check output (`factory bench check`), suite.yaml and its holdout split, its clustered intervals (t01) and the ledger's `--note` (t07). evals locked "no external benchmark is imported" for its own suites, and named an importer for the SWE-bench format as the natural follow-up: this is that follow-up, as a separate suite.
+- **Required by:** none.
+- **Overlaps without ordering:** `web-tools-t04` also changes `factory/bench/run.py` after `evals-t07`, so whichever lands second rebases. `security-review-t02` changes `factory/config.py` beside t01. The factory's conflict rework handles these.
 
 ## Notes / Out of Scope
 
-- **Offensive security benchmarks:** Cybench and other CTFs, CyberGym and SEC-bench PoC generation, CVE-Bench and BountyBench exploitation. The factory's output is a PR, and these need networked targets and a non-PR output path. If the factory gains a security-audit crew, CyberGym-E2E's discovery track is the natural next suite.
-- **Secure feature work:** BaxBench, SecRepoBench and SecureAgentBench, which ask whether a feature the factory builds ships a vulnerability. This is the next cyber suite once t10 says whether `secure` matters. It needs an adapter whose scorer runs the benchmark's security tests alongside its functional ones.
-- **More SWE suites:** SWE-rebench (fresh monthly, decontaminated, Python), Multi-SWE-bench, and Pro's held-out set. Each is one adapter beside the two here. Terminal-Bench 2.x is a poor fit, because its result is a container's state, not a diff.
-- **Harbor or Inspect as the driver:** not taken. Adapters keep the factory's own worktrees and gates. Harbor stays the scorer for Pro.
-- **Leaderboard submission:** export writes each benchmark's format, but submitting is a human's call and outside this plan.
-- **Full public sets** (642 Pro, 230 PatchEval): the same commands with a larger `--count` and budget, once the sample's numbers justify it.
+- **SWE-bench Pro and PatchEval**, the first version's suites. Pro needs Go and JavaScript test runners, Harbor's patch_replay scorer and about 250 GB of images. PatchEval measures CVE patching only. Revisit Pro once SWE-rebench runs cleanly, and PatchEval when the `secure` flow ([security-review](security-review.md)) needs a measurement.
+- **Go and JavaScript test runners** in `factory/verification.py`. They're needed for strict on any Go or JavaScript repository, not only a benchmark, so they belong in their own plan.
+- **Leak probes** that search a whole image for the gold patch. The SWE-bench images build the environment at the base commit, and the mount hides the only known copy of the fix (the git history).
+- **Running SWE-rebench's harness per cell.** The export and a by-hand re-grade check the factory's grading instead.
+- **Sampling, several months, repeats, and comparing flows.** One whole month, one run. A later trial can compare flows on the same prepared month with `--baseline`.
+- **Harbor or Inspect packaging** of the factory as an agent.
