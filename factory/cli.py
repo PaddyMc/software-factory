@@ -236,7 +236,7 @@ def cmd_run_one(a) -> int:
                 pr_base, start = f"factory/{stacked[0]}", deps[0]["candidate_sha"]
                 merge = tuple((d["id"], d["candidate_sha"]) for d in deps[1:])
             else:
-                trunk = a.base or git(root, "rev-parse", "--abbrev-ref", "HEAD")
+                trunk = a.base or cfg.trunk or git(root, "rev-parse", "--abbrev-ref", "HEAD")
                 pr_base, start, merge = trunk, _tip_or_local(root, trunk), ()
             wt, base_sha = create_worktree(root, home, task.id, start, merge)
     except PipelineError as e:
@@ -825,7 +825,7 @@ def cmd_gates(a) -> int:
     sha = git(root, "rev-parse", "--verify", f"{a.ref}^{{commit}}")
     row = _db().task(task.id)
     stacked = a.base is None and row is not None and row["stacked_on"] and row["base_sha"]
-    a.base = row["base_sha"] if stacked else (a.base or "main")   # a stacked PR is reviewed against its dependency
+    a.base = row["base_sha"] if stacked else (a.base or cfg.trunk or "main")  # stacked PRs use their dependency
     base = git(root, "merge-base", a.base, sha)
     wt = home / "review" / f"{task.id}-{sha[:12]}"
     if not wt.exists():
@@ -1193,7 +1193,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--parallel", type=int, default=3, help="plan run: max tasks running at once")
     s.add_argument("--network-for", help="plan run: comma list of task ids that get --network")
     s.add_argument("--max-cost", type=float, help="abort a task once it has cost this many USD")
-    s.add_argument("--base", help="base branch for the worktree and PR (default: current branch)")
+    s.add_argument("--base", help="base branch for the worktree and PR (default: trunk, else current branch)")
     s.add_argument("--model", help="override every role's model, e.g. openrouter:z-ai/glm-5.3")
     s.add_argument("--max-attempts", type=int, default=3, help="max build attempts (review/gate loops)")
     s.add_argument("--network", action="store_true", help="allow network inside the sandbox")
@@ -1313,7 +1313,7 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("gates", help="run the deterministic gates for a ref (no agents)")
     s.add_argument("task_id")
     s.add_argument("--ref", default="HEAD")
-    s.add_argument("--base", help="default: the PR a stacked task is built on, else main")
+    s.add_argument("--base", help="default: the PR a stacked task is built on, else trunk or main")
     s.add_argument("--skip", default="")
     s.add_argument("--full-e2e", action="store_true")
     s.add_argument("--no-sandbox", action="store_true")

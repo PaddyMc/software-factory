@@ -8,6 +8,13 @@ name: my-project
 plans: ["docs/plans/**/*.md"]
 exclude: []
 
+# trunk: dev                  # factory PRs build on and target this branch (default: the checkout's branch)
+# land:                       # factory land and factory promote; absent, neither runs
+#   release: main             # the promotion PR's base; only a human merges into it
+#   method: squash            # how factory land merges into the trunk: squash | merge | rebase
+#   max_holds: 2              # HOLDs sent back for rework per fresh build; the next one waits for a human
+#   require_checks: true      # a head needs at least one finished, passing CI check
+
 # Paths a `test` step may write (globs); required by a flow that has one.
 # test_paths: ["tests/**"]
 

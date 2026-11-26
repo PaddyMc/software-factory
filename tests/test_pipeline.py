@@ -18,6 +18,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from fake_model import E2E, TEST, ScriptedModel, call, scripts
 from conftest import DEMO_CONFIG, git, plan_text
+from conftest import TASK
 
 SKIP = "unit_tests,e2e_tests"   # the toy repo has no Cargo workspace
 SANDBOX = [] if shutil.which("bwrap") else ["--no-sandbox"]
@@ -145,6 +146,8 @@ def test_gates_default_to_the_configured_trunk(repo, home, monkeypatch, capsys):
     _trunk_repo(repo)
     (repo / "src").mkdir()
     (repo / "src/greet.txt").write_text("hello\n")
+    (repo / "crates/e2e/tests").mkdir(parents=True)
+    (repo / "crates/e2e/tests/greet.rs").write_text(E2E)
     (repo / "docs/sessions").mkdir()
     (repo / f"docs/sessions/{date.today().isoformat()}-demo-t01.md").write_text("## demo-t01\n")
     git(repo, "checkout", "-q", "-b", "greeting")
