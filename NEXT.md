@@ -312,8 +312,9 @@ How much this costs is unclear. On this repository's board, 1,092 agent commands
 
 **Gap.** Only a human merges, and only into the branch a run started on. A stack of factory PRs moves one merge and one `factory status --refresh` at a time, and finished work waits whenever nobody is at GitHub. Nothing combines the signals refresh already reads (CI, mergeability, reviews, a pushed head) into "ready to merge", and a restacked head is checked only by CI.
 
-**Plan.** [docs/plans/land.md](docs/plans/land.md) (planned 2026-11-26, tasks `land-t01`…`t07`):
+**Plan.** [docs/plans/land.md](docs/plans/land.md) (planned 2026-11-26, tasks `land-t01`…`t09`):
 - `trunk: dev` points factory PRs at an integration branch with lighter protection than `main`.
 - `factory land` (one pass, or `--watch`) finds ready PRs, gates each head the gates haven't passed, and has a new read-only role, the lander, review it. On `VERDICT: MERGE` the factory merges it into the trunk, pinned to the reviewed head, and restacks the next PR in the stack. `risk: high` contracts and changes to `.factory/`, `.github/` or guidance files wait for a human.
 - A `VERDICT: HOLD` sends the PR back for rework like a human's request for changes, up to `land.max_holds` times per fresh build.
 - `factory promote` keeps one trunk → `main` PR listing every task it carries. Merging it is the human approval.
+- A scripted end-to-end test of the whole flow (sync, stacked landings, a hold and its rework, a red trunk, promotion) runs as its own CI job on every push to `dev` and every PR. `factory land` merges only while every check on the trunk's head has passed, so one PR lands per trunk CI run. A `live smoke` workflow, started by hand, runs `factory bench run --require-solved` with the pinned models, and `main` requires it on the promotion PR's head.

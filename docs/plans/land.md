@@ -4,18 +4,19 @@
 
 ## Plan at a Glance
 
-**Problem:** Every factory pull request waits for you to merge it into `main`. A stack of dependent PRs (each built on top of the one before it) moves forward one merge and one refresh at a time, so finished work piles up whenever you're away.
+**Problem:** Every factory pull request waits for you to merge it into `main`. A stack of dependent PRs moves one merge at a time, so finished work piles up whenever you're away.
 
-**Goal:** When this workstream is complete, factory PRs land on a `dev` branch without you. A new merge role, the *lander*, checks each ready PR, reviews it, and either merges it into `dev` or sends it back for rework. `main` changes only when you merge one promotion PR that lists everything `dev` has added.
+**Goal:** When this workstream is complete, factory PRs land on a `dev` branch without you. A new role, the *lander*, reviews each ready PR and either merges it into `dev` or sends it back for rework. An end-to-end test of the whole flow runs on every push to `dev`, and landing pauses while `dev` is red. `main` changes only when you merge one promotion PR, after a live run with real models that you start.
 
-**In scope:** a setting that points factory PRs at `dev`; `factory land`, which finds ready PRs, checks them again, has the lander review them, and merges them; rework for held PRs; `factory promote`, which keeps the `dev` → `main` PR current; docs.
+**In scope:** pointing factory PRs at `dev`; `factory land`; rework for held PRs; `factory promote`, which keeps the `dev` → `main` PR current; the end-to-end test and the live run; docs.
 
-**Out of scope:** setting up GitHub branch protection (you do that by hand), merging into `main` without you, and builds started by `factory land`.
+**Out of scope:** branch protection and the live run's API key (set by hand), merging into `main` without you, and builds started by `factory land`.
 
 **Approach:**
-1. Settings, plus a dry run that says which PRs are ready and what the others wait for.
-2. The lander's review, then landing: check again, review, merge, move the next PR in the stack onto `dev`.
-3. Holds go back for rework, and the promotion PR keeps `main` one merge away.
+1. Settings, plus a dry run that says which PRs are ready.
+2. The lander's review, then landing, bottom-up through stacks.
+3. Holds go back for rework; the promotion PR keeps `main` one merge away.
+4. The end-to-end test on `dev`, landing only while `dev` is green, and the live run before a promotion.
 
 **First task:** `land-t01` — the `trunk:` and `land:` settings, since every later task reads them.
 
@@ -35,7 +36,9 @@
 | `dev` → `main` | **The factory keeps one promotion PR.** `factory promote` opens or updates a single PR from the trunk to the release branch, listing every task it carries. `factory land` updates it after each pass that merged something. You merge it, and that merge is the approval |
 | Who merges | **The factory's own code, after the lander's verdict.** The lander has read-only tools and ends with `VERDICT: MERGE` or `VERDICT: HOLD`. The factory then merges through GitHub's API, pinned to the head commit the lander reviewed. Agents still never call `gh`, push or merge |
 | Turning it on | **`trunk:` and `land:` in `.factory/config.yaml`.** `trunk:` sets the branch factory PRs target (default: the checkout's current branch, as today). Without `land:`, `factory land` and `factory promote` refuse to run. A `land.release` equal to the trunk is rejected when the config loads |
-| Branch protection | **A GitHub setting you own, set up by hand.** `main` requires a pull request. `dev` requires the CI checks but no approving review, since the factory merges as the identity that opened the PR. The README gives the commands |
+| Confidence on `dev` | **A scripted end-to-end test on every push, plus a live smoke started by hand.** `tests/test_dev_lifecycle.py` takes a plan from `factory sync` through landing, a hold and its rework, a red `dev` and the promotion PR, using the scripted model and the fake `gh`. It runs as its own CI job on every push to `dev` and `main` and on every PR, the promotion PR included. The `live smoke` workflow runs `factory bench` on a shipped case with this repository's pinned models. You start it by hand on the promotion PR's head, and it fails unless the case is solved |
+| A red `dev` | **Pauses landing.** `factory land` reviews and merges only while every check on the trunk's head has finished and passed. Red, running or missing checks stop the pass before any review, so at most one PR lands per trunk CI run, and a red `dev` points at one landing. A failed live smoke on the head is a red `dev` too |
+| Branch protection | **A GitHub setting you own, set up by hand.** `main` requires a pull request, the CI checks and the `live smoke` check, so the promotion PR merges only after a live smoke passes on its head. `dev` requires the CI checks, including the end-to-end job, but no approving review, since the factory merges as the identity that opened the PR. The README gives the commands |
 
 ### Milestones
 
@@ -47,9 +50,11 @@
 | **M4** | `factory land` merges ready PRs into the trunk, bottom-up through stacks | The t04 tests in `tests/test_land.py` pass, including the stack test | — |
 | **M5** | A HOLD sends the PR back for rework | The t05 tests in `tests/test_land_rework.py` pass | — |
 | **M6** | One promotion PR carries the trunk to the release branch | The t06 tests in `tests/test_promote.py` pass | — |
-| **M7** | Docs | `tests/test_templates.py::test_the_docs_describe_landing_and_promotion` passes, and `tests/test_templates.py` passes | — |
+| **M7** | Landing waits for a green trunk, and an end-to-end test of the whole flow runs on every push to `dev` | `tests/test_dev_lifecycle.py::test_a_plan_reaches_the_release_branch_through_dev` and the t07 tests in `tests/test_land.py` and `tests/test_ci_workflows.py` pass | — |
+| **M8** | A live smoke with real models, started by hand, fails unless its cases are solved | The t08 tests in `tests/test_bench.py` and `tests/test_ci_workflows.py` pass | — |
+| **M9** | Docs | `tests/test_templates.py::test_the_docs_describe_landing_and_promotion` passes, and `tests/test_templates.py` passes | — |
 
-**Sequence:** `M1 → (M2 ∥ M3) → M4 → M5 → M6 → M7`. t02 and t03 write different files: t02 changes `factory/land.py`, `factory/ci.py`, `factory/cli.py` and `tests/test_land.py`; t03 changes `factory/lander.py`, `factory/agents.py`, `factory/flows.py`, `factory/db.py`, `factory/prompts/lander.md` and `tests/test_lander.py`. From t04 on, every task changes `factory/land.py` and `factory/cli.py`, so they run in a chain.
+**Sequence:** `M1 → (M2 ∥ M3) → M4 → M5 → M6 → M7 → M8 → M9`. t02 and t03 write different files: t02 changes `factory/land.py`, `factory/ci.py`, `factory/cli.py` and `tests/test_land.py`; t03 changes `factory/lander.py`, `factory/agents.py`, `factory/flows.py`, `factory/db.py`, `factory/prompts/lander.md` and `tests/test_lander.py`. From t04 on, every task changes `factory/cli.py`, and t07 and t08 both change `.github/workflows/` and `tests/test_ci_workflows.py`, so they run in a chain.
 
 ### Task Contracts
 
@@ -61,7 +66,9 @@
 | **M4** | `land-t04` | Gates at the head, the review, the merge, comments, the restack after a merge, `--watch` and one land per board, in `factory/land.py` and `factory/cli.py`; tests in `tests/test_land.py` |
 | **M5** | `land-t05` | Holds as rework: columns in `factory/db.py`, the refresh and `_review_fix` in `factory/cli.py`, a `land` rework kind in `factory/pipeline.py`, the hold cap in `factory/land.py`; new `tests/test_land_rework.py` |
 | **M6** | `land-t06` | New `factory/promote.py`; `factory promote` and the call after a landing pass in `factory/cli.py` and `factory/land.py`; new `tests/test_promote.py` |
-| **M7** | `land-t07` | `docs/architecture.md`, `docs/reference.md`, `README.md`, `NEXT.md`, the AGENTS section (template and this repository's `AGENTS.md`) and the factory-ops skill (template and installed copy); a new test in `tests/test_templates.py` |
+| **M7** | `land-t07` | The trunk's state in `factory/land.py`, read before any review or merge and printed by `factory land --dry-run` (`factory/cli.py`); CI on pushes to `dev` and the end-to-end job in `.github/workflows/ci.yml`; commit checks in `fake_gh` (`tests/conftest.py`); new `tests/test_dev_lifecycle.py` and `tests/test_ci_workflows.py`, and tests in `tests/test_land.py` |
+| **M8** | `land-t08` | `factory bench run --require-solved` in `factory/bench/report.py` and `factory/cli.py`; new `.github/workflows/live-smoke.yml`; tests in `tests/test_bench.py` and `tests/test_ci_workflows.py` |
+| **M9** | `land-t09` | `docs/architecture.md`, `docs/reference.md`, `README.md`, `NEXT.md`, the AGENTS section (template and this repository's `AGENTS.md`) and the factory-ops skill (template and installed copy); a new test in `tests/test_templates.py` |
 
 ```yaml
 - id: land-t01
@@ -178,6 +185,7 @@
     - "Without `--dry-run`, factory land never merges a PR whose base isn't the configured trunk, and never merges into land.release, even when a PR targets it"
     - "`factory land --watch [--poll SECONDS]` (default 120) repeats the pass until it gets SIGTERM or Ctrl-C, logging one timestamped line per event. A review in progress when it stops is recorded as stopped, and nothing is merged. Only one factory land at a time runs on a board: a second exits 1 with `factory land is already running on this board (pid PID)`. A pid file in $FACTORY_HOME records the running one and is removed on exit"
     - "`factory land` also takes `--model`, which overrides the lander's model, and exits 0 after a pass (or after --watch stops) unless it was refused"
+    - "The fake gh in tests/conftest.py answers the merge call as GitHub does. It merges the PR's head into its base in the test's bare origin with the given method and marks the PR merged with that mergeCommit, and it refuses with GitHub's message when sha isn't the PR's head"
     - "An end-to-end test runs factory land on a real git repository with the fake gh and a scripted lander over a stack of two PRs. It merges the bottom PR, restacks the top one onto the trunk, and merges the top one on a later pass once its checks pass"
     - "docs/sessions/ has this task's session log entry, as the project rules require"
   verification:
@@ -233,7 +241,7 @@
     - "New factory/promote.py finds the tasks to promote: board tasks that are merged and whose PR's merge commit (GitHub's mergeCommit, read in one gh pr list call) is on origin/TRUNK and not an ancestor of origin/RELEASE, oldest merge first. It also finds the trunk's other commits: those in RELEASE..TRUNK that are no task's merge commit"
     - "`factory promote` fetches both branches. With tasks or other commits to promote, it opens a PR with head the trunk and base land.release, titled `Promote TRUNK to RELEASE: N tasks`. When an open PR with that head and base exists, it updates that PR's title and body through the REST API instead, so there is only ever one. It prints the PR URL"
     - "The body groups the tasks by plan. Each line gives the task id, the first sentence of its goal, its PR link, its contract's risk, and whether it was landed by factory land (a land run with outcome merged) or merged by a human. A task whose merge record is `edited` is marked so. Other commits are listed by subject under `Other commits`. The body ends with `Merge this PR with a merge commit, not a squash or rebase, so TRUNK and RELEASE keep one history.`"
-    - "When origin/RELEASE has commits that origin/TRUNK lacks, promote prints, and puts at the top of the body, `RELEASE has N commits TRUNK lacks: merge RELEASE into TRUNK so the promotion stays a clean merge`"
+    - "When origin/RELEASE has commits that origin/TRUNK lacks, not counting merge commits (a promotion merged with a merge commit leaves one on RELEASE, as expected), promote prints, and puts at the top of the body, `RELEASE has N commits TRUNK lacks: merge RELEASE into TRUNK so the promotion stays a clean merge`"
     - "With nothing to promote it prints `nothing to promote: RELEASE has everything on TRUNK`, exits 0 and opens nothing. `factory promote --dry-run` prints the title and body it would write and changes nothing on GitHub. Without land: configured it exits 1 with the message factory land gives"
     - "After a factory land pass that merged at least one PR, factory land runs promote and logs the promotion PR's URL. A promote failure is logged and doesn't stop the pass or --watch"
     - "The promotion PR's head is the trunk, not a factory/ branch, so refresh and adoption ignore it"
@@ -244,9 +252,71 @@
   risk: medium
 
 - id: land-t07
-  goal: "The docs describe the trunk and release branches, the lander, factory land, holds and factory promote. The policy says the factory merges into the trunk and a human merges into the release branch. The README says how to set up a dev branch with its branch protection, and NEXT.md marks item 23 done"
+  goal: "factory land reviews and merges only while the trunk is green, meaning every check on the head of origin/TRUNK has finished and passed. CI runs on every push to dev. A new end-to-end test, run in CI as its own job, takes a plan from `factory sync` to the release branch through dev: stacked landings, a hold and its rework, a red dev that pauses landing, a human-only PR that never lands, and the promotion PR"
+  spec_refs:
+    - "docs/plans/land.md#a-green-trunk"
+    - "docs/plans/land.md#the-end-to-end-test-on-dev"
+    - "docs/plans/land.md#a-land-pass"
+    - "factory/land.py"
+    - "factory/ci.py"
+    - "factory/cli.py"
+    - ".github/workflows/ci.yml"
+    - "tests/conftest.py"
+  depends_on:
+    - land-t06
+  non_goals:
+    - "The live smoke workflow and `factory bench run --require-solved` (land-t08)"
+    - "Telling anyone that the trunk went red, or reverting the landing that turned it red"
+    - "Showing the trunk's state in `factory status`, `factory top` or the web page"
+    - "Branch protection, the dev branch or this repository's .factory/config.yaml"
+  acceptance:
+    - "New `land.trunk_state(...)` reads the checks on the head commit of origin/TRUNK through gh api, from `repos/{owner}/{repo}/commits/SHA/check-runs` (GitHub's newest run of each check) and `repos/{owner}/{repo}/commits/SHA/status`. It returns green; red with the failed checks' names; running with N of M checks pending; or none when the head has no checks. With land.require_checks false, a head with no checks is green"
+    - "A factory land pass reads the trunk state after its refresh and before any review, gates or merge. When the trunk isn't green, the pass reviews, gates and merges nothing. When the state changes, it logs one of these: `TRUNK is red at SHA (NAMES failed): factory land merges nothing until it is green`, `TRUNK's checks are running at SHA (N of M pending): factory land waits for them`, or `TRUNK has no checks at SHA yet: factory land waits (CI must run on pushes to TRUNK)`. After a merge, the pass reads the trunk state again before the next PR, so one pass lands at most one PR per trunk CI run"
+    - "`factory land --dry-run` first prints `trunk TRUNK at SHA: green` (or `red (NAMES failed)`, `checks running (N of M pending)`, `no checks yet`), then the PR lines of land-t02"
+    - "The fake gh in tests/conftest.py answers the commit check-runs and status calls from its state file, so a test sets each trunk head's checks as it sets a PR's"
+    - ".github/workflows/ci.yml runs on pushes to main and dev, on pull requests and on workflow_call. A new job named `end-to-end: a plan to the release branch through dev` runs `uv run --locked pytest -q -rs tests/test_dev_lifecycle.py` after installing bubblewrap as the test job does. The package job also runs `factory prompt land` from the installed wheel in the repository it initialises, and fails unless the output contains `VERDICT: MERGE`"
+    - "New tests/test_dev_lifecycle.py has test_a_plan_reaches_the_release_branch_through_dev. It uses a real git repository whose bare origin has main and dev, a config with `trunk: dev` and a land: block, the fake gh, and scripted models for every role including the lander. It goes only through the real entry points: `factory sync`, `factory run PLAN`, `factory land`, `factory run TASK`, `factory promote` and `factory status`. Its plan has four tasks: demo-t01; demo-t02, which depends on demo-t01; demo-t03, which the lander holds once; and demo-t04, with risk: high"
+    - "The test checks this order. `factory run PLAN` opens four PRs: demo-t02's targets factory/demo-t01 and the others target dev. With dev and every PR head green, a pass merges demo-t01 and nothing else, because dev's new head has no checks yet, and restacks demo-t02 onto dev. With dev green again, the next pass gates demo-t02's restacked head and merges it. With dev green again, the pass after that holds demo-t03, which becomes changes_requested, and comments `a human merges it` on demo-t04, which stays open"
+    - "The test then continues. `factory run demo-t03` reworks the hold and pushes a new head. With dev's head red, a pass reviews and merges nothing, and the scripted lander isn't called. With dev green, a pass merges demo-t03's new head. There is exactly one PR from dev to main. After the last landing, its body lists demo-t01, demo-t02 and demo-t03 as landed by factory land and doesn't list demo-t04"
+    - "Last, the test merges the promotion PR into main in the bare origin with a merge commit, as a human would. `factory promote` then prints `nothing to promote` and no RELEASE-has-commits warning, and `factory status` shows demo-t01 to demo-t03 merged and demo-t04 pr_open. Every merge call the fake gh received carried the head sha the lander reviewed and targeted dev, and none targeted main"
+    - "docs/sessions/ has this task's session log entry, as the project rules require"
+  verification:
+    - "uv run pytest -q tests/test_land.py::test_trunk_state_reads_the_checks_on_the_trunk_head tests/test_land.py::test_land_reviews_and_merges_nothing_while_the_trunk_is_not_green tests/test_land.py::test_one_pass_lands_one_pr_per_trunk_ci_run tests/test_land.py::test_dry_run_starts_with_the_trunk_state tests/test_ci_workflows.py::test_ci_runs_on_pushes_to_dev_with_the_end_to_end_job tests/test_ci_workflows.py::test_the_package_job_checks_the_lander_prompt_ships tests/test_dev_lifecycle.py::test_a_plan_reaches_the_release_branch_through_dev"
+    - "uv run pytest -q tests/test_land.py tests/test_land_rework.py tests/test_promote.py tests/test_dev_lifecycle.py tests/test_ci_workflows.py"
+  risk: medium
+
+- id: land-t08
+  goal: "`factory bench run --require-solved` fails unless every cell solved its case. A GitHub Actions workflow named `live smoke`, started only by hand, runs it with this repository's pinned models on shipped bench cases at the ref it is started on. So a promotion can be checked with real models before a human merges it"
+  spec_refs:
+    - "docs/plans/land.md#the-live-smoke"
+    - "factory/bench/report.py"
+    - "factory/bench/run.py"
+    - "factory/cli.py"
+    - ".github/workflows/ci.yml"
+  depends_on:
+    - land-t07
+  non_goals:
+    - "Running the live smoke on pushes, pull requests or a schedule"
+    - "Adding the OPENROUTER_API_KEY secret or changing branch protection (both done by hand)"
+    - "Running the lander or factory land with a real model"
+    - "New bench cases, or changing how cells are scored"
+  acceptance:
+    - "`factory bench run` takes `--require-solved`. With it, the command exits 1 unless every cell's outcome is `solved`, and prints `not solved: CASE (OUTCOME)` for each other cell after the summary. Without it, the exit code is as today"
+    - "New .github/workflows/live-smoke.yml is named `live smoke` and runs only on workflow_dispatch. Its inputs are `cases` (space-separated case ids, default `slugify`) and `max_cost` (USD, default `5`). Its one job is named `live smoke`. It checks out the ref the workflow was started on, installs bubblewrap as ci.yml does, sets up uv, and sets FACTORY_HOME to a directory under runner.temp"
+    - "The job's bench step runs `uv run --locked factory bench run`, with one `--case ID` per id in `cases`, `--max-cost MAX_COST` and `--require-solved`. The inputs reach the script through env variables and are never written into the script with `${{ }}`. OPENROUTER_API_KEY comes from the repository secret of that name, in that step's env only"
+    - "After the bench step, also when it fails, the job appends the output of `factory bench report --cells` to the job summary and uploads FACTORY_HOME's bench directory as an artifact named `live-smoke-bench`. The workflow's permissions are `contents: read`"
+    - "docs/sessions/ has this task's session log entry, as the project rules require"
+  verification:
+    - "uv run pytest -q tests/test_bench.py::test_require_solved_fails_unless_every_cell_is_solved tests/test_ci_workflows.py::test_the_live_smoke_runs_by_hand_on_the_pinned_models tests/test_ci_workflows.py::test_the_live_smoke_keeps_its_inputs_and_secret_out_of_scripts"
+    - "uv run pytest -q tests/test_bench.py tests/test_ci_workflows.py"
+  risk: medium
+
+- id: land-t09
+  goal: "The docs describe the trunk and release branches, the lander, factory land, holds, the green-trunk rule, factory promote, the end-to-end test on dev and the live smoke. The policy says the factory merges into the trunk and a human merges into the release branch. The README says how to set up a dev branch with its branch protection, and NEXT.md marks item 23 done"
   spec_refs:
     - "docs/plans/land.md#branches"
+    - "docs/plans/land.md#a-green-trunk"
+    - "docs/plans/land.md#the-live-smoke"
     - "docs/plans/land.md#turning-it-on-here"
     - "docs/architecture.md"
     - "docs/reference.md"
@@ -255,18 +325,20 @@
     - "factory/templates/agents-section.md"
     - "factory/templates/skills/factory-ops/SKILL.md"
   depends_on:
-    - land-t06
+    - land-t08
   non_goals:
-    - "Changing behaviour"
-    - "Changing this repository's .factory/config.yaml, creating the dev branch or changing branch protection"
+    - "Changing behaviour or workflows"
+    - "Changing this repository's .factory/config.yaml, creating the dev branch, adding secrets or changing branch protection"
     - "The factory specification chapters in docs/spec/"
   acceptance:
-    - "docs/architecture.md's Policy says that merging into the release branch is the human approval, and that with land: configured the factory's own code merges a factory PR into the trunk after the lander's MERGE, pinned to the reviewed head. It also says agents still never merge, push or call gh. A new section headed `## Landing on the trunk` covers the branches, readiness and its reasons, human-only PRs, gates at the head, the lander's review, the merge, holds and their cap, `--watch`, one land per board, and the promotion PR. The Roles table has a lander row. The known limitation `Restacked PRs aren't re-gated` says that factory land gates a head before landing it"
-    - "docs/reference.md describes `trunk` and `land` with the other config keys, lists `factory land` and `factory promote` with every flag and default, lists `land` in the roles for models and max_steps, and has troubleshooting rows for `land: is not configured`, `land.release must differ from trunk`, `factory land is already running on this board`, `held N times by the lander` and the RELEASE-has-commits warning"
-    - "README.md has a section headed `## Land on a dev branch`. It covers creating the branch (`git push origin main:dev`), the `trunk:` and `land:` settings, keeping the checkout on the trunk, and the branch protection: main requires a pull request and the CI checks; dev requires the CI checks and no approving review. It gives the gh api commands for both. It also covers running `factory land --watch`, merging the promotion PR with a merge commit, and running factory land with GH_TOKEN for a separate GitHub identity"
+    - "docs/architecture.md's Policy says that merging into the release branch is the human approval, and that with land: configured the factory's own code merges a factory PR into the trunk after the lander's MERGE, pinned to the reviewed head. It also says agents still never merge, push or call gh"
+    - "docs/architecture.md has a new section headed `## Landing on the trunk`. It covers the branches, readiness and its reasons, human-only PRs, the green-trunk rule and its one landing per trunk CI run, gates at the head, the lander's review, the merge, holds and their cap, `--watch`, one land per board, and the promotion PR. It also covers what gives confidence in the trunk: the end-to-end test that runs on every push to dev and on every PR, and the live smoke run by hand before a promotion is merged. The Roles table has a lander row. The known limitation `Restacked PRs aren't re-gated` says that factory land gates a head before landing it"
+    - "docs/reference.md describes `trunk` and `land` with the other config keys. It lists `factory land` and `factory promote` with every flag and default, `factory bench run --require-solved`, and `land` in the roles for models and max_steps. It has troubleshooting rows for `land: is not configured`, `land.release must differ from trunk`, `factory land is already running on this board`, `held N times by the lander`, `TRUNK is red at SHA`, `TRUNK has no checks at SHA yet` and the RELEASE-has-commits warning"
+    - "README.md has a section headed `## Land on a dev branch`. It covers creating the branch (`git push origin main:dev`), the `trunk:` and `land:` settings, keeping the checkout on the trunk, and running CI on pushes to the trunk. It covers the branch protection: main requires a pull request, the CI checks and the `live smoke` check; dev requires the CI checks and no approving review. It gives the gh api commands for both"
+    - "The same README section covers running `factory land --watch`, what a red dev does to landing and how to re-run a failed check, and running factory land with GH_TOKEN for a separate GitHub identity. It also covers merging the promotion PR with a merge commit after starting the live smoke on its head (`gh workflow run live-smoke.yml --ref dev`), with the OPENROUTER_API_KEY repository secret it needs. It points at this repository's .github/workflows/live-smoke.yml as an example for other projects"
     - "NEXT.md's item 23 row and section say landing is done and link docs/architecture.md#landing-on-the-trunk"
-    - "factory/templates/agents-section.md and the Software factory section of this repository's AGENTS.md, which stay identical, say that with land: configured `factory land` merges ready PRs into the trunk and that merging the promotion PR is the human approval"
-    - "The factory-ops skill has request rows for landing ready PRs (`factory land`, `--watch`, `--dry-run`), why a PR isn't landing, a held PR, and promoting the trunk (`factory promote`). They are in factory/templates/skills/factory-ops/SKILL.md and .claude/skills/factory-ops/SKILL.md, which stay identical"
+    - "factory/templates/agents-section.md and the Software factory section of this repository's AGENTS.md, which stay identical, say that with land: configured `factory land` merges ready PRs into the trunk while it is green, and that merging the promotion PR is the human approval"
+    - "The factory-ops skill has request rows for landing ready PRs (`factory land`, `--watch`, `--dry-run`), why a PR isn't landing (including a red trunk), a held PR, promoting the trunk (`factory promote`) and running the live smoke. They are in factory/templates/skills/factory-ops/SKILL.md and .claude/skills/factory-ops/SKILL.md, which stay identical"
     - "docs/sessions/ has this task's session log entry, as the project rules require"
   verification:
     - "uv run pytest -q tests/test_templates.py::test_the_docs_describe_landing_and_promotion"
@@ -281,21 +353,27 @@ Planned test additions, all new:
 - **`land-t04`:** nine tests added to `tests/test_land.py`, including the end-to-end `test_land_takes_a_stack_to_the_trunk_bottom_up`.
 - **`land-t05`:** a new `tests/test_land_rework.py` with seven tests.
 - **`land-t06`:** a new `tests/test_promote.py` with eight tests.
-- **`land-t07`:** `tests/test_templates.py::test_the_docs_describe_landing_and_promotion`.
+- **`land-t07`:** four tests added to `tests/test_land.py`; a new `tests/test_ci_workflows.py` with two tests; and the new end-to-end `tests/test_dev_lifecycle.py::test_a_plan_reaches_the_release_branch_through_dev`.
+- **`land-t08`:** `tests/test_bench.py::test_require_solved_fails_unless_every_cell_is_solved`, and two tests added to `tests/test_ci_workflows.py`.
+- **`land-t09`:** `tests/test_templates.py::test_the_docs_describe_landing_and_promotion`.
 
-Every contract names at least one test that doesn't exist yet, so each fits this repository's `strict` flow. The tests drive `gh` through the `fake_gh` fixture in `tests/conftest.py`, which t02, t04 and t06 extend for the calls they add: pull request files, issue comments, the merge call and `mergeCommit`. Each verification filter must select its tests; zero matching tests is not a pass.
+Every contract names at least one test that doesn't exist yet, so each fits this repository's `strict` flow. The end-to-end test goes in land-t07 rather than a task of its own because it needs the green-trunk rule: without that rule, its red-`dev` pass would merge, so the test fails before the build. The tests drive `gh` through the `fake_gh` fixture in `tests/conftest.py`, which t02, t04, t06 and t07 extend for the calls they add: pull request files, issue comments, the merge call, `mergeCommit` and commit checks. `tests/test_ci_workflows.py` reads the workflow files with PyYAML, already a dependency, and runs nothing on GitHub. Each verification filter must select its tests; zero matching tests is not a pass.
 
-These tasks change the factory itself and run on this repository's own board, as earlier factory plans did. They land through human merges into `main`. This repository switches to a dev branch only after land-t07, by hand (see [Turning it on here](#turning-it-on-here)).
+These tasks change the factory itself and run on this repository's own board, as earlier factory plans did. They land through human merges into `main`. This repository switches to a dev branch only after land-t09, by hand (see [Turning it on here](#turning-it-on-here)).
 
 ### Risks
 
-1. **An unattended merge the human would have refused.** The lander is one model's judgment, and a merge into the trunk feeds every later task built on it. **Action:** the gates must pass at the exact head, CI must be green, and the merge is pinned to the reviewed sha. `risk: high` contracts and changes to `.factory/`, `.github/` or guidance files wait for a human. The release branch moves only by a human merge of the promotion PR, which lists how each task landed.
+1. **An unattended merge the human would have refused.** The lander is one model's judgment, and a merge into the trunk feeds every later task built on it. **Action:** the gates must pass at the exact head, CI must be green on the PR and on the trunk's head, and the merge is pinned to the reviewed sha. The end-to-end test runs on every PR and on `dev` after every landing. `risk: high` contracts and changes to `.factory/`, `.github/` or guidance files wait for a human. The release branch moves only by a human merge of the promotion PR, which lists how each task landed.
 2. **The factory weakens its own checks through the trunk.** Settings and guidance come from the main checkout, which sits on the trunk once landing is on. So a landed change to `.factory/config.yaml`, CI or `AGENTS.md` would steer every later run. **Action:** those paths are human-only in land-t02. When [security-review](security-review.md)'s `guarded_paths` lands, its list can replace this one (see Notes).
 3. **Builder and lander loop on the same PR.** A HOLD sends the PR back, the rework is reviewed again, and it can be held again. **Action:** `land.max_holds` (default 2) caps reworks per fresh build, after which the PR waits for a human. Each head is reviewed once, and a missing verdict is retried at most twice per head.
 4. **Squash merges split the trunk from the release branch.** A promotion PR merged with a squash gives `main` a commit that `dev` lacks, and every later promotion conflicts. **Action:** the promotion PR's body says to use a merge commit, and promote reports when the release branch has commits the trunk lacks. The README tells you to allow merge commits on `main`.
 5. **Mixed trunks while switching.** PRs opened before the switch target `main` and keep `main` as their trunk, and a task stacked on one inherits it. **Action:** `factory land` never merges a PR off the configured trunk, and dry-run lists it as `targets main, not the trunk dev`. Switch when no stacks are open, or merge those PRs by hand.
 6. **Races with GitHub and with other runs.** A push, a restack or a conflict can land between the review and the merge. **Action:** the merge call carries `sha=`, so GitHub refuses a head that moved. One land runs per board, and a task in a run isn't `pr_open`, so land skips it.
-7. **Spend.** Each review is a model call that `--watch` makes unattended. **Action:** the lander runs only on ready heads (CI green, gates passed), once per head, with `max_steps: 40`. Its runs carry cost like every role, so `factory stats` and `factory show` count them.
+7. **Spend.** Each review is a model call that `--watch` makes unattended. **Action:** the lander runs only on ready heads (CI green, gates passed) while the trunk is green, once per head, with `max_steps: 40`. Its runs carry cost like every role, so `factory stats` and `factory show` count them.
+8. **A flaky check stalls landing.** Every check on the trunk's head counts, so a flaky job or a failed live smoke pauses every landing until the head is green. **Action:** GitHub reports the newest run of each check, so re-running the failed job (`gh run rerun --failed`) turns the head green, and the README says so. The pause is logged once per state, and `factory land --dry-run` prints it on its first line.
+9. **The live smoke costs money and depends on an outside provider.** **Action:** it runs only when you start it, `--max-cost` caps it (default $5), and only its bench step sees the API key. Provider failures are `error` cells, so `factory bench report --cells` in the job summary tells them apart from a case that wasn't solved.
+10. **One long end-to-end test breaks for many reasons.** **Action:** it asserts board states, PR bases, merge calls and the promotion PR's task lines, never log wording. Each step it walks through also has narrower tests in `tests/test_land.py`, `tests/test_land_rework.py` and `tests/test_promote.py`, which point at the failing part.
+11. **The scripted test can't catch a model or prompt regression.** **Action:** the live smoke covers real models on the build roles before each promotion. The lander's own model is exercised only by real land passes, whose `land` runs and outcomes `factory show` records (see Notes).
 
 ---
 
@@ -307,7 +385,9 @@ These tasks change the factory itself and run on this repository's own board, as
 - **Restacked heads aren't re-gated.** The architecture's known limitations say so: after a rebase, only CI checks the new head. Gate runs are recorded as role `verify`, step `gates`, with outcome `pass`/`fail` and the sha they ran on (`factory/pipeline.py:735`). So the newest passing gates sha tells whether a head was gated. `factory gates TASK --ref` (`cmd_gates`) already runs the gates on any commit in a throwaway worktree.
 - **Roles outside a flow exist.** The selector ships as `factory/prompts/selector.md`, maps in `agents.ROLE_FILES`, is configured with `models.select`, and runs through `LangChainRoles.step(flows.Step("select", "select"), …)`. The lander follows the same pattern. The run role `merge` is taken by merge records (`db.ROLES`), so the new role is `land`.
 - **Reworks have one entry point.** `cmd_run_one` handles `changes_requested` through `_review_fix`, which builds a `Rework` whose kind (`factory/pipeline.py` `KINDS`: `ci`, `human_review`) supplies the log line, commit body, PR comment and failure note. The scheduler already starts `changes_requested` tasks (`factory/scheduler.py:63`).
-- **The repository today.** There is no `dev` branch on origin, and `main` has no branch protection (`gh api …/branches/main/protection` returns 404). CI runs on every `pull_request` and on pushes to `main` (`.github/workflows/ci.yml`), so PRs into `dev` get checks.
+- **The repository today.** There is no `dev` branch on origin, and `main` has no branch protection (`gh api …/branches/main/protection` returns 404). CI runs on every `pull_request` and on pushes to `main` (`.github/workflows/ci.yml`), so PRs into `dev` get checks, but `dev`'s own head would get none. The repository has no CI secrets.
+- **End-to-end tests already use a scripted model.** `tests/fake_model.py` plays each role from its system prompt, so the real agents, tools and graph run. `tests/test_pipeline.py` drives `main([...])` against a real repository with a bare origin and the `fake_gh` fixture, from `factory init` to an open PR (`test_an_initialised_repo_runs_its_starter_plan_with_the_shipped_prompts`). No test yet goes past an open PR.
+- **`factory bench` runs real models, but a failed case still exits 0.** A bench cell is a normal pipeline run without a PR, scored by the case's hidden tests: `solved`, `false_pass` or `failed` (`factory/bench/run.py`). `report.exit_code` fails only for `error`, `stopped` and `skipped` cells (`factory/bench/report.py:335`). Runs are stored under `$FACTORY_HOME/bench/<run>`. The shipped cases are in `factory/bench/fixtures/` (`ini-refactor`, `money-rounding`, `rate-limiter`, `report-json`, `slugify`).
 
 ## Design
 
@@ -378,6 +458,7 @@ factory land [--plan P]... [--watch [--poll 120]] [--dry-run] [--model M] [--no-
   │
   └─ pass ───────────────────────────────────────────────────────────────────────────┐
        refresh (as status --refresh: merges, CI, reviews, conflicts, restack)        │
+       trunk not green (t07) ──► log the state if changed, end the pass              │
        for each open factory PR, in plan order:                                      │
          readiness ── waits / human (no review needed) ──► log reason if changed     │
             │ ready, or human-only and not yet reviewed on this head                 │
@@ -389,11 +470,12 @@ factory land [--plan P]... [--watch [--poll 120]] [--dry-run] [--model M] [--no-
             │ MERGE ──► PUT pulls/N/merge (method, sha=head) ── refused ──► log      │
             │             └─► comment · land run merged · refresh (mark merged,      │
             │                 record the merge, restack dependents onto the trunk)   │
+            │                 · read the trunk again: not green ──► end the pass     │
        merged anything? ──► factory promote (t06)                                    │
      --watch: sleep --poll, repeat ──────────────────────────────────────────────────┘
 ```
 
-A stack lands bottom-up across passes. The bottom PR merges, and the refresh after it rebases the next PR onto the trunk and retargets it. CI then runs on that new head, which is a new candidate the gates haven't seen. A later pass finds the checks green, gates the head, reviews it and merges it.
+A stack lands bottom-up across passes. The bottom PR merges, and the refresh after it rebases the next PR onto the trunk and retargets it. CI then runs on that new head, which is a new candidate the gates haven't seen, and on the trunk's new head. A later pass finds both green, gates the PR's head, reviews it and merges it.
 
 ### Holds and rework
 
@@ -435,24 +517,78 @@ Merge this PR with a merge commit, not a squash or rebase, so dev and main keep 
 
 A task is on the release branch when its PR's merge commit is an ancestor of `origin/RELEASE`, so tasks merged before landing was switched on count as promoted. `factory land` runs promote after every pass that merged something, so the PR is current whenever you look.
 
+### A green trunk
+
+```text
+$ factory land --dry-run
+trunk dev at 3f2a9c1: red (end-to-end: a plan to the release branch through dev failed)
+land-t04   ready                                              https://github.com/o/r/pull/122
+```
+
+`factory land` merges only onto a trunk that is known to work. After its refresh, a pass reads the checks on `origin/TRUNK`'s head (GitHub's newest run of each, from `commits/SHA/check-runs` and `commits/SHA/status`):
+
+| Trunk head | The pass |
+|---|---|
+| Every check finished and passed | reviews and merges as above |
+| A check failed | reviews and merges nothing: `dev is red at SHA (NAMES failed)` |
+| Checks still running | waits: `dev's checks are running at SHA (N of M pending)` |
+| No checks | waits: `dev has no checks at SHA yet`, unless `land.require_checks: false` |
+
+A merge moves the trunk's head, so the pass reads the trunk again before the next PR. Its new head has no checks yet, so one pass lands one PR. The next lands after CI has passed on the trunk with the first in it. Landing is slower than merging everything that is ready at once. In exchange, each landing is tested on `dev` on its own, and a red `dev` names the PR that turned it red. Every check on the head counts, including a live smoke started on it.
+
+### The end-to-end test on `dev`
+
+`tests/test_dev_lifecycle.py::test_a_plan_reaches_the_release_branch_through_dev` is one test of the whole flow, run through the real entry points. It uses the scripted model for every role, the fake `gh`, and a bare origin whose merges really happen in git:
+
+```text
+factory sync ─► factory run PLAN ─► 4 PRs (t02 stacked on t01; t04 risk: high)
+dev green   ─► factory land: merges t01, restacks t02 · dev's new head has no checks: stop
+dev green   ─► factory land: gates t02's restacked head, merges it
+dev green   ─► factory land: HOLD t03 → changes_requested · t04: "a human merges it"
+              factory run t03 ─► rework pushes a new head
+dev red     ─► factory land: no review, no merge
+dev green   ─► factory land: merges t03 · the one promotion PR lists t01, t02, t03, not t04
+human merges the promotion PR into main (merge commit) ─► factory promote: nothing to promote
+factory status: t01–t03 merged, t04 pr_open · every merge call: dev, at the reviewed sha
+```
+
+CI runs it as its own job, `end-to-end: a plan to the release branch through dev`, on every push to `main` and `dev` and on every pull request. So it runs on each factory PR before it lands, on `dev` after each landing, and on the promotion PR. The `test` job runs it too, as part of the whole suite. `dev` and `main` both require the job.
+
+### The live smoke
+
+The scripted test proves the plumbing, but not that the real models still produce working changes with the prompts and tools on `dev`. The `live smoke` workflow (`.github/workflows/live-smoke.yml`, started only by hand) does that before you approve a promotion:
+
+```bash
+gh workflow run live-smoke.yml --ref dev                       # slugify, at most $5
+gh workflow run live-smoke.yml --ref dev -f cases="slugify rate-limiter" -f max_cost=10
+```
+
+It runs `factory bench run --case … --max-cost … --require-solved` with this repository's pinned models, at `dev`'s head. `--require-solved` makes the bench fail unless every case's hidden tests pass. The job summary carries `factory bench report --cells`, and the bench directory is uploaded as `live-smoke-bench`. Its check lands on `dev`'s head, which is the promotion PR's head. `main` requires it, so the promotion PR merges only after a live smoke passed on the exact commit you are merging. Until one has, GitHub shows the required check as waiting. Each landing moves the head, so you start the live smoke when you are ready to merge. A run in progress holds landing like any running check, and a failed run pauses landing until it is re-run green or a fix lands.
+
+The key is the `OPENROUTER_API_KEY` repository secret, visible only to the bench step. Only people who can write to the repository can start the workflow.
+
 ### Turning it on here
 
-This is done by hand once land-t07 has merged into `main`, and is not a contract:
+This is done by hand once land-t09 has merged into `main`, and is not a contract:
 
 1. `git push origin main:dev`.
-2. Branch protection (README section): `main` requires a pull request and the `ci` checks, and allows merge commits. `dev` requires the `ci` checks and no approving review.
-3. In `.factory/config.yaml` on `dev`, add `trunk: dev`, the `land:` block and `models.land`. Merge `dev` into `main` once so both branches carry them, and switch the main checkout to `dev`.
-4. Let the open stacks that target `main` finish, or merge them by hand. Then run `factory land --watch` (or `--dry-run` first).
+2. Add the `OPENROUTER_API_KEY` repository secret, and run `gh workflow run live-smoke.yml --ref dev` once to see it pass.
+3. Branch protection (README section): `main` requires a pull request, the `ci` checks (including `end-to-end: a plan to the release branch through dev`) and `live smoke`, and allows merge commits. `dev` requires the `ci` checks and no approving review.
+4. In `.factory/config.yaml` on `dev`, add `trunk: dev`, the `land:` block and `models.land`. Merge `dev` into `main` once so both branches carry them, and switch the main checkout to `dev`.
+5. Let the open stacks that target `main` finish, or merge them by hand. Then run `factory land --watch` (or `--dry-run` first).
 
 ## Files Changed
 
 | File | Change |
 |---|---|
 | `factory/config.py` | `trunk`, `LandConfig` and their validation; `land` in `ROLES` (t01) |
-| `factory/cli.py` | Default base from `trunk` (t01); `factory land` (t02, t04); holds in `_refresh`, `_review_fix` and `cmd_run_one` (t05); `factory promote` (t06) |
+| `factory/cli.py` | Default base from `trunk` (t01); `factory land` (t02, t04); holds in `_refresh`, `_review_fix` and `cmd_run_one` (t05); `factory promote` (t06); the trunk line in `--dry-run` (t07); `factory bench run --require-solved` (t08) |
 | `factory/templates/config.yaml` | Commented `trunk:` and `land:` (t01) |
-| `factory/land.py` | New: readiness (t02); the pass, gates at the head, the merge, comments, `--watch`, the pid file (t04); the hold cap (t05); calling promote (t06) |
+| `factory/land.py` | New: readiness (t02); the pass, gates at the head, the merge, comments, `--watch`, the pid file (t04); the hold cap (t05); calling promote (t06); `trunk_state` and the green-trunk rule (t07) |
 | `factory/ci.py` | `pending` (t02) |
+| `factory/bench/report.py` | The `--require-solved` exit code and its `not solved` lines (t08) |
+| `.github/workflows/ci.yml` | Runs on pushes to `dev`; the end-to-end job; the package job checks `factory prompt land` (t07) |
+| `.github/workflows/live-smoke.yml` | New: the live smoke, started by hand (t08) |
 | `factory/prompts/lander.md` | New lander prompt (t03) |
 | `factory/lander.py` | New: the lander's message, review and run record (t03) |
 | `factory/agents.py` | `land` in `ROLE_FILES`, the `MERGE`/`HOLD` verdict and the `land` kit (t03) |
@@ -460,10 +596,11 @@ This is done by hand once land-t07 has merged into `main`, and is not a contract
 | `factory/db.py` | `land` in `ROLES` (t03); `land_hold` and `land_holds` columns (t05) |
 | `factory/pipeline.py` | The `land` rework kind (t05) |
 | `factory/promote.py` | New: tasks to promote, the PR body, open or update (t06) |
-| `tests/conftest.py` | `fake_gh` learns PR files, issue comments, the merge call and `mergeCommit` (t02, t04, t06) |
-| `tests/test_land.py`, `tests/test_lander.py`, `tests/test_land_rework.py`, `tests/test_promote.py` | New tests (t02–t06) |
-| `tests/test_config.py`, `tests/test_pipeline.py`, `tests/test_ci.py`, `tests/test_templates.py` | New tests (t01, t02, t07) |
-| `docs/architecture.md`, `docs/reference.md`, `README.md`, `NEXT.md`, `AGENTS.md`, `factory/templates/agents-section.md`, factory-ops skill (template and installed copy) | Docs (t07) |
+| `tests/conftest.py` | `fake_gh` learns PR files, issue comments, the merge call (merging in the bare origin), `mergeCommit` and commit checks (t02, t04, t06, t07) |
+| `tests/test_land.py`, `tests/test_lander.py`, `tests/test_land_rework.py`, `tests/test_promote.py` | New tests (t02–t07) |
+| `tests/test_dev_lifecycle.py`, `tests/test_ci_workflows.py` | New: the end-to-end test on `dev` (t07); the workflow tests (t07, t08) |
+| `tests/test_config.py`, `tests/test_pipeline.py`, `tests/test_ci.py`, `tests/test_bench.py`, `tests/test_templates.py` | New tests (t01, t02, t08, t09) |
+| `docs/architecture.md`, `docs/reference.md`, `README.md`, `NEXT.md`, `AGENTS.md`, `factory/templates/agents-section.md`, factory-ops skill (template and installed copy) | Docs (t09) |
 
 ## Test Plan
 
@@ -474,20 +611,30 @@ This is done by hand once land-t07 has merged into `main`, and is not a contract
 - **t03:** the prompt's last line matches the parser. `models.land`, the override and `factory prompt land`. The message carries each input and `(none)` for empty ones. The kit has read tools and `git_diff` only. The last verdict wins and a missing one is asked for once. The run record has role `land`, step `review` and the head sha.
 - **t04:** merge at the reviewed head with `sha=` and the method. A head without passing gates is gated first, and failing gates hold it. A HOLD comments and doesn't merge. One review per head. A refused merge is retried without a new review. Human-only PRs get one comment per head and are never merged. Never off the trunk or into the release branch. `--watch` repeats the pass, and a second land is refused.
 - **t05:** a hold sets `changes_requested`, `land_hold` and `land_holds`. Refresh keeps it. The rework feedback carries the findings and human requests. A rework clears the hold and the new head is reviewed. The cap leaves it for a human. A fresh build resets the count. A plan run starts held tasks.
-- **t06:** one PR opened, then updated. The body lists tasks by plan, how each landed, edited merges and other commits. Release-only commits are reported. Nothing to promote opens nothing. `--dry-run` changes nothing. Land calls promote after a merge. Refused without `land:`.
+- **t06:** one PR opened, then updated. The body lists tasks by plan, how each landed, edited merges and other commits. Release-only commits are reported, but the merge commit a promotion leaves on the release branch isn't. Nothing to promote opens nothing. `--dry-run` changes nothing. Land calls promote after a merge. Refused without `land:`.
+- **t07:** `trunk_state` reads check runs and status contexts on the trunk's head: green, red with names, running with counts, none, and none counting as green with `require_checks: false`. A pass on a red, running or check-less trunk calls no model and merges nothing, and logs each state once. After a merge, the pass stops when the trunk's new head has no checks, so two ready PRs land on two passes. `--dry-run` prints the trunk line first. `ci.yml` runs on pushes to `dev`, has the end-to-end job, and its package job checks `factory prompt land`.
+- **t08:** `--require-solved` exits 1 for `failed`, `false_pass`, `error`, `stopped` and `skipped` cells and prints each, and 0 when all are solved; without it the exit code is unchanged. `live-smoke.yml` runs only on `workflow_dispatch`, with the `cases` and `max_cost` inputs, `--require-solved`, `contents: read`, the secret in the bench step's env only, inputs passed through env, and the summary and artifact steps running on failure.
+- **t09:** the docs name the commands, settings, messages and branch protection above.
 
 ### End-to-end tests
 
 - **t04:** `tests/test_land.py::test_land_takes_a_stack_to_the_trunk_bottom_up` runs the real `factory land` entry point on a real git repository with a `dev` trunk. It uses the fake `gh` and a scripted lander over two stacked task PRs. Pass 1 merges the bottom PR and restacks the top one onto `dev`. With the top PR's checks pending, pass 2 waits. Once they are green, pass 3 gates the restacked head, reviews it and merges it. The board ends with both tasks merged, and the merge calls carry the reviewed shas.
+- **t07:** `tests/test_dev_lifecycle.py::test_a_plan_reaches_the_release_branch_through_dev` walks the whole flow on `dev`, as in [The end-to-end test on dev](#the-end-to-end-test-on-dev): sync, four PRs, stacked landings one per trunk CI run, a hold and its rework, a red `dev` that pauses landing, a `risk: high` PR that never lands, one promotion PR, and the human merge into `main`. CI runs it as its own job on every push to `dev` and `main` and on every PR.
+- **t08 (live, by hand):** the `live smoke` workflow runs `factory bench run --require-solved` on shipped cases with the pinned models. It isn't run by the factory or by pytest.
 
 ## Verification
 
 ```bash
 uv run pytest -q tests/test_land.py tests/test_lander.py tests/test_land_rework.py tests/test_promote.py
+uv run pytest -q tests/test_dev_lifecycle.py tests/test_ci_workflows.py
 uv run pytest -q
 ```
 
-By hand, after [Turning it on here](#turning-it-on-here): `factory land --dry-run` lists the open PRs with reasons; `factory land` merges a ready low-risk PR into `dev` and the promotion PR to `main` lists it; a `risk: high` PR gets the lander's comment and stays open.
+By hand, after [Turning it on here](#turning-it-on-here):
+- `factory land --dry-run` prints `dev`'s state first, then the open PRs with reasons.
+- `factory land` merges a ready low-risk PR into `dev`, and the promotion PR to `main` lists it. A `risk: high` PR gets the lander's comment and stays open.
+- The end-to-end job passes on `dev`'s new head, and the next pass lands the next ready PR only after it has.
+- `gh workflow run live-smoke.yml --ref dev` passes, and its check shows on the promotion PR, which can then be merged.
 
 ## Cross-Workstream Coordination
 
@@ -508,4 +655,7 @@ By hand, after [Turning it on here](#turning-it-on-here): `factory land --dry-ru
 - **`factory stats` for landing.** Land runs carry cost and outcomes, but stats doesn't yet report land merge and hold rates.
 - **The specification chapters** (`docs/spec/`) aren't updated here; [factory-spec](factory-spec.md) owns them.
 - **Merging into the release branch unattended, tags and releases.** The promotion PR stays a human merge.
+- **A live run of the lander.** The live smoke runs the build roles through `factory bench`, which has no landing step. The lander's model is first exercised by real land passes. A bench case that lands its result would cover it.
+- **Telling you `dev` went red, or reverting the landing that did it.** GitHub's own failure notifications and the dry run's first line cover it. A revert, by hand or by a later task, is a normal PR into `dev`.
+- **Starting the live smoke from `factory promote`.** It stays a hand step, since it spends money. The factory doesn't call `gh workflow run`.
 - **Cross-board claims.** Two boards each running `factory land` on one repository could both review a PR; the `sha=` pin keeps the merge safe, but the double review isn't prevented (NEXT.md item 6).
