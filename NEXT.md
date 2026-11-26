@@ -120,7 +120,7 @@ Later, holdout tests could be written at plan time by `/plan-workstream` and kep
 
 **Sketch.** First, a shared board: state in a server database (Postgres, say) instead of the local SQLite file, so agents run on a cloud box while you watch from the laptop. Keep the offline bubblewrap sandbox. The box needs dependencies fetched ahead of time, since the sandbox is offline, and its own `gh` login. Lowest priority: local runs are a deliberate trade for the offline sandbox.
 
-[Item 18](#18-run-the-backlog-unattended) covers the part that needs neither a shared board nor hosted workspaces: one long-running worker on one remote box, watched with `factory web` over `ssh -L`.
+[Item 18](#18-run-the-backlog-unattended) covers the part that needs neither a shared board nor hosted workspaces: long-running workers on one or more remote boxes, watched with `factory web` over `ssh -L`. Each run claims its task with a draft PR, so several boards can share one backlog through GitHub. The shared board stays open for one live view of every box and one budget across them.
 
 ## 7. Reshape the agent flow
 
@@ -248,12 +248,13 @@ The [factory-spec plan](docs/plans/factory-spec.md) covers the behavior shipped 
 
 **Seen in.** [agent-orchestrator](https://github.com/ComposioHQ/agent-orchestrator) and [Open SWE](https://blog.langchain.com/introducing-open-swe-an-open-source-asynchronous-coding-agent) keep workers running against a queue of tasks.
 
-**Plan.** [docs/plans/devbox.md](docs/plans/devbox.md) (planned 2026-11-22, tasks `devbox-t01`…`t06`, independent of the other plans):
+**Plan.** [docs/plans/devbox.md](docs/plans/devbox.md) (planned 2026-11-22, revised 2026-11-26 to claim tasks with draft PRs; tasks `devbox-t01`…`t11`, independent of the other plans):
 - `factory start --budget USD` is a foreground worker for any box that can run the factory. Every poll it loads the plans and checks GitHub, starts each ready task across every plan up to `--parallel`, reworks PRs that conflict, fail CI or get review requests, and waits for your merges. Keeping it alive and setting up the box stay yours.
 - `--budget` caps the day's spend, counted from the board since 00:00 UTC. Each failed task is retried once a UTC day.
 - When the checkout is clean and on the trunk, the worker fast-forwards it to origin after its task runs finish, and restarts itself when the factory's own code changed.
 - `plan_flows:` in `.factory/config.yaml` gives a plan its flow, for every way a task runs.
 - `factory status`, `factory top` and the web board show the worker, and `factory stop worker` stops it.
+- Every run that will push claims its task first, the worker's and `factory run`'s alike. A fresh build opens the task's PR as a draft, and a rework turns the open PR back into one. An empty claim commit pushed with a lease is the lock, so exactly one board wins. A failed run closes its draft or puts the PR back. A claim silent for 30 minutes can be taken over. Every board's refresh reads the others' claims, so the worker and plan runs skip claimed tasks, and a task that failed today on any box waits for tomorrow.
 
 ## 19. Evals that rank flows
 
