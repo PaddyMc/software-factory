@@ -1108,6 +1108,9 @@ def cmd_bench_report(a) -> int:
     except R.ReportError as e:
         print(e, file=sys.stderr)
         return 1
+    if a.json:
+        print(json.dumps(R.report_data(run_dir.name, results), indent=2))
+        return 0
     print(R.header(results))
     print()
     print(R.summary(results))
@@ -1122,15 +1125,24 @@ def cmd_bench_report(a) -> int:
 def cmd_bench_compare(a) -> int:
     from .bench import report as R
 
+    def side(value: str):
+        run_id, separator, variant = value.partition(":")
+        run_dir = R.resolve(factory_home(), run_id)
+        return run_dir.name, variant if separator else None, R.load(run_dir)
+
     try:
-        a_dir = R.resolve(factory_home(), a.run_a)
-        a_results = R.load(a_dir)
-        b_dir = R.resolve(factory_home(), a.run_b)
-        b_results = R.load(b_dir)
+        a_id, a_variant, a_results = side(a.run_a)
+        b_id, b_variant, b_results = side(a.run_b)
+        if a.json:
+            data = R.compare_data(a_id, a_results, b_id, b_results,
+                                  a_variant=a_variant, b_variant=b_variant)
+        else:
+            data = R.compare(a.run_a, a_results, a.run_b, b_results,
+                             a_variant=a_variant, b_variant=b_variant)
     except R.ReportError as e:
         print(e, file=sys.stderr)
         return 1
-    print(R.compare(a.run_a, a_results, a.run_b, b_results))
+    print(json.dumps(data, indent=2) if a.json else data)
     return 0
 
 
@@ -1229,11 +1241,13 @@ def main(argv: list[str] | None = None) -> int:
     s = bench_sub.add_parser("report", help="one run's scores per variant and case (default: the newest run)")
     s.add_argument("run", nargs="?", metavar="RUN")
     s.add_argument("--cells", action="store_true", help="list every cell and its directory")
+    s.add_argument("--json", action="store_true", help="print statistics and comparisons as JSON")
     s.set_defaults(fn=cmd_bench_report)
 
     s = bench_sub.add_parser("compare", help="compare two runs' scores and setups")
     s.add_argument("run_a", metavar="RUN_A")
     s.add_argument("run_b", metavar="RUN_B")
+    s.add_argument("--json", action="store_true", help="print statistics and comparisons as JSON")
     s.set_defaults(fn=cmd_bench_compare)
 
     s = bench_sub.add_parser("list", help="list past runs, newest first")
