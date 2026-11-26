@@ -86,6 +86,32 @@ def test_rust_repos_get_cargo_unit_tests_and_a_custom_session_log(fresh):
     assert (fresh / "notes/log/README.md").is_file()
 
 
+def test_the_config_template_documents_trunk_and_land(initialised, capsys):
+    text = (PACKAGE / "templates" / "config.yaml").read_text()
+
+    # Both settings ship commented out: a fresh `factory init` keeps today's behaviour.
+    assert not re.search(r"^(trunk|land):", text, re.M)
+    trunk = next(l for l in text.splitlines() if l.startswith("# trunk:"))
+    assert re.match(r"# trunk: \S+\s+# ", trunk)          # a branch to copy, and one line on what it does
+
+    # One commented line per land setting, each with its own description.
+    block = re.search(r"^# land:.*(?:\n#.*)*", text, re.M).group(0)
+    for key, value in (("release", "main"), ("method", "squash"), ("max_holds", "2"),
+                       ("require_checks", "true")):
+        line = next(l for l in block.splitlines() if f"{key}:" in l)
+        assert re.match(rf"#\s+{key}: {value}\s+# ", line), key
+
+    # land.release is where the promotion PR goes, and a human merges it.
+    release = next(l for l in block.splitlines() if "release:" in l)
+    assert "promotion PR" in release and "human" in release
+
+    # `factory config` shows both settings.
+    capsys.readouterr()
+    assert main(["config"]) == 0
+    out = capsys.readouterr().out
+    assert "trunk:" in out and "land:" in out
+
+
 def test_the_section_goes_to_the_guidance_file_agents_read(fresh):
     (fresh / "CLAUDE.md").write_text("# Mine\n")
     assert main(["init", "--no-skills"]) == 0

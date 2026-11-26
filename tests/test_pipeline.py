@@ -22,6 +22,33 @@ from conftest import DEMO_CONFIG, git, plan_text
 SKIP = "unit_tests,e2e_tests"   # the toy repo has no Cargo workspace
 SANDBOX = [] if shutil.which("bwrap") else ["--no-sandbox"]
 
+# A third, independent task: demo-t02 stacks on demo-t01, so something else is needed to
+# exercise a run of a task with no open dependency.
+TRUNK_PLAN = TASK + """- id: demo-t03
+  goal: "An independent third thing"
+  spec_refs: []
+  depends_on: []
+  non_goals: []
+  acceptance: ["Third thing done"]
+  verification: ["true"]
+  risk: low
+"""
+
+
+def _trunk_repo(repo):
+    """`trunk: dev` in the config, with a `dev` branch on origin that `main` has moved past."""
+    (repo / "docs/plans/demo/demo.md").write_text(plan_text(TRUNK_PLAN))
+    (repo / ".factory/config.yaml").write_text(DEMO_CONFIG + "\ntrunk: dev\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "trunk")
+    git(repo, "branch", "dev")
+    git(repo, "push", "-q", "origin", "dev")
+    (repo / "notes.md").write_text("a commit main has and dev lacks\n")   # so the trunk isn't HEAD's branch
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "ahead on main")
+    git(repo, "push", "-q", "origin", "main")
+    return repo
+
 
 @pytest.fixture
 def factory_repo(repo, home, fake_gh, monkeypatch):
@@ -74,6 +101,66 @@ def test_run_ends_in_a_working_pr(factory_repo, home, fake_gh, monkeypatch, caps
     assert main(["status", "--refresh"]) == 0
     assert open_db(home).task("demo-t01")["status"] == "merged"
     assert "demo-t01" in capsys.readouterr().out
+
+
+def test_runs_build_on_and_target_the_configured_trunk(factory_repo, home, fake_gh, monkeypatch):
+    _trunk_repo(factory_repo)
+    _use_model(monkeypatch, scripts(review_verdicts=["APPROVE"]))
+    dev_tip = git(factory_repo, "rev-parse", "origin/dev")
+    main_tip = git(factory_repo, "rev-parse", "origin/main")
+    assert dev_tip != main_tip            # the trunk is not merely the checkout's current branch
+
+    # Without --base a task with no open dependency builds on the trunk, as origin has it,
+    # records the trunk as its own, and opens its PR against it.
+    assert main(["run", "demo-t01", "--skip-gates", SKIP, *SANDBOX]) == 0
+    row = open_db(home).task("demo-t01")
+    assert row["trunk"] == "dev" and row["base_ref"] == "dev" and row["base_sha"] == dev_tip
+    assert json.loads(fake_gh.read_text())["prs"]["factory/demo-t01"]["base"] == "dev"
+
+    # --base still overrides the trunk.
+    assert main(["run", "demo-t03", "--base", "main", "--skip-gates", SKIP, *SANDBOX]) == 0
+    row = open_db(home).task("demo-t03")
+    assert row["trunk"] == "main" and row["base_ref"] == "main" and row["base_sha"] == main_tip
+    assert json.loads(fake_gh.read_text())["prs"]["factory/demo-t03"]["base"] == "main"
+
+    # A task stacked on an open dependency keeps the dependency's trunk, and its PR targets the
+    # dependency. (The scripted builder rewrites demo-t01's files in its worktree, so the run's
+    # own gates judge an empty diff; the trunk is recorded before any gate runs.)
+    main(["run", "demo-t02", "--skip-gates", SKIP, *SANDBOX])
+    row = open_db(home).task("demo-t02")
+    assert row["trunk"] == "dev" and row["base_ref"] == "factory/demo-t01"
+
+    # A plan run passes no --base down, so every task it starts gets the same default.
+    from argparse import Namespace
+    from factory.cli import _child_args
+    child = _child_args(Namespace(base=None, model=None, skip_gates=None, max_cost=None, flow=None,
+                                  max_attempts=2, network=False, no_sandbox=False, no_pr=False,
+                                  full_e2e=False, notify=False))
+    assert "--base" not in child
+
+
+def test_gates_default_to_the_configured_trunk(repo, home, monkeypatch, capsys):
+    from datetime import date
+
+    _trunk_repo(repo)
+    (repo / "src").mkdir()
+    (repo / "src/greet.txt").write_text("hello\n")
+    (repo / "docs/sessions").mkdir()
+    (repo / f"docs/sessions/{date.today().isoformat()}-demo-t01.md").write_text("## demo-t01\n")
+    git(repo, "checkout", "-q", "-b", "greeting")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "greeting")
+    monkeypatch.chdir(repo)
+    dev_tip, main_tip = git(repo, "rev-parse", "origin/dev"), git(repo, "rev-parse", "origin/main")
+
+    # Without --base an unstacked task is measured against the configured trunk, not `main`.
+    assert main(["gates", "demo-t01", "--ref", "HEAD", "--skip", SKIP, *SANDBOX]) == 0
+    assert f"vs dev (merge-base {dev_tip[:12]})" in capsys.readouterr().out
+
+    # Without `trunk:` it measures against `main`, as today.
+    (repo / ".factory/config.yaml").write_text(DEMO_CONFIG)
+    assert main(["gates", "demo-t01", "--ref", "HEAD", "--skip", SKIP, *SANDBOX]) == 0
+    assert f"vs main (merge-base {main_tip[:12]})" in capsys.readouterr().out
 
 
 def test_a_review_without_a_verdict_tells_the_builder_none_came(factory_repo, home, fake_gh, monkeypatch):
