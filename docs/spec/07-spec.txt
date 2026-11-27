@@ -27,6 +27,7 @@ underlying behavior is specified.
 | `factory validate-plan [PLAN…]` | Parse the selected plans and report contract, dependency and flow-validation errors without running tasks. | `01-spec.txt`, plans and contracts |
 | `factory sync` | Parse configured plans and upsert their contracts on the local board. New tasks become `queued`; existing status and history are retained. Contracts no longer present are reported as orphaned, not deleted. | `01-spec.txt`; `05-spec.txt`, board/scheduling |
 | `factory status [PLAN]` | Print the stored board, grouped by plan, or its JSON representation. `--refresh` additionally reconciles GitHub and dead processes. | Section 4; `06-spec.txt` for PR rework |
+| `factory land --dry-run` | Read the selected plans' open factory PRs and print whether each is ready or what it waits for, without changing the board or GitHub. | `docs/plans/land.md`; `factory/land.py:readiness` |
 | `factory run TARGET` | Run one task or supervise a plan. Targets may be task ids or plan names/paths; options select flows, attempts, parallelism, network access, cost limits and plan subsets. | `04-spec.txt`, pipeline; `05-spec.txt`, scheduler |
 | `factory stop TARGET` | Stop a live task run, or a plan run and its live child task runs. | Section 5 |
 | `factory bench SUBCOMMAND` | Run, score, report or compare evaluation cases, and list or inspect those cases and their records. | Bench subsystem; `08-spec.txt` for measurement interpretation |

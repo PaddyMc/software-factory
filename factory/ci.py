@@ -35,6 +35,19 @@ class Check:
         return m.group(1) if m else None
 
 
+def pending(rollup) -> list[Check]:
+    """Checks that have not completed: running check runs and pending commit statuses."""
+    out = []
+    for c in rollup or []:
+        if c.get("__typename") == "StatusContext" or "context" in c:
+            if c.get("state") in ("PENDING", "EXPECTED"):
+                out.append(Check(c.get("context") or "?", c.get("state") or "", c.get("targetUrl") or ""))
+        elif c.get("status") != "COMPLETED":
+            name = " / ".join(x for x in (c.get("workflowName"), c.get("name")) if x) or "?"
+            out.append(Check(name, c.get("status") or "", c.get("detailsUrl") or ""))
+    return out
+
+
 def failing(rollup) -> list[Check]:
     """The failed checks in a PR's `statusCheckRollup`: check runs and commit statuses."""
     out = []
