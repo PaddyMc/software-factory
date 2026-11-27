@@ -30,9 +30,10 @@ from .tools import DENIED_COMMANDS, READ_CAP, PathGuard, ToolLog, diff_tool, rea
 
 OVERRIDE_DIR = ".factory/agents"                 # per-repository prompt overrides, in the main checkout
 ROLE_FILES = {"plan": "planner", "test": "tester", "build": "builder", "review": "reviewer", "verify": "verifier",
-              "select": "selector"}
+              "select": "selector", "land": "lander"}
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 _VERDICT = re.compile(r"^VERDICT:\s*(APPROVE|CHANGES)\s*$", re.M)
+_LAND_VERDICT = re.compile(r"VERDICT:\s*(MERGE|HOLD)\b")
 _CHOICE = re.compile(r"^CHOICE:\s*(\d+)\s*$", re.M)
 DEFAULT_MODEL = "openrouter:z-ai/glm-5.3"
 PROVIDER_KEYS = {"openrouter": "OPENROUTER_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
@@ -92,6 +93,12 @@ def parse_verdict(text: str) -> str:
     """Last VERDICT line; anything else (missing, malformed) fails safe to CHANGES."""
     found = _VERDICT.findall(text)
     return found[-1] if found else "CHANGES"
+
+
+def parse_land_verdict(text: str) -> str | None:
+    """The last MERGE/HOLD verdict in a lander's report, or None when it gave no verdict."""
+    found = _LAND_VERDICT.findall(text)
+    return found[-1] if found else None
 
 
 def has_verdict(text: str) -> bool:
@@ -277,7 +284,8 @@ def role_model(root: Path, role: str, cfg: Config, override: str | None = None) 
 def role_models(root: Path, override: str | None = None, cfg: Config | None = None) -> dict[str, str]:
     """The original four roles, for callers not running a flow; optional steps use `flow_models`."""
     cfg = cfg or Config()
-    return {role: role_model(root, role, cfg, override) for role in ROLE_FILES if role not in ("test", "select")}
+    return {role: role_model(root, role, cfg, override) for role in ROLE_FILES
+            if role not in ("test", "select", "land")}
 
 
 def step_model(root: Path, step: Step, cfg: Config, override: str | None = None) -> str:
@@ -338,6 +346,8 @@ VERDICT_CALL = ("You have used every model call this review is allowed, so no to
 REASK_STEPS = 3       # extra model calls allowed when a review ends without a VERDICT line
 REASK = ("Your review ended without a VERDICT line. Reply with your report in the format your instructions give,\n"
          "ending with exactly one line: VERDICT: APPROVE or VERDICT: CHANGES.")
+LAND_REASK = ("Your review ended without a VERDICT line. Reply with your report in the format your instructions give,\n"
+              "ending with exactly one line: VERDICT: MERGE or VERDICT: HOLD.")
 
 
 def repository_map(worktree: Path, spec_refs: tuple[str, ...]) -> str:
@@ -646,7 +656,9 @@ class LangChainRoles:
             ctx.log(tag, f"⚠ stopped: {out.stopped} after {out.steps} steps (raise max_steps for this role in .factory/config.yaml)")
             ctx.record({"type": "stopped", "reason": out.stopped, "steps": out.steps})
         verdict_call_failed = False
-        if step.kind == "review" and out.stopped == "step limit" and not _VERDICT.search(out.text):
+        missing_verdict = (parse_land_verdict(out.text) is None if step.kind == "land"
+                           else not has_verdict(out.text))
+        if step.kind in ("review", "land") and out.stopped == "step limit" and missing_verdict:
             conversation = [*carried, *history]
             reply = self._verdict_call(model, tools, system, trimmer.view(conversation) if trimmer else conversation,
                                        out, tag, ctx)
@@ -655,8 +667,11 @@ class LangChainRoles:
                 history[:] = _answered(history)
                 history.extend([HumanMessage(VERDICT_CALL), reply])
             ctx.progress(out.steps, steps, out.tokens_in, out.tokens_out, out.cost_usd, out.refused)
-        if step.kind == "review" and not has_verdict(out.text) and not verdict_call_failed:
-            self._reask(ctx, tag, out, history, spec, tools, system, trimmer, steps)
+        missing_verdict = (parse_land_verdict(out.text) is None if step.kind == "land"
+                           else not has_verdict(out.text))
+        if step.kind in ("review", "land") and missing_verdict and not verdict_call_failed:
+            reask = LAND_REASK if step.kind == "land" else REASK
+            self._reask(ctx, tag, out, history, spec, tools, system, trimmer, steps, reask)
         cost = f", ${out.cost_usd:.4f}" if out.cost_usd is not None else ""
         refused = f", {out.refused} tool calls refused" if out.refused else ""
         thinking_note = f" ({out.thinking} thinking)" if out.thinking else ""
@@ -665,6 +680,8 @@ class LangChainRoles:
             out.log = log
         if step.kind == "review":
             out.verdict = parse_verdict(out.text)
+        elif step.kind == "land":
+            out.verdict = parse_land_verdict(out.text)
         return out
 
     def _verdict_call(self, model, tools, system: str, messages: list, out: Output, tag: str, ctx: Ctx) -> AIMessage | None:
@@ -686,13 +703,13 @@ class LangChainRoles:
         return reply
 
     def _reask(self, ctx: Ctx, tag: str, out: Output, history: list, spec: str, tools: list, system: str,
-               trimmer: TrimMiddleware | None, steps: int) -> None:
+               trimmer: TrimMiddleware | None, steps: int, reask: str = REASK) -> None:
         """Ask a reviewer once more for its verdict, continuing the conversation with the same tools and prompt."""
         out.reasked = True
         ctx.log(tag, "⚠ no VERDICT line: asking once more")
-        ctx.record({"type": "reask", "content": REASK})
+        ctx.record({"type": "reask", "content": reask})
         messages = _answered(history)
-        history.append(HumanMessage(REASK))
+        history.append(HumanMessage(reask))
         messages.append(history[-1])
         middleware = [ModelCallLimitMiddleware(run_limit=REASK_STEPS, exit_behavior="end"),
                       ModelRetryMiddleware(**MODEL_RETRY, on_failure="error"), tool_errors(ctx.worktree)]
@@ -762,6 +779,9 @@ class LangChainRoles:
             return tools, msg, log
         if step.kind == "select":
             return read_tools(ctx.worktree, guard, cap), f"Choose a passing candidate for task {ctx.task.id}.", None
+        if step.kind == "land":
+            tools = read_tools(ctx.worktree, guard, cap) + diff_tool(ctx.worktree, ctx.base_sha)
+            return tools, f"Review task {ctx.task.id}'s PR at its head. Start with git_diff(stat=True).", None
         if step.kind == "review":
             tools = read_tools(ctx.worktree, guard, cap) + diff_tool(ctx.worktree, ctx.base_sha)
             if step.prove:

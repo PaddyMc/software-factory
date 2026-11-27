@@ -20,7 +20,7 @@ KINDS = ("plan", "test", "build", "review", "verify", "gates")
 LOOP = ("trim", "map", "nudge", "resume")
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 RESERVED = ("resolve", "ci", "pr", "human_review", "planner", "tester", "builder", "reviewer", "verifier",
-            "select", "selector")
+            "select", "selector", "land", "lander")
 
 
 @dataclass(frozen=True)
