@@ -25,6 +25,22 @@ def test_failing_reads_check_runs_and_commit_statuses():
     assert ci.failing(None) == []
 
 
+def test_pending_lists_checks_still_running():
+    rollup = [_run("rust fmt", "SUCCESS"),                        # finished and passing
+              _run("rust unit", None, status="IN_PROGRESS"),     # a check run still running
+              _run("rust e2e", "TIMED_OUT"),                     # finished and failed
+              _run("rust check", None, status="QUEUED"),         # a check run waiting for a runner
+              _run("rust neutral", "NEUTRAL"),                   # finished without a verdict
+              {"__typename": "StatusContext", "context": "ci/pending", "state": "PENDING"},
+              {"__typename": "StatusContext", "context": "ci/expected", "state": "EXPECTED"},
+              {"__typename": "StatusContext", "context": "ci/success", "state": "SUCCESS"},
+              {"__typename": "StatusContext", "context": "ci/error", "state": "ERROR"}]
+    got = ci.pending(rollup)
+    assert len(got) == 4
+    assert ci.names(got) == "factory / rust unit, factory / rust check, ci/pending, ci/expected"
+    assert ci.pending(None) == [] and ci.pending([]) == []
+
+
 def test_red_only_judges_the_factorys_own_candidate():
     pr = {"headRefOid": "abc", "statusCheckRollup": [_run("rust fmt", "FAILURE")]}
     assert [c.name for c in ci.red(pr, "abc")] == ["factory / rust fmt"]
