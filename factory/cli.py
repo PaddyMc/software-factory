@@ -13,7 +13,7 @@ import webbrowser
 from pathlib import Path
 
 from . import config as C
-from . import contracts, factory_home, github, repo_root, version
+from . import contracts, factory_home, github, land, repo_root, version
 from . import gates as G
 from . import sandbox as S
 from . import observe
@@ -383,11 +383,11 @@ def _notify(title: str, body: str) -> None:
 
 
 def _pr_state(url: str) -> dict:
-    """GitHub's view of a PR: {"state": OPEN|MERGED|CLOSED, "mergeable": MERGEABLE|CONFLICTING|UNKNOWN,
-    "headRefOid": its head sha, "statusCheckRollup": [the checks on that head]}, or {} when gh fails. GitHub
-    computes `mergeable` lazily: UNKNOWN now is usually known by the next refresh."""
+    """GitHub's view of a PR: its state, mergeability, head, checks, base and changed files, or {} when gh fails.
+    GitHub computes `mergeable` lazily: UNKNOWN now is usually known by the next refresh."""
     # The head comes from `commits`: older gh (2.4, Ubuntu's) has no `headRefOid` field and rejects the call.
-    p = subprocess.run(["gh", "pr", "view", url, "--json", "state,mergeable,commits,statusCheckRollup"],
+    p = subprocess.run(["gh", "pr", "view", url, "--json",
+                        "state,mergeable,commits,statusCheckRollup,baseRefName,files"],
                        capture_output=True, text=True)
     try:
         pr = json.loads(p.stdout) if p.returncode == 0 else {}
@@ -588,6 +588,58 @@ def _refresh(db) -> None:
             msg = restack(db, repo_root(), factory_home(), row["id"])
             if msg:
                 print(msg, file=sys.stderr)
+
+
+def cmd_land(a) -> int:
+    root = repo_root()
+    cfg = C.load(root)
+    if cfg.land is None:
+        print("land: is not configured in .factory/config.yaml: factory land merges only into a configured trunk",
+              file=sys.stderr)
+        return 1
+    if not a.dry_run:
+        print("factory land: only --dry-run is available; no PR was changed", file=sys.stderr)
+        return 1
+
+    paths = contracts.discover_plans(root, cfg)
+    names = {p.stem for p in paths}
+    for name in a.plan:
+        if name not in names:
+            print(f"{name} is not a plan (a plan's file name without .md)", file=sys.stderr)
+            return 1
+    selected = set(a.plan) if a.plan else names
+    tasks = contracts.load_all(root, paths)
+    ordered = []
+    for path in paths:
+        if path.stem not in selected:
+            continue
+        plan = str(path.relative_to(root))
+        ordered.extend(contracts.plan_order([t for t in tasks.values() if t.plan == plan]))
+
+    home = factory_home()
+    if not (home / "factory.db").is_file():
+        print("no open factory PRs")
+        return 0
+    db = open_db(home, readonly=True)
+    printed = 0
+    try:
+        for task in ordered:
+            row = db.task(task.id)
+            if row is None or not row["pr_url"]:
+                continue
+            pr = _pr_state(row["pr_url"])
+            if pr.get("state") != "OPEN":
+                continue
+            verdict, reason = land.readiness(row, task, pr, cfg)
+            detail = "ready" if verdict == "ready" else \
+                f"waits: {reason}" if verdict == "waits" else f"waits for a human: {reason}"
+            print(f"{task.id:<30} {detail} {row['pr_url']}")
+            printed += 1
+    finally:
+        db.close()
+    if not printed:
+        print("no open factory PRs")
+    return 0
 
 
 def _detail(db, r) -> str:
@@ -1287,6 +1339,13 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("-f", "--follow", action="store_true", help="keep printing until the run ends")
     s.add_argument("-n", "--lines", type=int, default=0, help="only the last N lines first")
     s.set_defaults(fn=cmd_logs)
+
+    s = sub.add_parser("land", help="show which open factory PRs are ready to land on the trunk")
+    s.add_argument("--dry-run", action="store_true", help="report readiness without changing the board or GitHub")
+    s.add_argument("--plan", action="append", default=[], metavar="NAME",
+                   help="only this plan (a plan's file name without .md); repeatable")
+    s.add_argument("--no-sandbox", action="store_true")
+    s.set_defaults(fn=cmd_land)
 
     s = sub.add_parser("status", help="task board, grouped by plan")
     s.add_argument("plan", nargs="?", help="only this plan (name or path)")
