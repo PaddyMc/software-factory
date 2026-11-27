@@ -74,3 +74,51 @@ def test_project_rules_describe_the_configured_gates():
                                    "e2e": {"dir": "tests/e2e", "language": "python"}}))
     assert "`docs/sessions/<today>-<task id>.md`" in rules and "`def test_*`" in rules and "`tests/e2e/`" in rules
     assert "`make test`" in rules
+
+
+def test_trunk_and_land_are_read_with_their_defaults():
+    cfg = C.parse({})
+    assert cfg.trunk is None and cfg.land is None
+
+    cfg = C.parse({"trunk": "dev"})
+    assert cfg.trunk == "dev" and cfg.land is None
+
+    cfg = C.parse({"trunk": "dev", "land": {}})
+    assert cfg.land.release == "main" and cfg.land.method == "squash"
+    assert cfg.land.max_holds == 2 and cfg.land.require_checks is True
+
+    cfg = C.parse({"trunk": "dev", "land": {"release": "release", "max_holds": 0,
+                                           "require_checks": False}})
+    assert cfg.land.release == "release" and cfg.land.max_holds == 0
+    assert cfg.land.require_checks is False
+    for method in ("squash", "merge", "rebase"):
+        assert C.parse({"trunk": "dev", "land": {"method": method}}).land.method == method
+
+
+def test_land_needs_a_trunk_that_is_not_the_release_branch():
+    with pytest.raises(C.ConfigError,
+                       match="land needs trunk: the branch factory PRs target and factory land merges into"):
+        C.parse({"land": {}})
+    with pytest.raises(C.ConfigError, match=r"land\.release must differ from trunk \(dev\): "
+                                             "landing would merge into the release branch unattended"):
+        C.parse({"trunk": "dev", "land": {"release": "dev"}})
+
+
+@pytest.mark.parametrize("land, error", [
+    ({"method": "fast-forward"}, "land.method must be squash, merge or rebase"),
+    ({"colour": "red"}, "land: unknown key"),
+    ({"max_holds": -1}, "max_holds"),
+    ({"max_holds": "two"}, "max_holds"),
+    ({"require_checks": "yes"}, "require_checks"),
+])
+def test_bad_land_settings_are_rejected(land, error):
+    with pytest.raises(C.ConfigError, match=error):
+        C.parse({"trunk": "dev", "land": land})
+
+
+def test_land_is_a_role_for_models_and_max_steps():
+    assert "land" in C.ROLES
+    assert C.parse({"models": {"land": "openrouter:z-ai/glm-5.3"}}).models == {"land": "openrouter:z-ai/glm-5.3"}
+    assert C.parse({"max_steps": {"land": 3}}).max_steps == {"land": 3}
+    with pytest.raises(C.ConfigError, match=r"unknown role\(s\) pilot \(roles: .*\bland\b\)"):
+        C.parse({"models": {"pilot": "x"}})

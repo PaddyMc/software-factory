@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 CONFIG_PATH = ".factory/config.yaml"
 E2E_LANGUAGES = ("rust", "python")
-ROLES = ("plan", "test", "build", "review", "verify", "select")
+ROLES = ("plan", "test", "build", "review", "verify", "select", "land")
 
 
 class ConfigError(ValueError):
@@ -65,6 +65,15 @@ class SandboxConfig:
 
 
 @dataclass(frozen=True)
+class LandConfig:
+    """How factory land merges into the trunk and promotes it to the release branch."""
+    release: str = "main"
+    method: str = "squash"
+    max_holds: int = 2
+    require_checks: bool = True
+
+
+@dataclass(frozen=True)
 class Config:
     name: str = "default"
     home: str | None = None                      # $FACTORY_HOME default; else ~/.local/share/factory/<name>
@@ -84,6 +93,8 @@ class Config:
     flow: str = "default"                                     # the flow `factory run` uses; a key of `flows`
     flows: dict[str, Flow] = field(default_factory=_default_flows)   # name -> flow; default and strict are built in
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
+    trunk: str | None = None                   # branch factory PRs build on and target; else the checkout's branch
+    land: LandConfig | None = None              # landing and promotion settings; absent, neither command runs
 
     def dependency_dirs(self, home: Path | None = None) -> tuple[Path, ...]:
         home = home or Path.home()
@@ -129,7 +140,7 @@ def parse(data: dict | None, default_name: str = "default") -> Config:
         raise ConfigError(f"{CONFIG_PATH} must be a mapping")
     _known(d, {f for f in Config.__dataclass_fields__}, CONFIG_PATH)
     kw: dict = {"name": str(d.get("name") or default_name)}
-    for key in ("home", "session_log"):
+    for key in ("home", "session_log", "trunk"):
         if d.get(key) is not None:
             kw[key] = str(d[key])
     for key in ("plans", "exclude", "test_paths", "guidance", "unit_tests", "lockfiles", "denied_commands",
@@ -151,6 +162,29 @@ def parse(data: dict | None, default_name: str = "default") -> Config:
                 raise ConfigError("max_steps values must be positive integers")
             v = {k: int(x) for k, x in v.items()}
         kw[key] = v
+    if d.get("land") is not None:
+        land = d["land"]
+        if not isinstance(land, dict):
+            raise ConfigError("land must be a mapping")
+        _known(land, {"release", "method", "max_holds", "require_checks"}, "land")
+        release = str(land.get("release") or "main")
+        method = land.get("method", "squash")
+        if method not in ("squash", "merge", "rebase"):
+            raise ConfigError("land.method must be squash, merge or rebase")
+        max_holds = land.get("max_holds", 2)
+        if type(max_holds) is not int or max_holds < 0:
+            raise ConfigError("land.max_holds must be a non-negative integer")
+        require_checks = land.get("require_checks", True)
+        if type(require_checks) is not bool:
+            raise ConfigError("land.require_checks must be a boolean")
+        trunk = kw.get("trunk")
+        if trunk is None:
+            raise ConfigError("land needs trunk: the branch factory PRs target and factory land merges into")
+        if release == trunk:
+            raise ConfigError(f"land.release must differ from trunk ({trunk}): "
+                              "landing would merge into the release branch unattended")
+        kw["land"] = LandConfig(release=release, method=method, max_holds=max_holds,
+                                require_checks=require_checks)
     from . import flows as F                                  # lazy: flows.py imports ConfigError from this module
     defined = F.parse_flows(d["flows"]) if d.get("flows") is not None else {}
     kw["flows"] = {**defined, "default": F.DEFAULT, "strict": F.STRICT}  # the built-in flows always exist
