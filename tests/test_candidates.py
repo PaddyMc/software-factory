@@ -491,7 +491,8 @@ def test_the_selector_sees_candidates_in_a_seeded_order(factory_repo, home, fake
     db = open_db(home)
     select_run = next(r for r in db.runs("demo-t01") if r["role"] == "select")
     message = plays["_selector_seen"][0][-1]
-    order = list(dict.fromkeys(int(n) for n in re.findall(r"(?i)\bcandidate (\d+)\b", message)))
+    # Only headings count: an all-numeric SHA in a clean gate's "candidate SHA" detail is not a candidate number.
+    order = list(dict.fromkeys(int(n) for n in re.findall(r"(?im)^## candidate (\d+)\b", message)))
     expected = [1, 2, 3]
     random.Random("demo-t01").shuffle(expected)            # the task id is the shuffle's seed
     assert order == expected
