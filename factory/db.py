@@ -16,7 +16,8 @@ from .contracts import Task
 
 STATUSES = ("queued", "planning", "building", "reviewing", "verifying", "pr_open", "conflict", "ci_failed",
             "changes_requested", "merged", "failed", "abandoned")
-ROLES = ("plan", "test", "build", "select", "resolve", "ci", "human_review", "review", "verify", "pr", "merge")
+ROLES = ("plan", "test", "build", "select", "resolve", "ci", "human_review", "review", "verify", "pr", "merge",
+         "land")
 ACTIVE = ("planning", "building", "reviewing", "verifying")
 
 SCHEMA = """
